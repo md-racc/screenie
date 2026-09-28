@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screenie"
+version = "0.1.0"
+description = "Keyboard-driven screenshots for Hyprland (Python prototype; Rust port planned)"
+requires-python = ">=3.11"
+# PyGObject (GTK 3 + gtk-layer-shell) and pycairo come from the system
+# packages: python-gobject, gtk-layer-shell, python-cairo.
+dependencies = []
+
+[project.scripts]
+screenie = "screenie.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+extraPaths = ["src"]
