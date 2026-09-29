@@ -1,37 +1,74 @@
 """The frozen frame: one grim capture of the whole layout, and every image
-operation on it (filters, crops, pixel reads, censoring).
+operation on it (view filters, crops, pixel reads, the layer stack).
 
-Filters are built from cairo blend modes rather than per-pixel maths, which
-would be too slow in Python to preview live: a saturation blend with grey
-drops colour, overlay-blending the image onto itself is an S-curve around
-mid-grey, and a DIFFERENCE paint with white inverts.
+Three pictures, one per stage:
+- base: the capture, never modified;
+- committed: the capture with the committed layers applied, in order;
+- surface (the view): committed plus the open, pending layer. Everything
+  that shows or reads the picture (display, lenses, eyedropper, outputs)
+  reads the view.
+
+The view is rebuilt lazily (at most once per frame, however many edits
+land in between) and only inside the open layer's clip, from cached
+snapshots of the unchanged ops below the one that changed: adjusting the
+top of a filter stack doesn't re-run the rest.
+
+View filters (the lenses') are cairo blend modes over the box only: a
+saturation blend with grey drops colour, overlay-blending the picture onto
+itself is an S-curve around mid-grey, a DIFFERENCE paint with white inverts.
 """
+
+import math
 
 import cairo
 
+from .layers import LayerEntry
+
 FILTERS = ["off", "grey", "invert", "contrast"]
-CONTRAST_MAX = 4       # past ~2 the S-curve starts eating letter strokes
-PIXELATE_BLOCK = 10    # censor pixelation block size (logical px)
+VIEW_CONTRAST = 2  # S-curve passes + 1 for the contrast view filter
+SNAPSHOTS = 12     # pending-layer prefix snapshots kept (clip-sized each)
 
 
-class Censor:
-    """An applied censor, as an undo entry for the main selection."""
+def rnd(v):
+    """Round half up: the one rule for logical -> frame pixels, so a box's
+    crop, its edge pixels and the cursor pixel always agree (Python's round
+    is half-to-even, and at 1.5x scale edges land on .5 all the time)."""
+    return math.floor(v + 0.5)
 
-    def __init__(self, frame, px_rect, backup, rect):
-        self.frame, self.px_rect, self.backup, self.rect = frame, px_rect, backup, rect
 
-    def undo(self):
-        self.frame.restore(self.px_rect, self.backup)
-        return self.rect
+def copy_of(surface):
+    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, surface.get_width(), surface.get_height())
+    cr = cairo.Context(out)
+    cr.set_source_surface(surface, 0, 0)
+    cr.paint()
+    return out
+
+
+def cut(surface, px_rect):
+    """A copy of px_rect of surface."""
+    x, y, w, h = px_rect
+    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, w), max(1, h))
+    cr = cairo.Context(out)
+    cr.set_source_surface(surface, -x, -y)
+    cr.paint()
+    return out
 
 
 class Frame:
     def __init__(self, surface, layout_rect):
-        self.surface = surface
+        self.base = self.committed = surface
+        self.layers = []
+        self.pending = None
         self.ox, self.oy, self.W, self.H = layout_rect
         # grim renders the layout at the highest monitor scale.
         self.k = surface.get_width() / self.W
-        self._processed = {}  # contrast level -> processed full frame
+        self.version = 0       # bumps whenever the view changes
+        self._view = surface
+        self._dirty = False
+        self._snapshots = []   # [(clip px rect, op keys so far, patch)]
+        self._processed = {}   # (level, px rect) -> region, for this version
+        self._previews = {}    # op keys -> (patch, px rect), for this version
+        self._isolated = {}    # layer id -> (patch, px rect)
 
     # --- coordinates ----------------------------------------------------------
 
@@ -39,53 +76,182 @@ class Frame:
         """Global logical rect -> pixel rect in the frame."""
         x, y, w, h = r
         k = self.k
-        x0, y0 = round((x - self.ox) * k), round((y - self.oy) * k)
-        return x0, y0, round((x - self.ox + w) * k) - x0, round((y - self.oy + h) * k) - y0
+        x0, y0 = rnd((x - self.ox) * k), rnd((y - self.oy) * k)
+        x1, y1 = rnd((x + w - self.ox) * k), rnd((y + h - self.oy) * k)
+        return x0, y0, max(0, x1 - x0), max(0, y1 - y0)
 
     def to_global(self, px, py):
         """Centre of a frame pixel, in global logical coordinates."""
         return self.ox + (px + 0.5) / self.k, self.oy + (py + 0.5) / self.k
 
-    def pixel_under(self, gx, gy, inside_right=False, inside_bottom=False):
-        """The frame pixel under a global point. A point on a box's far edge
-        belongs to the pixel just inside it (inside_right / inside_bottom)."""
-        w, h = self.surface.get_width(), self.surface.get_height()
-        px = int((gx - self.ox) * self.k - (1e-6 if inside_right else 0))
-        py = int((gy - self.oy) * self.k - (1e-6 if inside_bottom else 0))
+    def clamp_px(self, px, py):
+        w, h = self.base.get_width(), self.base.get_height()
         return max(0, min(px, w - 1)), max(0, min(py, h - 1))
 
+    def pixel_under(self, gx, gy):
+        """The frame pixel under a global point (a click, a cursor)."""
+        return self.clamp_px(math.floor((gx - self.ox) * self.k),
+                             math.floor((gy - self.oy) * self.k))
+
+    def edge_pixel(self, gx, gy, right, bottom):
+        """The pixel at a box corner that's inside the box: a left / top
+        edge's own pixel, or the one just before a right / bottom edge, by
+        the same rounding as to_image, so it's always inside the crop."""
+        px = rnd((gx - self.ox) * self.k) - (1 if right else 0)
+        py = rnd((gy - self.oy) * self.k) - (1 if bottom else 0)
+        return self.clamp_px(px, py)
+
     def rgb(self, px, py):
-        self.surface.flush()
-        data, stride = self.surface.get_data(), self.surface.get_stride()
+        s = self.surface
+        s.flush()
+        data, stride = s.get_data(), s.get_stride()
         i = py * stride + px * 4
         b, g, r = data[i:i + 3]  # cairo ARGB32 is little-endian BGRA
         return r, g, b
 
-    # --- filters ----------------------------------------------------------------
+    # --- the view (committed + the pending layer) ------------------------------
 
-    def processed(self, level):
-        """The whole frame in greyscale with level-1 contrast passes, cached.
-        Overlay is symmetric, so inverting afterwards commutes with it."""
-        if level not in self._processed:
-            w, h = self.surface.get_width(), self.surface.get_height()
-            out = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-            cr = cairo.Context(out)
-            cr.set_source_surface(self.surface, 0, 0)
+    @property
+    def surface(self):
+        if self._dirty:
+            self._rebuild_view()
+        return self._view
+
+    def matrix(self, px_offset=(0, 0)):
+        """Global logical coords -> frame pixels (minus px_offset)."""
+        k = self.k
+        return cairo.Matrix(k, 0, 0, k, -self.ox * k - px_offset[0], -self.oy * k - px_offset[1])
+
+    def _changed(self):
+        self.version += 1
+        self._processed.clear()
+        self._previews.clear()
+
+    def set_pending(self, layer):
+        """The open layer changed (opened, edited, closed). The view is rebuilt
+        when it's next read."""
+        self.pending = layer
+        self._dirty = True
+        self._changed()
+
+    def _clip_px(self, clip):
+        x, y, w, h = self.to_image(clip)
+        W, H = self.base.get_width(), self.base.get_height()
+        x, y = max(0, x), max(0, y)
+        return x, y, max(0, min(w, W - x)), max(0, min(h, H - y))
+
+    def _rebuild_view(self):
+        self._dirty = False
+        layer = self.pending
+        if not layer or not layer.ops:
+            self._view = self.committed
+            return
+        clip = self._clip_px(layer.clip)
+        keys = [op.key() for op in layer.ops]
+        # the longest run of ops that still match a snapshot
+        start, patch = 0, None
+        for c, ks, p in self._snapshots:
+            if c == clip and len(ks) > start and keys[:len(ks)] == ks:
+                start, patch = len(ks), p
+        patch = copy_of(patch) if patch is not None else cut(self.committed, clip)
+        m = self.matrix(clip[:2])
+        snaps = [s for s in self._snapshots if s[0] == clip and keys[:len(s[1])] == s[1]]
+        for i in range(start, len(keys)):
+            layer.apply(patch, m, only=[layer.ops[i]])
+            snaps.append((clip, keys[:i + 1], copy_of(patch)))
+        self._snapshots = snaps[-SNAPSHOTS:]
+        view = copy_of(self.committed)
+        cr = cairo.Context(view)
+        cr.set_source_surface(patch, clip[0], clip[1])
+        cr.paint()
+        view.flush()
+        self._view = view
+
+    def rebuild(self):
+        """The committed picture from scratch: the capture, then every visible
+        layer in order; then the view."""
+        self.committed = self.base
+        if any(not l.hidden for l in self.layers):
+            self.committed = copy_of(self.base)
+            for layer in self.layers:
+                if not layer.hidden:
+                    layer.apply(self.committed, self.matrix())
+        self._snapshots = []
+        self.set_pending(self.pending)
+
+    def add_layer(self, layer, main_rect):
+        """Commit a layer onto the stack (closing it); returns its undo entry."""
+        self.layers.append(layer)
+        if self.committed is self.base:
+            self.committed = copy_of(self.base)
+        layer.apply(self.committed, self.matrix())
+        self._snapshots = []
+        self.set_pending(None)
+        return LayerEntry(self, layer, main_rect)
+
+    def remove_layer(self, layer):
+        self.layers.remove(layer)
+        self._isolated.pop(id(layer), None)
+        self.rebuild()
+
+    def isolated(self, layer):
+        """Layer view: the capture with only this layer applied, over the
+        layer's clip (hiding what was below and above it): (patch, px rect),
+        cached."""
+        if id(layer) not in self._isolated:
+            clip = self._clip_px(layer.clip)
+            patch = cut(self.base, clip)
+            layer.apply(patch, self.matrix(clip[:2]))
+            self._isolated[id(layer)] = (patch, clip)
+        return self._isolated[id(layer)]
+
+    def preview(self, cr, layer):
+        """Draw ops (the item being edited) over the view, into cr (global
+        coords): recomputed only over the ops' own area, and only when they
+        change (so every monitor reuses one render)."""
+        keys = tuple(op.key() for op in layer.ops)
+        if not keys:
+            return
+        if keys not in self._previews:
+            area = layer.bbox()
+            px = self._clip_px(area) if area else (0, 0, 0, 0)
+            if px[2] < 1 or px[3] < 1:
+                self._previews[keys] = None
+            else:
+                patch = cut(self.surface, px)
+                layer.apply(patch, self.matrix(px[:2]))
+                self._previews[keys] = (patch, px)
+        hit = self._previews[keys]
+        if hit:
+            patch, (x, y, _, _) = hit
+            cr.save()
+            cr.translate(self.ox, self.oy)
+            cr.scale(1 / self.k, 1 / self.k)
+            cr.set_source_surface(patch, x, y)
             cr.paint()
+            cr.restore()
+
+    # --- view filters (the lenses') and crops -----------------------------------
+
+    def processed(self, level, px_rect):
+        """px_rect of the view in greyscale with level-1 contrast passes: a
+        region surface, cached for this version of the view."""
+        key = (level, tuple(px_rect))
+        if key not in self._processed:
+            out = cut(self.surface, px_rect)
+            w, h = out.get_width(), out.get_height()
+            cr = cairo.Context(out)
             cr.set_operator(cairo.OPERATOR_HSL_SATURATION)
             cr.set_source_rgb(0.5, 0.5, 0.5)
             cr.paint()
             for _ in range(level - 1):
-                copy = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
-                c2 = cairo.Context(copy)
-                c2.set_source_surface(out, 0, 0)
-                c2.paint()
+                snap = cut(out, (0, 0, w, h))
                 cr.set_operator(cairo.OPERATOR_OVERLAY)
-                cr.set_source_surface(copy, 0, 0)
+                cr.set_source_surface(snap, 0, 0)
                 cr.paint()
             out.flush()
-            self._processed[level] = out
-        return self._processed[level]
+            self._processed[key] = out
+        return self._processed[key]
 
     @staticmethod
     def is_dark(surface, px_rect):
@@ -104,22 +270,20 @@ class Frame:
                 n += 1
         return total / n < 128
 
-    def source(self, px_rect, filt, contrast):
-        """(full-frame surface, invert?) for a filter over px_rect."""
-        if filt == "grey":
-            return self.processed(1), False
-        if filt == "invert":
-            return self.surface, True
-        if filt == "contrast":  # the OCR-tuned one: dark backgrounds flip
-            pp = self.processed(contrast)
-            return pp, self.is_dark(pp, px_rect)
-        return self.surface, False
+    def source(self, px_rect, filt):
+        """(surface, its x, its y, invert?) for a view filter over px_rect."""
+        x, y, w, h = px_rect
+        if filt in ("grey", "contrast") and w >= 1 and h >= 1:
+            pp = self.processed(1 if filt == "grey" else VIEW_CONTRAST, px_rect)
+            dark = filt == "contrast" and self.is_dark(pp, (0, 0, w, h))
+            return pp, x, y, dark
+        return self.surface, 0, 0, filt == "invert"
 
-    def paint(self, cr, px_rect, filt="off", contrast=1, sharp=False):
-        """Paint the filtered frame into cr, which must be in frame-pixel
-        coordinates and clipped by the caller."""
-        src, invert = self.source(px_rect, filt, contrast)
-        cr.set_source_surface(src, 0, 0)
+    def paint(self, cr, px_rect, filt="off", sharp=False):
+        """Paint the view, view-filtered over px_rect, into cr (frame-pixel
+        coordinates, clipped by the caller)."""
+        src, sx, sy, invert = self.source(px_rect, filt)
+        cr.set_source_surface(src, sx, sy)
         cr.get_source().set_filter(cairo.FILTER_NEAREST if sharp else cairo.FILTER_GOOD)
         cr.paint()
         if invert:
@@ -128,75 +292,28 @@ class Frame:
             cr.paint()
             cr.set_operator(cairo.OPERATOR_OVER)
 
-    def crop(self, r, filt="off", contrast=1):
-        """The rect at full resolution, filtered."""
+    def crop(self, r, filt="off"):
+        """The rect of the view at full resolution (at least 1x1)."""
         x, y, w, h = self.to_image(r)
+        w, h = max(1, w), max(1, h)
         out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         cr = cairo.Context(out)
         cr.translate(-x, -y)
-        self.paint(cr, (x, y, w, h), filt, contrast)
-        return out
-
-    def ocr_crop(self, r, filt, contrast):
-        # With no useful filter chosen, OCR still gets greyscale + dark-flip:
-        # it measured cleaner and faster than raw pixels.
-        if filt in ("off", "invert"):
-            return self.crop(r, "contrast", 1)
-        return self.crop(r, filt, contrast)
-
-    # --- censoring ------------------------------------------------------------
-
-    def pixelated(self, px_rect):
-        """px_rect downsampled to PIXELATE_BLOCK blocks: (small surface,
-        scale back up). Paint it with FILTER_NEAREST to get the blocks."""
-        x, y, w, h = px_rect
-        block = max(2, round(PIXELATE_BLOCK * self.k))
-        sw, sh = max(1, -(-w // block)), max(1, -(-h // block))
-        small = cairo.ImageSurface(cairo.FORMAT_ARGB32, sw, sh)
-        sc = cairo.Context(small)
-        sc.scale(sw / w, sh / h)
-        sc.set_source_surface(self.surface, -x, -y)
-        sc.get_source().set_filter(cairo.FILTER_GOOD)
-        sc.paint()
-        return small, (w / sw, h / sh)
-
-    def paint_censor(self, cr, px_rect, kind):
-        """Paint a censor over px_rect into cr (frame-pixel coordinates);
-        used both for the live preview and to apply it."""
-        x, y, w, h = px_rect
-        if w < 1 or h < 1:
-            return
-        cr.save()
         cr.rectangle(x, y, w, h)
         cr.clip()
-        if kind == "black":
-            cr.set_source_rgb(0, 0, 0)
-            cr.paint()
-        else:
-            small, (sx, sy) = self.pixelated(px_rect)
-            cr.translate(x, y)
-            cr.scale(sx, sy)
-            cr.set_source_surface(small, 0, 0)
-            cr.get_source().set_filter(cairo.FILTER_NEAREST)
-            cr.paint()
-        cr.restore()
+        self.paint(cr, (x, y, w, h), filt)
+        return out
 
-    def censor(self, r, kind, main_rect):
-        """Burn a censor into the frame; returns its undo entry."""
-        px_rect = self.to_image(r)
-        x, y, w, h = px_rect
-        backup = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, w), max(1, h))
-        bc = cairo.Context(backup)
-        bc.set_source_surface(self.surface, -x, -y)
-        bc.paint()
-        self.paint_censor(cairo.Context(self.surface), px_rect, kind)
-        self.surface.flush()
-        self._processed.clear()
-        return Censor(self, px_rect, backup, list(main_rect))
-
-    def restore(self, px_rect, backup):
-        cr = cairo.Context(self.surface)
-        cr.set_source_surface(backup, px_rect[0], px_rect[1])
-        cr.paint()
-        self.surface.flush()
-        self._processed.clear()
+    def ocr_crop(self, r):
+        """For OCR: greyscale with dark backgrounds flipped; it measured
+        cleaner and faster than raw pixels."""
+        x, y, w, h = self.to_image(r)
+        w, h = max(1, w), max(1, h)
+        grey = self.processed(1, (x, y, w, h))
+        out = copy_of(grey)
+        if self.is_dark(grey, (0, 0, w, h)):
+            cr = cairo.Context(out)
+            cr.set_operator(cairo.OPERATOR_DIFFERENCE)
+            cr.set_source_rgb(1, 1, 1)
+            cr.paint()
+        return out

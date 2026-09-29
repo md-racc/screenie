@@ -1,161 +1,115 @@
-"""Select: the normal mode. Edit the box, look at it, finish."""
+"""Select: the base mode. Edit the box, look at it, finish."""
 
 from .. import draw
 from ..app import Action
-from ..geometry import STEP, VEC
+from ..keys import AMOUNT, CONFIRM, INC, hex_colour
 from ..output import decode_code, notify
-from .base import Mode
-
-# Box repeat speed, in 5px steps per second: start, and top after the ramp.
-RATES = (20, 300)
+from .box import BoxMode
 
 
-class Select(Mode):
+class Select(BoxMode):
     name = "select"
-    outline_rgb = (1, 1, 1)
 
-    def __init__(self, app, sel):
-        super().__init__(app)
-        self.sel = sel
-        self.drag = None  # (x0, y0, moved?)
-
-    @property
-    def moving(self):
-        return self.app.shift or self.app.space
-
-    # --- box editing ----------------------------------------------------------
-
-    def on_dir(self, d):
-        a, sel = self.app, self.sel
-        sel.remember()
-        if a.ctrl:  # one-shot jumps, no repeat
-            sel.jump(d, self.moving)
-        elif a.alt:
-            sel.halve(d)
-        else:
-            sel.step(d, STEP, self.moving)  # a tap is exactly one step
-
-    def rates(self):
-        return None if self.app.ctrl or self.app.alt else RATES
-
-    def on_repeat(self, dirs, n):
-        if self.moving:  # one combined vector, opposite keys cancel
-            dx = sum(VEC[d][0] for d in dirs)
-            dy = sum(VEC[d][1] for d in dirs)
-            self.sel.move(dx * n * STEP, dy * n * STEP)
-        else:
-            for d in dirs:
-                self.sel.step(d, n * STEP, False)
-
-    def edit_key(self, name):
-        """Box keys shared with Censor. Returns True if handled."""
-        sel = self.sel
-        if name in ("o", "O"):
-            sel.swap_corner(both=name == "o")
-        elif name in ("w", "b", "braceright", "braceleft"):
-            sel.remember()
-            sel.cursor_jump({"w": "R", "b": "L", "braceright": "B", "braceleft": "T"}[name])
-        elif name in ("0", "dollar", "g", "G"):
-            sel.remember()
-            sel.cursor_jump({"0": "L", "dollar": "R", "g": "T", "G": "B"}[name], to_limit=True)
-        elif name in ("Tab", "ISO_Left_Tab"):
-            sel.remember()
-            sel.next_window(-1 if name == "ISO_Left_Tab" or self.app.shift else 1)
-        elif name == "a":
-            sel.remember()
-            sel.zoom_out()
-        elif name == "c":
-            sel.toggle_center()
-        elif name == "u":
-            sel.undo()
-        elif name in ("z", "Z"):
-            from .loupe import Loupe
-            self.app.push(Loupe(self.app, sel))
-        else:
-            return self.app.view_key(name)
-        return True
+    # --- keys -------------------------------------------------------------------
 
     def on_key(self, name):
         a, sel = self.app, self.sel
         if self.edit_key(name):
             return
-        if name in ("i", "e", "x") and sel.empty():
+        needs_box = ("i", "e", "x", "a", "f", "y", "P", "Q", *CONFIRM)
+        if name in needs_box and not self.capturable():
+            a.note = "empty box"
             return
-        if name == "i":
-            from .insert import Insert
-            a.push(Insert(a, sel))
-        elif name == "e":
-            from .enhance import Enhance
-            a.push(Enhance(a, sel))
-        elif name == "x":
-            from .censor import Censor
-            a.push(Censor(a, sel))
-        elif name in ("Return", "KP_Enter", "y", "P"):
-            if not sel.empty():
-                kind = {"y": "ocr", "P": "pin"}.get(name, "image")
-                a.finish(Action(kind, list(sel.rect)))
+        if name in AMOUNT:
+            # the box's scope: window <-> monitor <-> everything (the wheel too)
+            sel.remember()
+            sel.zoom(1 if name in INC else -1)
+        elif len(name) == 1 and name in "123456789":  # the layer view, at that layer
+            if a.frame.layers:
+                a.push(a.make("layers", sel, index=int(name) - 1))
+            else:
+                a.note = "no layers yet"
+        elif name == "i":
+            a.push(a.make("insert", sel))
+        elif name in ("x", "a", "f"):  # a build tool: opens a layer
+            a.start_tool(a.tool(name, sel))
+        elif name in (*CONFIRM, "y", "P"):
+            kind = {"y": "ocr", "P": "pin"}.get(name, "image")
+            a.finish(Action(kind, list(sel.rect)))
         elif name == "p":
-            gx, gy = sel.cursor_point()
-            px, py = a.frame.pixel_under(gx, gy, sel.cur[0] == "R" and not sel.center,
-                                         sel.cur[1] == "B" and not sel.center)
-            a.finish(Action("text", text="#%02x%02x%02x" % a.frame.rgb(px, py),
+            a.finish(Action("text", text=hex_colour(a.frame.rgb(*self.cursor_px())),
                             note="Colour copied"))
         elif name == "Q":
-            code = None if sel.empty() else decode_code(a.frame.crop(sel.rect))
+            code = decode_code(a.frame.crop(sel.rect))
             if code:
                 a.finish(Action("text", text=code, note="Code copied"))
             else:
                 notify("No QR / barcode found", "Adjust the box and try again")
-        elif name in ("Escape", "q"):
+        elif name == "Escape":
             a.finish(None)
 
-    # --- mouse ----------------------------------------------------------------
+    def capturable(self):
+        """At least one output pixel each way (a box can be under a pixel
+        wide, from halving or a tiny drag)."""
+        _, _, pw, ph = self.app.frame.to_image(self.sel.rect)
+        return pw >= 1 and ph >= 1
 
-    def on_press(self, button, gx, gy):
-        if button == 1:
-            self.sel.remember()
-            self.drag = (gx, gy, False)
-        elif button == 3:
-            self.cancel()
+    # --- mouse ------------------------------------------------------------------
 
-    def cancel(self):
-        self.app.finish(None)
+    def click(self, gx, gy):
+        """A click snaps to the window under the pointer, or the monitor if
+        there's no window there."""
+        r = self.sel.window_at(gx, gy) or self.sel.nearest(self.sel.monitors, gx, gy)
+        self.sel.set_rect(r)
 
-    def on_motion(self, gx, gy):
-        if not self.drag:
-            return
-        x0, y0, moved = self.drag
-        if moved or abs(gx - x0) + abs(gy - y0) > 3:
-            self.drag = (x0, y0, True)
-            # Unrounded: the crop snaps to physical pixels, nothing coarser.
-            self.sel.drag_to(x0, y0, gx, gy)
-
-    def on_release(self, button, gx, gy):
-        drag, self.drag = self.drag, None
-        if button == 1 and drag and not drag[2]:  # a click: snap to that window
-            r = self.sel.window_at(gx, gy)
-            if r:
-                self.sel.set_rect(r)
-
-    # --- drawing --------------------------------------------------------------
+    # --- drawing ------------------------------------------------------------------
 
     def draw(self, cr, mon):
-        a, f, sel = self.app, self.app.frame, self.sel
-        x, y, w, h = sel.rect
+        a, sel = self.app, self.sel
         draw.dim_outside(cr, a.layout.rect, sel.rect)
-        if a.filter != "off" and w >= 1 and h >= 1:  # live filter inside the box
-            cr.save()
-            cr.rectangle(x, y, w, h)
-            cr.clip()
-            draw.in_frame(cr, f)
-            f.paint(cr, f.to_image(sel.rect), a.filter, a.contrast)
-            cr.restore()
         active = a.mode is self
-        draw.outline(cr, sel.rect, (*self.outline_rgb, 0.9 if active else 0.4))
-        _, _, pw, ph = f.to_image(sel.rect)
-        draw.label(cr, x + 4, y + h - 4, self.label(pw, ph))
+        draw.outline(cr, sel.rect, (1, 1, 1, 0.9 if active else 0.5))
         if active:
-            draw.marker(cr, *sel.cursor_point(), self.outline_rgb)
+            draw.marker(cr, *sel.cursor_point())
+
+    def draw_status(self, cr, avoid=()):
+        """The one status tag, on the bottom of the main box (see
+        draw.place). The App draws it after every mode, so previews never
+        cover it. Returns its rect, so the tags placed after it keep clear."""
+        a = self.app
+        _, _, pw, ph = a.frame.to_image(self.sel.rect)
+        ink = a.mode.shows_ink  # the ink, as a swatch too
+        rect, ends = draw.block(cr, [self.label(pw, ph)], self.sel.rect, draw.STATUS_SPOTS,
+                                a.monitor_rects, avoid=avoid, extra=18 if ink else 0)
+        if ink:
+            draw.swatch(cr, ends[0] + 5, rect[1] + draw.ROW - 2, a.ink[1])
+        return rect
 
     def label(self, pw, ph):
-        return f"{pw}×{ph}" + ("  centre" if self.sel.center else "") + self.app.tags()
+        """The status tag: the current mode (vim-style), the box size, the
+        active cursor's pixel, and whatever the mode is working with."""
+        a = self.app
+        text = f"{a.mode.name.upper()}  {pw}×{ph}"
+        pos = a.mode.cursor_px()  # whichever cursor is active
+        text += f"  ({pos[0]},{pos[1]})" if pos else ""
+        text += "  centre" if self.sel.center else ""
+        if a.mode.shows_ink:
+            text += f"  {a.ink[0]} {a.ink_width}px"
+        if a.layer is not None:
+            n = len(a.layer.ops)
+            text += f"  layer +{n}" if n else "  layer"
+        extra = a.mode.status() if a.mode is not self else ""
+        text += f"  {extra}" if extra else ""
+        n = len(a.layer.ops) if a.layer is not None else 0
+        if a.discard_armed:
+            text += f"  Esc again to discard {n}"
+        if a.quit_armed:
+            text += f"  q again to quit, discarding {n}"
+        if a.note:
+            text += f"  ({a.note})"
+        return text
+
+    def legend(self):
+        return ["o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  +/- scope  u undo",
+                "i insert  z loupe  e enhance  x censor  a annotate  f filter  1-9 layers",
+                "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit"]

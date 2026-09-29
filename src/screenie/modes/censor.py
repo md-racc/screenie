@@ -1,26 +1,35 @@
-"""Censor: entered with x. The main box freezes and a second box appears
-inside it: a text-height square at the centre of the main box, at the
-loupe's pixel if the loupe is on, or with its top-left on insert mode's
-cursor. It's edited with all the usual box keys and the mouse, and t swaps
-its type (pixelate / black bar).
+"""Censor: a build tool (x). Censors go into the open layer.
 
-Enter burns the censor into the frozen frame and returns to where you were
-(Enter again in the main box captures); x burns it and starts the next one
-right there, same type (multi-censor); Esc / right-click drops the current
-one. Each censor is one undo step in the main box."""
+The main box freezes and a censor box appears inside it: a text-height
+square at the centre of the main box, at the loupe's pixel if the loupe is
+on, or with its top-left on insert mode's cursor. It's edited with all the
+usual box keys and the mouse; t swaps its type (pixelate / bar), and
++ / - adjust it: how pixelated (block size, 4-40px, default 10) or the
+bar's shade (black to white, default black).
 
-from .. import draw
-from .select import Select
+    x          lock this censor into the layer, start the next where it was
+    a / f      lock it, switch to annotate / filter (same layer)
+    u          undo the last action on the layer
+    Enter      lock it and commit the layer
+    Esc        throw the layer away (nothing's committed until Enter)
+"""
+
+from ..keys import AMOUNT, INC
+from ..layers import PIXELATE_BLOCK, CensorOp, Layer
+from .box import BoxMode
+from .layer import BuildTool
 
 SIZE = 20  # starting square, logical px: about a line of UI text
-KINDS = ["pixelate", "black"]
+KINDS = ["pixelate", "bar"]
+# + / - per type: (step, min, max); the starting amounts are the defaults.
+AMOUNTS = {"pixelate": (2, 4, 40),   # block size, logical px (bigger: more pixelated)
+           "bar": (0.1, 0.0, 1.0)}   # shade, 0 black .. 1 white
 
 
-class Censor(Select):
+class Censor(BuildTool, BoxMode):
     name = "censor"
-    outline_rgb = (1, 0.55, 0.1)
 
-    def __init__(self, app, main, at=None, corner=None, kind="pixelate"):
+    def __init__(self, app, main, at=None, corner=None):
         """at: centre the square there (default: the box centre). corner:
         put its top-left there instead, from insert mode's cursor; either
         way the censor's own cursor starts bottom-right."""
@@ -29,50 +38,52 @@ class Censor(Select):
         else:
             cx, cy = at or main.centre()
             x, y = cx - SIZE / 2, cy - SIZE / 2
-        sel = app.selection([x, y, SIZE, SIZE], main.rect)
-        super().__init__(app, sel)
-        self.main, self.kind = main, kind
-        self.burned = 0  # censors locked in during this visit
+        super().__init__(app, app.selection([x, y, SIZE, SIZE], main.rect))
+        self.main, self.kind = main, "pixelate"
+        # each type remembers its own amount (across x and t)
+        self.amounts = {"pixelate": PIXELATE_BLOCK, "bar": 0.0}
 
-    def burn(self):
-        if not self.sel.empty():
-            a = self.app
-            self.main.history.append(a.frame.censor(self.sel.rect, self.kind, self.main.rect))
-            self.burned += 1
+    def repeatable(self, name):
+        return name in AMOUNT
+
+    def current(self):
+        if self.sel.empty():
+            return None
+        return CensorOp(self.sel.rect, self.kind, self.amounts[self.kind])
+
+    def describe(self):
+        v = self.amounts[self.kind]
+        if self.kind == "pixelate":
+            return f"pixelate {v}px"
+        return {0.0: "black bar", 1.0: "white bar"}.get(round(v, 1), f"grey bar {round(v * 100)}%")
+
+    def lock(self):
+        self.app.lock(self.current())
 
     def on_key(self, name):
         a = self.app
-        if self.edit_key(name):
+        if self.layer_key(name, "x", self.main) or self.edit_key(name):
             return
-        if name in ("Return", "KP_Enter"):
-            self.burn()
-            a.pop()
-        elif name == "Escape":
-            a.pop()
+        if name in AMOUNT:  # + / -: how pixelated, or the bar's shade
+            step, lo, hi = AMOUNTS[self.kind]
+            v = self.amounts[self.kind] + (step if name in INC else -step)
+            self.amounts[self.kind] = round(max(lo, min(hi, v)), 2)
         elif name == "t":  # swap this censor's type
             self.kind = KINDS[(KINDS.index(self.kind) + 1) % len(KINDS)]
-        elif name == "x":
-            # Multi-censor: lock this one in and start the next, same type,
-            # where this one is, without leaving.
+        elif name == "x":  # lock this one, start the next where it was
             cx, cy = self.sel.centre()
-            self.burn()
+            self.lock()
             self.sel = a.selection([cx - SIZE / 2, cy - SIZE / 2, SIZE, SIZE], self.main.rect)
 
-    def cancel(self):
-        self.app.pop()
-
     def draw(self, cr, mon):
-        a, f, sel = self.app, self.app.frame, self.sel
-        x, y, w, h = sel.rect
-        cr.save()  # live preview of the censor
-        draw.in_frame(cr, f)
-        f.paint_censor(cr, f.to_image(sel.rect), self.kind)
-        cr.restore()
-        draw.outline(cr, sel.rect, (*self.outline_rgb, 0.9))
-        _, _, pw, ph = f.to_image(sel.rect)
-        # Below the box: inside, it would cover what's being censored.
-        draw.label(cr, x, y + h + 24, f"{self.kind}  {pw}×{ph}"
-                   + ("  centre" if sel.center else "")
-                   + (f"  +{self.burned} done" if self.burned else ""))
-        if a.mode is self:
-            draw.marker(cr, *sel.cursor_point(), self.outline_rgb)
+        op = self.current()  # the censor being edited, over the layer so far
+        if op:
+            self.app.frame.preview(cr, Layer(self.main.rect, [op]))
+        self.draw_box(cr)
+
+    def status(self):
+        return f"{self.describe()}  {self.size_status()}"
+
+    def legend(self):
+        return ["t pixelate/bar  +/- amount  x next  a annotate  f filter",
+                "u undo  Enter commit  Esc discard   (box keys as in Select)"]

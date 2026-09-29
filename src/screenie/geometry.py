@@ -45,7 +45,7 @@ class Selection:
 
     bounds: the rect the box must stay inside (the whole layout for the main
     selection, the main box for a censor box). windows / monitors: rects for
-    Tab, zoom-out and neighbour jumps. targets: snap targets (snap_targets()).
+    scope (+/-) and neighbour jumps. targets: snap targets (snap_targets()).
     """
 
     def __init__(self, rect, bounds, windows, monitors, targets):
@@ -55,7 +55,6 @@ class Selection:
         self.cur = ["R", "B"]  # the corner h/j/k/l drive; anchor is opposite
         self.center = False
         self.history = []  # rects, or entries with .undo() -> rect
-        self.win_idx = 0
         self.clamp()
 
     # --- basics -------------------------------------------------------------
@@ -178,27 +177,70 @@ class Selection:
         else:
             self.cursor_by(d, px)
 
-    def next_target(self, value, axis, direction):
+    def next_target(self, value, axis, direction, targets=None, gap=GAP):
         # Nearest snap target past value in direction (+1/-1), ignoring any
-        # within GAP: those are the far side of the gap we're sitting in.
-        ts = [t for t in self.targets[axis] if (t - value) * direction > GAP]
+        # within gap: for window edges, those are the far side of the gap
+        # we're sitting in.
+        targets = self.targets if targets is None else targets
+        ts = [t for t in targets[axis] if (t - value) * direction > gap]
         if not ts:
             return None
         return min(ts) if direction > 0 else max(ts)
 
-    def snap_move(self, d):
-        """Ctrl+Shift+hjkl: slide until the leading or trailing edge snaps."""
+    def snap_move(self, d, targets=None, gap=GAP):
+        """Slide until the leading or trailing edge snaps to the next of
+        targets (window / monitor edges by default); slide() adds the
+        quarter lines."""
         e = self.edges()
         dx, dy = VEC[d]
         axis, direction = ("x", dx) if dx else ("y", dy)
         a, b = ("L", "R") if dx else ("T", "B")
         best = None
         for edge in (a, b):
-            t = self.next_target(e[edge], axis, direction)
+            t = self.next_target(e[edge], axis, direction, targets, gap)
             if t is not None and (best is None or abs(t - e[edge]) < abs(best)):
                 best = t - e[edge]
         if best is not None:
             self.move(best * abs(dx), best * abs(dy))
+
+    def grid(self):
+        """Each monitor's edges and its quarter, half and three-quarter lines."""
+        xs, ys = set(), set()
+        for mx, my, mw, mh in self.monitors:
+            xs.update(mx + mw * i / 4 for i in range(5))
+            ys.update(my + mh * i / 4 for i in range(5))
+        return {"x": sorted(xs), "y": sorted(ys)}
+
+    def slide(self, d):
+        """Ctrl+Shift+hjkl: slide the box (same size) until its leading or
+        trailing edge lands on the next window / monitor edge or quarter line
+        of a monitor. Lines within GAP are skipped: a box from a window is
+        inset by Hyprland's gaps, so once one edge is on a line the other
+        sits just shy of the next, and every other press would otherwise be
+        a 1-3px hop. For the same reason, the leading edge is then pulled
+        onto a line it lands just shy of."""
+        grid = self.grid()
+        targets = {a: sorted(set(self.targets[a]) | set(grid[a])) for a in ("x", "y")}
+        self.snap_move(d, targets)
+        dx, dy = VEC[d]
+        axis = "x" if dx else "y"
+        lead = self.edges()[d]
+        direction = dx or dy  # only onward: never back from where it stopped
+        near = [t for t in targets[axis] if 0 < (t - lead) * direction <= GAP]
+        if near:
+            t = min(near, key=lambda t: abs(t - lead))
+            self.move((t - lead) * abs(dx), (t - lead) * abs(dy))
+
+    def double(self, d):
+        """Alt+Shift+hjkl: grow toward d by the box's own size, the inverse
+        of halve (Alt+h then Alt+Shift+l is back where it started); it stops
+        at the bounds."""
+        e = self.edges()
+        size = (e["R"] - e["L"]) if d in "LR" else (e["B"] - e["T"])
+        e[d] += size * sum(VEC[d])
+        lo, hi = self.limits(0 if d in "LR" else 1)
+        e[d] = max(lo, min(e[d], hi))
+        self.set_edges(e)
 
     def halve(self, d):
         """Alt+hjkl: keep the half toward d (keynav)."""
@@ -221,14 +263,9 @@ class Selection:
         hit = next((r for r in rects if contains(r, px, py)), None)
         return hit or min(rects, key=lambda r: dist(r, px, py))
 
-    def next_window(self, delta):
-        """Tab / Shift+Tab."""
-        if self.windows:
-            self.win_idx = (self.win_idx + delta) % len(self.windows)
-            self.set_rect(self.windows[self.win_idx])
-
-    def zoom_out(self):
-        """a: nearest window -> its monitor -> the bounds -> back."""
+    def zoom(self, step):
+        """+ / - (and the wheel): the box's scope, nearest window <-> its
+        monitor <-> the bounds; it stops at either end."""
         cx, cy = self.centre()
         steps = []
         if self.windows:
@@ -238,7 +275,11 @@ class Selection:
         # A fullscreen window is its monitor; one monitor is everything.
         steps = [s for i, s in enumerate(steps) if i == 0 or not same(s, steps[i - 1])]
         cur = next((i for i, s in enumerate(steps) if same(self.rect, s)), None)
-        self.set_rect(steps[0] if cur is None else steps[(cur + 1) % len(steps)])
+        if cur is None:  # a box of its own: + widens to its window; - leaves it
+            if step > 0:
+                self.set_rect(steps[0])
+        else:
+            self.set_rect(steps[max(0, min(cur + step, len(steps) - 1))])
 
     def neighbour(self, d):
         """Ctrl+hjkl: select the nearest window that way (like SUPER+hjkl).
@@ -267,14 +308,20 @@ class Selection:
                 return
 
     def jump(self, d, moving):
-        """Ctrl + direction: one-shot, no repeat."""
+        """Ctrl + direction: one-shot, no repeat. Ctrl selects the
+        neighbouring window; Ctrl+Shift slides the box to the next edge."""
         if moving:
-            self.snap_move(d)
+            self.slide(d)
         else:
             self.neighbour(d)
 
     def drag_to(self, x0, y0, gx, gy):
-        """Mouse drag from (x0, y0): that's the anchor, the pointer the cursor."""
+        """Mouse drag from (x0, y0): that's the anchor, the pointer the cursor.
+        Both are held inside the bounds, so dragging past an edge stops the
+        box there instead of sliding the anchor."""
+        (lx, hx), (ly, hy) = self.limits(0), self.limits(1)
+        x0, gx = (max(lx, min(v, hx)) for v in (x0, gx))
+        y0, gy = (max(ly, min(v, hy)) for v in (y0, gy))
         self.set_rect([min(x0, gx), min(y0, gy), abs(gx - x0), abs(gy - y0)])
         self.cur = ["R" if gx >= x0 else "L", "B" if gy >= y0 else "T"]
         self.center = False

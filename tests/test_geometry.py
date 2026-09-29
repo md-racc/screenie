@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from screenie.geometry import Selection, snap_targets  # noqa: E402
+from screenie.geometry import GAP, Selection, snap_targets  # noqa: E402
 
 LAYOUT = [0, 0, 3840, 1080]
 MONITORS = [[0, 0, 1920, 1080], [1920, 0, 1920, 1080]]
@@ -72,13 +72,62 @@ class Snapping(unittest.TestCase):
         s.neighbour("L")
         self.assertEqual(s.rect, [3, 3, 955, 1074])
 
-    def test_zoom_out_cycles_window_monitor_all(self):
+    def test_scope_steps_window_monitor_all_and_back(self):
         s = sel()
         seen = []
-        for _ in range(4):
-            s.zoom_out()
+        for step in (1, 1, 1, -1, -1, -1):
+            s.zoom(step)
             seen.append(list(s.rect))
-        self.assertEqual(seen, [WINDOWS[0], MONITORS[1], LAYOUT, WINDOWS[0]])
+        self.assertEqual(seen, [
+            WINDOWS[0], MONITORS[1], LAYOUT,
+            LAYOUT,                      # + stops at everything...
+            MONITORS[1], WINDOWS[0],     # ...and - comes back down
+        ][:3] + [MONITORS[1], WINDOWS[0], WINDOWS[0]])  # - stops at the window
+
+    def test_double_is_the_inverse_of_halve(self):
+        s = sel((2000, 100, 200, 100))
+        s.halve("L")
+        self.assertEqual(s.rect, [2000, 100, 100, 100])
+        s.double("R")
+        self.assertEqual(s.rect, [2000, 100, 200, 100])
+        s.double("T")  # up by its height, stopping at the top
+        self.assertEqual(s.rect, [2000, 0, 200, 200])
+        s.double("L")
+        self.assertEqual(s.rect, [1800, 0, 400, 200])
+
+
+class Slide(unittest.TestCase):
+    """Ctrl+Shift+hjkl: to the next window / monitor edge or quarter line."""
+
+    def test_slides_to_the_next_quarter_line(self):
+        s = Selection([100, 100, 300, 100], LAYOUT, [], MONITORS, snap_targets(MONITORS))
+        s.slide("R")  # right edge 400 -> 480 (the first quarter line)
+        self.assertEqual(s.rect, [180, 100, 300, 100])
+        s.slide("R")  # left edge 180 -> 480 beats right edge 480 -> 960
+        self.assertEqual(s.rect, [480, 100, 300, 100])
+        s.slide("L")
+        self.assertEqual(s.rect, [180, 100, 300, 100])  # right edge back on 480
+        s.slide("B")  # bottom 200 -> 270 (a quarter of 1080)
+        self.assertEqual(s.rect, [180, 170, 300, 100])
+
+    def test_a_box_from_a_window_never_hops_a_few_pixels(self):
+        s = sel((3, 3, 955, 1074))  # a tiled window, inset 3px by the gaps
+        s.halve("B")
+        s.halve("B")                # its bottom quarter: 268.5 tall, not 270
+        tops = []
+        for _ in range(3):
+            before = s.rect[1]
+            s.slide("T")
+            self.assertGreater(before - s.rect[1], GAP)  # always a real step
+            tops.append(s.rect[1])
+        self.assertEqual(tops, [540, 270, 0])  # the top edge exactly on each line
+        s.slide("T")
+        self.assertEqual(s.rect[1], 0)  # at the top: nothing left to do
+
+    def test_the_grid_covers_every_monitor(self):
+        g = sel().grid()
+        self.assertEqual(g["x"], [0, 480, 960, 1440, 1920, 2400, 2880, 3360, 3840])
+        self.assertEqual(g["y"], [0, 270, 540, 810, 1080])
 
 
 class Fullscreen(unittest.TestCase):

@@ -14,7 +14,7 @@ import sys
 
 from . import output
 from .frame import Frame
-from .hypr import Layout, capture_layout, capture_window
+from .hypr import Capture, Layout, capture_window
 
 
 def parse_args(argv):
@@ -38,6 +38,8 @@ def deliver_image(surface, save_dir, what):
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    # The layout picture first, before hyprctl and GTK (see hypr.Capture).
+    shot = None if args.window else Capture()
     layout = Layout()
 
     if args.window:
@@ -50,19 +52,21 @@ def main(argv=None):
 
     from .app import App  # GTK only for the picker
 
-    frame = Frame(capture_layout(), layout.rect)
+    frame = Frame(shot.surface(), layout.rect)
     app = App(layout, frame)
     action = app.run()
     if action is None:
         return 1
 
+    # The picture is the capture plus the committed layers; view filters
+    # (the lenses') never reach the output.
     if action.kind == "image":
-        deliver_image(frame.crop(action.rect, app.filter, app.contrast), args.save_dir, "Area")
+        deliver_image(frame.crop(action.rect), args.save_dir, "Area")
     elif action.kind == "ocr":
-        output.ocr(frame.ocr_crop(action.rect, app.filter, app.contrast), frame.k, args.lang)
+        output.ocr(frame.ocr_crop(action.rect), frame.k, args.lang)
     elif action.kind == "text":
         output.copy_text(action.text)
         output.notify(action.note, action.text[:200])
     elif action.kind == "pin":
-        output.pin(frame.crop(action.rect, app.filter, app.contrast), action.rect)
+        output.pin(frame.crop(action.rect), action.rect)
     return 0
