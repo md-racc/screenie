@@ -2,7 +2,7 @@
 (and baked into the picture) on Enter.
 
 It opens raw. A digit inserts a filter just above the selected one (on top
-if none is) and selects it (? shows which digit is which). + / -
+if none is) and selects it (the palette on top shows which digit is which). + / -
 adjust the selected one (hold to keep going). Every filter has its own box,
 starting as the whole main box: the box shows the selected filter's, and
 the usual box keys and the mouse reshape it. The stack is listed (top

@@ -33,7 +33,7 @@ class Mode:
 
     def status(self) -> str:
         """This mode's part of the status tag (Select draws the one tag,
-        bottom-left inside the main box)."""
+        on the bottom of the main box: see draw.STATUS_SPOTS)."""
         return ""
 
     def repeatable(self, name) -> bool:

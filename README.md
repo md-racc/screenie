@@ -1,319 +1,945 @@
 # screenie
 
-Keyboard-driven screenshots for Hyprland: a region picker you drive like vim
-visual-block mode, with a mouse fallback, plus tools for looking closer
-(loupe, enhance, filters), censoring, OCR, colour picking, QR decoding and
-pinning.
+Keyboard-driven screenshots built around one interaction grammar.
 
-**Status:** Python prototype, for iterating on the controls. This README is
-the spec; the real implementation will be a Rust port (see `TODO.md`).
+screenie freezes the desktop, then lets you select, inspect, edit and extract from that frame using controls modeled after vim visual-block mode. The keyboard is the primary interface, but the mouse is a complete screenshot workflow using the same underlying operations.
 
-## Running
+The core idea is simple: learn how **Select** works, and the rest of the picker should feel familiar.
 
-```
-bin/screenie [--save-dir DIR] [--window] [--lang LANG]
-```
+## Status
 
-- no flags: the picker. Images go to the clipboard, and a copy to
-  `$XDG_RUNTIME_DIR/screenie/`.
-- `--save-dir DIR`: also save images to `DIR/<timestamp>.png`.
-- `--window`: capture the active window straight away (its own pixels, even
-  if covered), no picker.
-- `--lang`: tesseract language for OCR (default `eng`, or `$SCREENIE_LANG`).
+screenie is currently a Python prototype for settling the UX. It is used daily on Hyprland.
 
-`$XDG_RUNTIME_DIR/screenie/last` always holds the last image's path (for
-annotating it afterwards). Results are announced with `notify-send`.
+The production implementation is being rewritten in Rust. The Rust version will preserve the behavior specified here while replacing the prototype's implementation.
 
-Dependencies (Arch): `python-gobject python-cairo gtk3 gtk-layer-shell grim
-wl-clipboard libnotify`; `tesseract tesseract-data-eng` for OCR, `zbar` for
-QR, `swayimg` for pins.
+This README is the authoritative specification for picker behavior. When implementation and README disagree, the README wins.
 
-## The picker
+Supporting design documents:
 
-The whole layout (every monitor) is captured once and frozen; you work on
-that frame, so what you see is exactly what you get. The picker is modal:
-**Select** is the base, and keys descend into other modes.
+- `docs/cli.md` — Rust command-line interface
+- `docs/auto-redact.md` — automatic redaction
+- `docs/measure.md` — measurements and calibration
+- `docs/annotate.md` — annotation extensions
+- `docs/architecture-rust.md` — architecture of the Rust rewrite
+- `TODO.md` — port notes and deferred work
+- `docs/python-prototype.md` — running, testing and comparing against the Python prototype
 
-### The rules (the same in every mode)
+## What screenie does
 
-**Keys.** `h j k l` (or the arrows) are directions everywhere; holding one
-repeats, speeding up, and held directions combine (`k`+`l` is diagonal).
-Modifiers on them mean one thing each:
+Press Print and screenie captures the visible desktop once. Every monitor is then covered by an overlay showing that frozen frame.
 
-| | |
-|---|---|
-| `hjkl` | Move whatever you're steering: the box's cursor corner, Insert's cursor, the loupe, the lens |
-| `Shift+hjkl` | Move the whole box (in the point modes: a bigger step) |
-| `Ctrl+hjkl` | Jump: select the neighbouring window that way |
-| `Ctrl+Shift+hjkl` | Jump: slide the box to the next window / monitor edge or quarter line |
-| `Alt+hjkl` / `Alt+Shift+hjkl` | Scale: halve / double the box (or the lens) toward that side |
-| `+` / `-` | Adjust the current amount: the box's scope, the insert step, line width, filter / censor strength, loupe size, zoom, the layer picked (hold to repeat) |
-| `z` / `e` | The lenses (loupe / enhance), from any mode |
-| `u` | Undo: in Select the last box or layer change; in a build tool the last action on the open layer (wherever in it); in Insert the cursor's last move |
-| `Enter` | Done: capture in Select, commit in a build tool, back in the views |
-| `Esc` | Back one level; in Select, cancel |
-| `q` | Quit the picker now, from any mode (with locked work in an open layer, press it twice: the tag warns) |
-| `?` | Show / hide the current mode's keys, on top of the box (the full reference will be the man page) |
+From there you can:
 
-A modifier that means nothing in a mode is ignored there (the key doesn't
-act as if unmodified). Other keys fire once per press (holding a toggle
-doesn't flicker it).
+- select a region;
+- inspect individual pixels;
+- magnify or enhance an area without changing the output;
+- censor content;
+- draw and annotate;
+- apply image filters;
+- manage editable layers;
+- OCR text;
+- copy a colour;
+- decode QR codes and barcodes;
+- pin a floating copy;
+- save or copy the resulting image.
 
-**Mouse.** A plain mouse does everything a screenshot needs, the same way
-in every mode:
+The capture itself is never modified. Editing is represented as ordered operations in layers over the original frame.
 
-| | |
-|---|---|
-| left drag | Draw: the box (or the tool's box, the lens), a pen line; it stops at an edge it can't cross |
-| left click | Place: in Select, snap to the window under the pointer (or its monitor); in a tool's box, move its cursor corner there; put a cursor or the lens there; pick a layer |
-| wheel | `+` / `-` (in Select: window → monitor → everything, and back; on a box you drew, up widens it to its window and down leaves it) |
-| right click | `Enter` |
-| middle click | `Esc` |
+What you see in the frozen frame is what the output is based on. Live desktop changes after capture do not enter the screenshot.
 
-So: click a window (or drag a box), scroll to widen it, right click.
+## Platform
 
-**Tags.** One status tag shows the current mode vim-style, the box size,
-the active cursor's pixel, and what the mode is working on
-(`CENSOR  560×90  (659,259)  layer +1  pixelate 10px  20×20`). Each kind
-of tag has its own side of the box: the status tag on the **bottom**, the
-palette (Filter's filters, Annotate's shapes: always) and key legend (`?`,
-the current mode's only) on the **top**, lists (the layer
-view, the filter stack) on the **sides**. Each goes just outside the box first, so the box
-stays uncovered; then inside on the same side (while it's small next to the
-box); then another side. Never off a monitor or across the gap between two,
-never on top of each other. Every border is white; the tag
-says which box is which.
+### Current prototype
 
-### Kinds of mode
+The current Python implementation targets:
 
-| Kind | Modes | What it does | Changes the picture? | `u` |
-|---|---|---|---|---|
-| **Target** | Select (a region), Insert (a point) | Says *where*; tools opened from it start there | No | Box changes, committed layers |
-| **Lens** | Loupe, Enhance | Changes how you *see*: magnification, view filters | Never | – |
-| **Build** | Censor, Annotate (+ Shape), Filter | Adds operations to the open layer | Only when the layer is committed | The layer's last operation |
-| **Manage** | Layers (`1`–`9`) | Browse the committed layers; delete, reorder, hide | Yes | Delete and move are undo steps in Select |
-| **Finish** | `Enter` `y` `p` `Q` `P` | Produces the output | – | – |
+- Wayland
+- Hyprland
+- `gtk-layer-shell`
+- `grim`
 
-Lenses can be opened from anywhere and hand back at most a *position*
-(turning the loupe off moves Insert's cursor to it), never pixels.
+### Rust implementation
 
-### Layers
+The Rust port targets Wayland first, with Hyprland as the initial supported compositor environment.
 
-The capture itself is never modified. The first build tool you open (`x`,
-`a`, `f`) opens a **layer**, clipped to the box; every build tool you use
-before committing adds its operations to that same layer, **in order**
-(order matters: a filter after an annotation filters it). Operations are
-*locked* in as you go and preview live, but nothing is committed until
-`Enter`. The picture you see, and every output, is the capture with the
-committed layers (and the open one) applied in order.
+The architecture is intended to allow X11 support later without changing picker behavior.
 
-In every build tool:
+Recording, scrolling captures, uploads, beautification and live/unfrozen picking are non-goals.
 
-| Key | Action |
-|---|---|
-| its own key (`x` / `f`; `a` in a shape) | Lock the item being edited, start another |
-| another tool's key (`x` `a` `f`) | Lock it and switch tool, same layer |
-| `u` | Undo the last action on the layer (a lock, an insert, a delete, a move, a mute, a run of `+`/`-`, a reshape), wherever in the layer it was |
-| `Enter` | Lock it and commit the layer; back to where the layer was opened |
-| `Esc` | Throw the layer away and go back. With locked work in it, the first `Esc` only warns (`Esc again to discard 3`, in the tag); any other key takes the warning back |
+---
 
-`u` in Select (and in the layer view) undoes the last thing done there; a
-committed layer counts as one thing, as do the layer view's deletes and
-moves.
+# The picker
 
-**Lists** (the filter stack, the layer view) share one set of keys: `[` / `]`
-select the one below / above, `<` / `>` move it down / up, `d` deletes it,
-`Space` mutes / hides it. Both list the top of the stack first.
+## The common grammar
 
-### Select (target: a region)
+The picker is modal.
 
-The box starts on the active window. It's an anchor corner plus a cursor
-corner (the white square), like visual-block mode.
+**Select** is always the base mode. Other modes temporarily take control of input while preserving the same movement and adjustment vocabulary wherever that vocabulary makes sense.
 
-| Key | Action |
-|---|---|
-| `h j k l` | Move the cursor corner 5px; keep going past the anchor and it crosses over |
-| `o` or `Space` / `O` or `Shift+Space` | Cursor to the opposite / sideways corner |
-| `w` `b` `}` `{` | Cursor to the next window or monitor edge right / left / down / up (skips window gaps) |
-| `0` `$` `g` `G` | Cursor to the far left / right / top / bottom |
-| `c` | Centre mode: the cursor sits at the centre; `h`/`k` grow, `l`/`j` shrink, symmetrically |
-| `+` / `-` | Scope: nearest window → its monitor → everything, and back (on a box you drew, `+` widens it to its window, `-` leaves it) |
-| modifiers | See [the rules](#the-rules-the-same-in-every-mode) |
-| `u` | Undo the last box or layer change |
-| click | Snap to the window under the pointer (or its monitor, if there's no window there) |
-| `i` / `z` / `e` | → **Insert** / **Loupe** / **Enhance** |
-| `x` / `a` / `f` | → **Censor** / **Annotate** / **Filter** (opens a layer) |
-| `1`–`9` | → **Layers**, at that layer (once there are any) |
-| `Enter` | Capture the image (not an empty box: the tag says so) |
-| `y` | Yank the text (OCR) |
-| `p` | Yank the hex colour under the cursor |
-| `Q` | Decode a QR code / barcode in the box and copy it (stays open if none) |
-| `P` | Pin: float the box on top of every workspace |
-| `Esc` | Cancel |
+### Directions
 
-### Insert (target: a point)
+`h j k l` and the arrow keys mean directions everywhere.
 
-The box stays put and a free cursor appears at its centre: a solid 3×3
-block on the cursor pixel inside a hollow 15×15 square, both drawn inverted
-so they show on any colour.
+Held directions repeat with acceleration and combine, so holding `k` and `l` moves diagonally.
 
-| Key | Action |
-|---|---|
-| `h j k l` | Move one step, 5 pixels: ballpark (the loupe is for precision). The top speed scales with the box |
-| `+` / `-` | The step, 1–20 pixels |
-| `Shift+hjkl` | Move four steps |
-| `u` | Back to where the cursor was |
-| click | Put the cursor there |
-| `Alt+hjkl` | Halfway to the box edge that way |
-| `w` `b` `}` `{` | The next window / monitor edge that way, or the box edge |
-| `0` `$` `g` `G` / `m` | The box's left / right / top / bottom edge / its centre |
-| `z` / `e` | → **Loupe** at the cursor (the cursor follows it back) / **Enhance** centred on it |
-| `x` / `a` / `f` | → a build tool; a censor starts with the cursor as its top-left |
-| `p` | Yank the cursor pixel's hex colour |
-| `Enter` / `Esc` | Back to the box |
+| Input             | Meaning                                                     |
+| ----------------- | ----------------------------------------------------------- |
+| `hjkl` / arrows   | Steer the active thing                                      |
+| `Shift+hjkl`      | Move the whole box, or take a larger step in point modes    |
+| `Ctrl+hjkl`       | Jump to the next meaningful target                          |
+| `Ctrl+Shift+hjkl` | Slide or jump the whole box to the next meaningful boundary |
+| `Alt+hjkl`        | Halve or scale toward that side                             |
+| `Alt+Shift+hjkl`  | Double or scale outward toward that side                    |
 
-### Loupe (lens; `z` toggles it)
+The target of a jump depends on the mode.
 
-A pixel cursor of its own (the Insert cursor) with a magnified view: pixel
-grid, the cursor pixel outlined, its colour (with a swatch) and
-coordinates. The magnifier is placed like a tag: beside the cursor, off the
-box if it can be, on the cursor's monitor.
+Examples:
 
-| Key | Action |
-|---|---|
-| `h j k l` | Move one pixel; it can't leave the box |
-| `Shift+hjkl` | Move one loupe-width |
-| `+` / `-` | Bigger / smaller loupe window |
-| `v` / `V` | View filter |
-| click / drag | Put the pixel cursor there / drag it |
-| `p` | Yank that pixel's hex colour |
-| `e` | → **Enhance** at the loupe's pixel |
-| `x` / `a` / `f` | → a build tool at the loupe's pixel |
-| `z` / `Enter` / `Esc` | Loupe off |
+- Select jumps between windows and layout boundaries.
+- Measure can jump to detected picture edges.
+- A mode where a modifier has no meaning ignores that modified key completely.
 
-### Enhance (lens; `e`)
+A meaningless modifier never falls through to the unmodified action.
 
-A lens (a sub-window, half the box's size) inside the box shows what's
-under it magnified. It can't leave the box and never shows anything outside
-it.
+### Adjustment
 
-| Key | Action |
-|---|---|
-| `h j k l` | Move the lens (`Shift`: bigger steps) |
-| `Alt+hjkl` / `Alt+Shift+hjkl` | Halve / double the lens toward that side |
-| `+` / `-` | Zoom in / out: a tap moves to the next 0.5 (2 → 2.5 → 3) |
-| `v` / `V` | View filter: off → grey → invert → contrast (the contrast one flips dark backgrounds, for reading) |
-| `s` | Sharp / smooth pixels |
-| drag / click | Draw a new lens / centre the lens there |
-| `z` | → **Loupe** at the lens centre |
-| `Enter` / `Esc` | Back |
+`+` and `-` adjust **the current amount**.
 
-View filters only change what you see in the lenses; they never reach the
-output. To bake a filter into the picture, use the Filter build tool.
+The mouse wheel is the same operation.
 
-### Censor (build; `x`)
+Depending on the mode, that may mean:
 
-A 20px censor box (about a line of text) inside the main box: at its
-centre, at the loupe's pixel, or with its top-left on Insert's cursor,
-depending on where you opened it. Edited with the box keys and the mouse
-(a click moves its cursor corner there); it can't leave the main box.
+- selection scope;
+- cursor step;
+- line width;
+- censor strength;
+- filter amount;
+- loupe size;
+- zoom;
+- selected layer.
 
-| Key | Action |
-|---|---|
-| `t` | Swap this censor's type: pixelate / bar |
-| `+` / `-` | Pixelate: block size, 4–40px (default 10). Bar: its shade, black → white (default black) |
-| `x` | Lock it, start the next right here (same type) |
-| box keys, layer keys | See above |
+At any moment there should be at most one obvious adjustable amount.
 
-### Filter (build; `f`)
+### Universal controls
 
-A **stack** of filters, folded into the layer on `Enter`. It opens raw; a
-digit inserts a filter just above the selected one (on top if none is) and
-selects it (the tag on top shows which digit is which). Every filter has its own box,
-starting as the whole main box; the box shows and reshapes the selected
-filter's. The list shows no numbers, since the digits pick kinds here.
+| Input   | Meaning                                                     |
+| ------- | ----------------------------------------------------------- |
+| `z`     | Loupe                                                       |
+| `e`     | Enhance                                                     |
+| `u`     | Undo the last completed action in the current editing scope |
+| `Enter` | Done / confirm                                              |
+| `Esc`   | Back                                                        |
+| `q`     | Quit                                                        |
+| `?`     | Show or hide the current mode's key legend                  |
 
-| Key | Filter | `+` / `-` |
-|---|---|---|
-| `1` | Greyscale | Amount, 25%–100% |
-| `2` | Invert | – |
-| `3` | Brightness | Brighter / darker, −5…+5 in 10% steps |
-| `4` | Contrast | More (an S-curve) / less (toward grey), −4…+4; keeps colour |
-| `5` | Blur | Radius, 2–20px |
+Keys held across a mode transition do not count as fresh presses in the new mode.
 
-| Key | Action |
-|---|---|
-| `f` | Duplicate the selected filter, just above it |
-| list keys | `[` `]` select, `<` `>` move, `d` delete, `Space` mute |
-| box keys, layer keys | See above |
+Other command keys fire once per physical press unless their action explicitly supports repeat.
 
-### Annotate (build; `a`)
+---
 
-Lines and shapes, clipped to the box. The tag shows the colour (with a
-swatch) and line width. The pen is drawn with the mouse; `Enter` or a tool
-key in the middle of a line keeps it.
+# Mouse
 
-| Key | Action |
-|---|---|
-| drag | Pen: a freehand line (locked when you let go) |
-| `1` `2` `3` `4` `5` | White / black / red / green / blue (starts red) |
-| `p` | Eyedropper: the colour under the pointer, until a number key |
-| `+` / `-` | Thicker / thinner line |
-| `r` / `c` | → **Shape**: a rectangle / circle |
-| `z` / `e` | The loupe / enhance, at the pointer |
-| layer keys | See above (`a` itself does nothing in the pen) |
+The mouse exposes the same screenshot workflow without requiring keyboard commands.
 
-#### Shape (`r` / `c` in Annotate)
+| Input        | Meaning                                |
+| ------------ | -------------------------------------- |
+| left drag    | Draw or manipulate the active geometry |
+| left click   | Place, select or snap the active thing |
+| wheel        | `+` / `-`                              |
+| right click  | `Enter`                                |
+| middle click | `Esc`                                  |
 
-A box of its own inside the main box, edited with the box keys and the
-mouse (a click moves its cursor corner there; centre mode `c` is handy for
-circles). The circle fills the box, so a
-square box gives a circle.
+The basic mouse workflow is therefore:
 
-| Key | Action |
-|---|---|
-| `t` | Swap rectangle / circle |
-| `1`–`5`, `+` `-`, `p` | Colour, line width, eyedropper (at the shape's cursor) |
-| `a` | Lock it, back to the pen |
-| `Esc` | Drop just this shape, back to the pen |
-| layer keys | See above |
+1. click a window or drag a region;
+2. scroll if a wider scope is wanted;
+3. right click.
 
-### Layers (manage; `1`–`9` in Select)
+Keyboard and mouse do not need identical physical event sequences. They must reach the same operations and editable model.
 
-The picked layer is shown on its own: the capture with only that layer
-applied, inside the box it was made in (hiding the layers below and above
-it). The list shows every layer, top first.
+---
 
-| Key | Action |
-|---|---|
-| `1`–`9` / click | Pick a layer / the topmost one under the pointer |
-| list keys, `+` `-` | `[` `]` (or `+` `-`, the wheel) select, `<` `>` move (it applies earlier / later), `d` delete, `Space` hide |
-| `u` | Undo the last delete / move |
-| `Enter` / `Esc` | Back to Select |
+# Tags
 
-## Layout of the code
+screenie uses small on-screen text chips around the active box.
 
-| Module | What |
-|---|---|
-| `cli.py` | Arguments, and carrying out how the picker finished (every output) |
-| `hypr.py` | Hyprland state (`hyprctl`) and capture (`grim`) |
-| `frame.py` | The frozen frame: the capture, the committed picture, the view (with the open layer, rebuilt lazily from cached snapshots); view filters, crops, pixel reads |
-| `layers.py` | Operations (censor, stroke, shape, filter; each with a `key()` and `bbox()`), layers, undo entries |
-| `keys.py` | Key-name sets shared by the modes (the mouse arrives as keys too) |
-| `geometry.py` | The box: visual-block cursor, snapping, bounds, undo. No GTK |
-| `app.py` | Overlay windows (gtk-layer-shell), key repeat, the mode stack, the open layer |
-| `modes/` | `box` (editing a box: the base of Select and the tools' boxes); `select`, `insert` (targets); `loupe`, `enhance` (lenses); `censor`, `filter`, `annotate` (build; shared plumbing in `layer`); `layers_view` |
-| `output.py` | Clipboard, saving, notifications, OCR, QR, pins |
-| `draw.py` | Shared drawing helpers |
+Each kind has a preferred side:
 
-## Tests
+- status: bottom;
+- palette and key legend: top;
+- lists such as Filters and Layers: sides.
 
-```
-python -m unittest discover -s tests
+Placement rules:
+
+1. outside the box on the preferred side;
+2. inside the box on that same side if necessary;
+3. another side as fallback.
+
+Tags must:
+
+- stay entirely on one monitor;
+- never cross a monitor seam;
+- avoid each other;
+- avoid mode-owned UI such as the loupe;
+- avoid obscuring the active box whenever possible.
+
+Borders are white. Chips are near-opaque black.
+
+A status tag is intentionally dense and vim-like, for example:
+
+```text
+CENSOR  560×90  (659,259)  layer +1  pixelate 10px  20×20
 ```
 
-`test_geometry.py`, `test_draw.py` (tag placement) and `test_hypr.py`
-(which windows count as visible) are pure logic. `test_modes.py` drives the
-real App with synthetic events on a synthetic frame, and `test_audit.py`
-holds a regression test for each finding of the audit (both need a Wayland
-session; windows are created but never shown).
+Palettes are always visible when a mode has directly selectable kinds. The full key legend is behind `?`.
+
+---
+
+# Mode families
+
+| Kind                | Modes                           | Purpose                               | Changes output?   |
+| ------------------- | ------------------------------- | ------------------------------------- | ----------------- |
+| **Target**          | Select, Insert                  | Choose a region or point              | No                |
+| **Lens**            | Loupe, Enhance                  | Change how the frozen image is viewed | Never             |
+| **Build**           | Censor, Annotate, Shape, Filter | Add operations to the open layer      | When committed    |
+| **Manage**          | Layers                          | Inspect and modify committed layers   | Yes               |
+| **Temporary input** | Text entry and similar children | Collect a value or temporary geometry | Only if confirmed |
+| **Finish**          | image, OCR, colour, QR, pin     | Produce an output                     | —                 |
+
+Only the top mode receives input.
+
+Modes draw from bottom to top, so temporary children appear over the mode that opened them.
+
+Lenses may return a position to their parent. They never return modified pixels.
+
+---
+
+# Layers
+
+The captured frame is immutable.
+
+The first build tool opened creates an implicit **open layer**, clipped to the current selection.
+
+Every build operation created before the layer is committed is added to that same layer in order.
+
+Order matters.
+
+For example, a filter added after an annotation filters the annotation too.
+
+A layer contains editable operations such as:
+
+- censors;
+- pen strokes;
+- shapes;
+- lines and arrows;
+- text;
+- filters;
+- highlights;
+- callouts.
+
+## Locking and committing
+
+Build tools distinguish between the item currently being edited and operations already locked into the open layer.
+
+Common build behavior:
+
+| Input                  | Meaning                                                  |
+| ---------------------- | -------------------------------------------------------- |
+| current tool key       | Lock the current item and begin another                  |
+| another build-tool key | Lock the current item and switch tools in the same layer |
+| `u`                    | Undo the last completed action in the open layer         |
+| `Enter`                | Lock the current item and commit the layer               |
+| `Esc`                  | Discard the open layer                                   |
+
+If the open layer contains locked work, the first `Esc` warns instead of discarding it. A second `Esc` discards it. Any unrelated key cancels the warning.
+
+`q` behaves similarly when quitting with locked work.
+
+Undo never automatically crosses an editing-scope boundary.
+
+If the open layer has nothing left to undo, `u` does not begin undoing committed project history.
+
+---
+
+# Select
+
+Select chooses the output region and is the base of the picker.
+
+The box is represented as:
+
+- an anchor corner;
+- a cursor corner.
+
+This behaves like vim visual-block mode.
+
+The cursor may cross the anchor naturally.
+
+| Input               | Action                                               |
+| ------------------- | ---------------------------------------------------- |
+| `h j k l`           | Move the cursor corner                               |
+| `o` / `Space`       | Move the cursor to the opposite corner               |
+| `O` / `Shift+Space` | Move the cursor to the sideways corner               |
+| `w b } {`           | Next nearby window or monitor edge                   |
+| `0 $ g G`           | Far left / right / top / bottom                      |
+| `c`                 | Centre mode: resize symmetrically around the centre  |
+| `+` / `-`           | Change selection scope                               |
+| `.`                 | Recall previously accepted regions                   |
+| `u`                 | Undo the last Select/project action                  |
+| click               | Snap to the window under the pointer, or its monitor |
+| drag                | Draw a region                                        |
+| `i`                 | Insert                                               |
+| `z`                 | Loupe                                                |
+| `e`                 | Enhance                                              |
+| `x`                 | Censor                                               |
+| `a`                 | Annotate                                             |
+| `f`                 | Filter                                               |
+| `1`–`9`             | Layers                                               |
+| `Enter`             | Capture image                                        |
+| `y`                 | OCR                                                  |
+| `p`                 | Copy colour                                          |
+| `Q`                 | Decode QR/barcode                                    |
+| `P`                 | Pin                                                  |
+| `Esc`               | Cancel                                               |
+
+The box starts on the active window.
+
+## Scope
+
+Select distinguishes between geometry bounds and selection scope.
+
+The box remains ordinary anchor/cursor geometry. Scope changes which spatial objects are meaningful to snapping and widening.
+
+The scopes are:
+
+```text
+window → monitor → everything
+```
+
+The mouse wheel changes scope in Select.
+
+On a manually drawn box, widening may first expand it to the containing window before moving outward through broader scopes.
+
+## Recall
+
+`.` recalls accepted boxes.
+
+The history contains the last ten accepted regions and keeps them associated with monitor identity so they can be restored in the same place when possible.
+
+Repeated `.` walks backward through the ring.
+
+---
+
+# Insert
+
+Insert selects a single pixel position inside the current box.
+
+The box remains fixed. A free cursor appears inside it.
+
+The cursor is drawn so it remains visible against arbitrary colours.
+
+| Input           | Action                            |
+| --------------- | --------------------------------- |
+| `h j k l`       | Move by the current step          |
+| `Shift+hjkl`    | Move by a larger step             |
+| `+` / `-`       | Adjust step size                  |
+| `u`             | Undo the cursor's previous move   |
+| click           | Place the cursor                  |
+| `Alt+hjkl`      | Move halfway toward that edge     |
+| `w b } {`       | Next meaningful edge              |
+| `0 $ g G`       | Box left / right / top / bottom   |
+| `m`             | Box centre                        |
+| `z`             | Loupe at the cursor               |
+| `e`             | Enhance centred on the cursor     |
+| `x a f`         | Open a build tool from the cursor |
+| `p`             | Copy the cursor pixel's colour    |
+| `Enter` / `Esc` | Return to Select                  |
+
+The normal step is adjustable from 1–20 pixels.
+
+---
+
+# Loupe
+
+Loupe is a precision pixel lens.
+
+It shows:
+
+- a magnified crop;
+- a pixel grid;
+- the active pixel;
+- its colour;
+- its coordinates.
+
+The magnifier is positioned like a tag and stays on the cursor's monitor.
+
+| Input                 | Action                                  |
+| --------------------- | --------------------------------------- |
+| `h j k l`             | Move one pixel                          |
+| `Shift+hjkl`          | Move by approximately one loupe width   |
+| `+` / `-`             | Change loupe size                       |
+| `v` / `V`             | Change view filter                      |
+| click / drag          | Place or move the cursor                |
+| `p`                   | Copy pixel colour                       |
+| `e`                   | Enhance at the loupe position           |
+| `x a f`               | Open a build tool at the loupe position |
+| `z` / `Enter` / `Esc` | Close Loupe                             |
+
+When Loupe closes, its parent may adopt the loupe position.
+
+Loupe never modifies image pixels.
+
+---
+
+# Enhance
+
+Enhance is a movable magnified view inside the selection.
+
+It never shows pixels outside the current box.
+
+| Input            | Action                           |
+| ---------------- | -------------------------------- |
+| `h j k l`        | Move the lens                    |
+| `Shift+hjkl`     | Move by larger steps             |
+| `Alt+hjkl`       | Halve the lens toward that side  |
+| `Alt+Shift+hjkl` | Double the lens toward that side |
+| `+` / `-`        | Change zoom in 0.5 steps         |
+| `v` / `V`        | Cycle view filters               |
+| `s`              | Sharp / smooth scaling           |
+| drag             | Draw a new lens                  |
+| click            | Centre lens                      |
+| `z`              | Loupe at the lens centre         |
+| `Enter` / `Esc`  | Close Enhance                    |
+
+View filters include:
+
+- off;
+- greyscale;
+- invert;
+- contrast/readability enhancement.
+
+View filters only change what the user sees. They never reach image output.
+
+Use the Filter build tool to modify the image itself.
+
+---
+
+# Censor
+
+Censor creates obscuring rectangles inside the current selection.
+
+A censor uses the same anchor/cursor box grammar as Select.
+
+Types:
+
+- pixelate;
+- solid bar.
+
+| Input                 | Action                            |
+| --------------------- | --------------------------------- |
+| `t`                   | Switch censor type                |
+| `+` / `-`             | Adjust the current censor amount  |
+| `x`                   | Lock the censor and begin another |
+| common box controls   | Resize / move / scale             |
+| common layer controls | Undo / commit / discard           |
+
+Pixelate uses adjustable block size.
+
+The default remains 10px pixelation.
+
+Pixelation is visual obscuring, not cryptographically secure redaction. screenie intentionally keeps it as the default manual censor style.
+
+Auto-redact may use different defaults for detected sensitive content.
+
+---
+
+# Filter
+
+Filter manages an ordered stack of image filters inside the open layer.
+
+Each filter has:
+
+- a kind;
+- its own region;
+- an amount where applicable;
+- mute state;
+- stable ordering.
+
+A newly inserted filter becomes selected.
+
+The selected filter's region uses the normal anchor/cursor box grammar.
+
+The selected filter's amount is the current `+` / `-` adjustment.
+
+Current filters:
+
+| Key | Filter     | Adjustment    |
+| --- | ---------- | ------------- |
+| `1` | Greyscale  | 25%–100%      |
+| `2` | Invert     | none          |
+| `3` | Brightness | −5…+5         |
+| `4` | Contrast   | −4…+4         |
+| `5` | Blur       | 2–20px radius |
+
+Other controls:
+
+| Input          | Action                        |
+| -------------- | ----------------------------- |
+| `f`            | Duplicate selected filter     |
+| list controls  | Select, reorder, delete, mute |
+| box controls   | Edit selected filter region   |
+| layer controls | Undo / commit / discard       |
+
+---
+
+# Annotate
+
+Annotate adds visible markup.
+
+Annotation properties include a colour and line width.
+
+Current palette:
+
+```text
+1 white
+2 black
+3 red
+4 green
+5 blue
+```
+
+The default is red.
+
+| Input          | Action                   |
+| -------------- | ------------------------ |
+| drag           | Draw freehand pen stroke |
+| `1`–`5`        | Choose colour            |
+| `p`            | Eyedropper               |
+| `+` / `-`      | Adjust line width        |
+| `r`            | Rectangle                |
+| `c`            | Circle                   |
+| `z` / `e`      | Open a lens              |
+| layer controls | Undo / commit / discard  |
+
+The pen is currently mouse-driven in the Python prototype. The Rust implementation is intended to support keyboard-driven pen movement as well.
+
+## Shapes
+
+Shape is a temporary child of Annotate.
+
+Its geometry uses the same anchor/cursor model as Select.
+
+Current shapes:
+
+- rectangle;
+- circle.
+
+| Input        | Action                            |
+| ------------ | --------------------------------- |
+| `t`          | Rectangle / circle                |
+| `1`–`5`      | Colour                            |
+| `+` / `-`    | Width                             |
+| `p`          | Eyedropper                        |
+| `a`          | Lock shape and return to Annotate |
+| `Esc`        | Drop shape and return             |
+| box controls | Manipulate shape                  |
+
+A circle fills its bounding box, so a square box produces a circle.
+
+---
+
+# Annotation extensions
+
+The Rust implementation is designed to extend Annotate without creating new interaction grammars.
+
+These operations reuse existing point, anchor/cursor, trace, colour and adjustment behavior.
+
+## Text
+
+Text annotation is planned as a first-class annotation operation.
+
+Expected properties:
+
+- position or box;
+- text;
+- size;
+- colour;
+- optional background chip;
+- alignment where useful.
+
+`i` enters text annotation.
+
+Text entry temporarily suspends normal letter commands: typed characters become literal text until confirmed or cancelled.
+
+The initial implementation should remain intentionally small rather than becoming a rich-text editor.
+
+## Lines and arrows
+
+Straight lines and arrows use anchor-to-cursor geometry.
+
+Flipping endpoints reverses an arrow.
+
+## Highlighter
+
+Highlighter is a translucent stroke using the same trace interaction as the pen.
+
+## Numbered callouts
+
+Callouts place numbered markers suitable for technical screenshots and documentation.
+
+The next number is chosen automatically unless explicitly overridden.
+
+---
+
+# Lists
+
+Filter and Layers share one list grammar.
+
+| Input     | Action                        |
+| --------- | ----------------------------- |
+| `[` / `]` | Select the item below / above |
+| `<` / `>` | Move selected item down / up  |
+| `d`       | Delete                        |
+| `Space`   | Mute / hide                   |
+
+Both display the top of the stack first.
+
+Selection follows the item when it is reordered.
+
+Deleting an item selects the next surviving item where possible, otherwise the previous one.
+
+The wheel remains `+` / `-`; it is not repurposed for list scrolling.
+
+---
+
+# Layers view
+
+Layers manages committed layers.
+
+Opening a layer shows the original capture with that layer applied in its own clip, while other committed layers are hidden for inspection.
+
+| Input             | Action                                   |
+| ----------------- | ---------------------------------------- |
+| `1`–`9`           | Pick a layer                             |
+| click             | Pick the topmost layer under the pointer |
+| `[` / `]`         | Select layer                             |
+| `+` / `-` / wheel | Select layer                             |
+| `<` / `>`         | Reorder                                  |
+| `d`               | Delete                                   |
+| `Space`           | Hide / show                              |
+| `u`               | Undo the last layer-management action    |
+| `Enter` / `Esc`   | Return to Select                         |
+
+A committed layer counts as one Select/project-history action.
+
+---
+
+# Undo
+
+Undo records semantic actions, not raw input events.
+
+Examples of undoable actions:
+
+- lock an operation;
+- add/delete/reorder a filter;
+- change a filter amount;
+- commit/delete/move a layer;
+- alter selection history.
+
+Repeated key movement and mouse drag motion are not individual undo steps.
+
+Held adjustments should collapse into a single logical adjustment where practical.
+
+There are two principal scopes:
+
+## Open-layer history
+
+Used while building.
+
+Censor, Annotate, Shape and Filter share the same open-layer history.
+
+Undo can therefore cross tool boundaries inside that layer.
+
+Example:
+
+```text
+censor
+rectangle
+contrast
+u → removes/reverts contrast
+u → removes rectangle
+u → removes censor
+```
+
+## Project history
+
+Used from Select and project-management contexts.
+
+It contains operations such as:
+
+- selection changes;
+- committed layer creation;
+- layer deletion;
+- layer movement;
+- visibility changes.
+
+Undo does not automatically fall through from an empty open-layer history into project history.
+
+---
+
+# Output
+
+The picker can finish with:
+
+- image;
+- OCR text;
+- colour;
+- QR/barcode text;
+- pin.
+
+Image output is copied to the clipboard by default.
+
+The Rust CLI additionally defines explicit output and scripting behavior in `docs/cli.md`.
+
+Machine-readable output uses `--json`.
+
+Cancellation is a user action and is distinct from capture or delivery failure.
+
+---
+
+# OCR
+
+OCR operates on the selected image region.
+
+Internally, OCR should preserve structured information including:
+
+- full text;
+- word text;
+- word bounding boxes;
+- confidence where available.
+
+That representation is shared by:
+
+- OCR output;
+- auto-redact;
+- future scale-bar detection;
+- possible future word-level text selection.
+
+The current Python prototype uses Tesseract.
+
+---
+
+# Auto-redact
+
+Auto-redact is designed but not yet implemented.
+
+It performs:
+
+```text
+OCR word boxes
+    ↓
+detectors
+    ↓
+redaction proposals
+    ↓
+user review / acceptance
+    ↓
+normal Censor operations
+```
+
+Potential detectors include:
+
+- email addresses;
+- IP addresses;
+- secrets and tokens;
+- high-entropy strings;
+- URL secrets;
+- payment-card numbers;
+- IBANs;
+- home paths;
+- hostnames;
+- keys;
+- configured literals;
+- custom regular expressions;
+- QR codes.
+
+Proposals are not edits until accepted.
+
+Once accepted, they become ordinary censor operations and require no special project representation.
+
+See `docs/auto-redact.md`.
+
+---
+
+# Measure
+
+Measure is designed but not yet implemented.
+
+It uses the same point and anchor/cursor interaction model as the rest of the picker.
+
+Designed measurements include:
+
+- line;
+- path;
+- arc;
+- circle;
+- rectangle;
+- area;
+- angle.
+
+A measurement may be calibrated by assigning a real-world value to the first suitable line or arc:
+
+```text
+= 5 m
+```
+
+Subsequent measurements then report real units with an estimated error.
+
+Image-edge detection may allow directional jumps directly to visible boundaries.
+
+Measurements can later be baked into an annotation layer.
+
+See `docs/measure.md`.
+
+---
+
+# Projects and history
+
+The Rust implementation keeps editable project state so recent screenshots can be reopened.
+
+The durable project model consists conceptually of:
+
+```text
+source capture
+layout / coordinate metadata
+selection
+ordered layers
+ordered operations
+```
+
+The following are runtime state and are not required to reproduce the edited image:
+
+- mode stack;
+- undo history;
+- render caches;
+- key history;
+- temporary warnings;
+- transient cursor state.
+
+A project should reproduce the same image from its source capture and operations regardless of runtime history.
+
+Recent projects may live in temporary storage for `edit last`.
+
+Explicit project saving is controlled separately.
+
+---
+
+# Coordinates and scaling
+
+Picker interaction uses logical desktop coordinates.
+
+Image operations use device/image pixel coordinates.
+
+There is one authoritative logical-to-pixel conversion rule:
+
+```text
+rnd(v) = floor(v + 0.5)
+```
+
+applied independently at every edge.
+
+Crop boundaries, edge pixels and cursor-pixel lookup must agree under this rule.
+
+Mixed and fractional monitor scaling must not create different interpretations of the same edge.
+
+---
+
+# Current Python prototype
+
+The prototype currently implements:
+
+- Select;
+- Insert;
+- Loupe;
+- Enhance;
+- Censor;
+- Annotate pen/rectangle/circle;
+- Filter;
+- Layers;
+- image output;
+- OCR;
+- colour picking;
+- QR/barcode decoding;
+- pins;
+- region recall.
+
+Its purpose is to settle interaction behavior, not to become the long-term implementation.
+
+Current dependencies include GTK3, cairo, gtk-layer-shell, grim, wl-clipboard, notify-send, Tesseract, zbar and swayimg.
+
+The Python CLI remains intentionally small and is not being expanded while the Rust port is underway.
+
+How to run and test it, its tuning constants, and where it differs from this README: `docs/python-prototype.md`.
+
+---
+
+# Rust port
+
+The Rust implementation will prioritize behavioral parity before expanding the feature set.
+
+Planned order:
+
+1. headless Select core and behavioral tests;
+2. Wayland capture + overlays + Select + image output;
+3. Censor, open layers and undo;
+4. current Annotate behavior;
+5. Filter and rendering caches;
+6. Layers;
+7. Loupe and Enhance;
+8. CLI/output parity, OCR, QR and pins;
+9. switch the normal screenshot workflow to Rust;
+10. text, lines, arrows, highlighter and callouts;
+11. Measure and auto-redact;
+12. additional platform support such as X11.
+
+The Python prototype remains the behavioral reference until the Rust version reaches parity.
+
+---
+
+# Testing
+
+Behavioral tests are the executable form of this specification.
+
+The Rust core should be testable without Wayland or a renderer.
+
+Headless tests should drive the same semantic input model used by the interactive picker.
+
+Important test areas include:
+
+- anchor/cursor crossing;
+- modifier semantics;
+- selection scope;
+- bounds and clipping;
+- key repeat;
+- held keys across mode transitions;
+- mode-stack transitions;
+- open-layer behavior;
+- undo scope;
+- list behavior;
+- serialization round trips;
+- logical/pixel rounding;
+- rendered image equivalence.
+
+The existing Python test suite remains useful as a behavioral reference during the port.
+
+---
+
+# Development rule
+
+Behavior changes update all three together:
+
+1. this README;
+2. the relevant on-screen legend/palette;
+3. tests.
+
+The interaction grammar is a product constraint, not an implementation detail.

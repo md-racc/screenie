@@ -845,9 +845,8 @@ class Modes(Harness):
         a.alt = False
         a.mode.on_dir("R")  # Shift: move the box
         self.assertEqual(a.sel.rect, [x + 5, y, w, h])
-        a.space = True
         a.shift = False
-        a.mode.on_dir("R")  # Space no longer moves: the cursor corner does
+        a.mode.on_dir("R")  # plain: the cursor corner moves
         self.assertEqual(a.sel.rect, [x + 5, y, w + 5, h])
 
     def test_q_quits_from_any_mode(self):

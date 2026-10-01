@@ -1,7 +1,8 @@
 """Select: the base mode. Edit the box, look at it, finish."""
 
-from .. import draw
+from .. import draw, recall
 from ..app import Action
+from ..geometry import same
 from ..keys import AMOUNT, CONFIRM, INC, hex_colour
 from ..output import decode_code, notify
 from .box import BoxMode
@@ -9,6 +10,7 @@ from .box import BoxMode
 
 class Select(BoxMode):
     name = "select"
+    recalled = None  # (index into the ring, the rect it gave), for . again
 
     # --- keys -------------------------------------------------------------------
 
@@ -29,6 +31,8 @@ class Select(BoxMode):
                 a.push(a.make("layers", sel, index=int(name) - 1))
             else:
                 a.note = "no layers yet"
+        elif name == "period":
+            self.recall()
         elif name == "i":
             a.push(a.make("insert", sel))
         elif name in ("x", "a", "f"):  # a build tool: opens a layer
@@ -47,6 +51,24 @@ class Select(BoxMode):
                 notify("No QR / barcode found", "Adjust the box and try again")
         elif name == "Escape":
             a.finish(None)
+
+    def recall(self):
+        """. : the last accepted box (see recall.py); . again, while the box
+        is still the one it gave, steps back to older ones."""
+        a, sel = self.app, self.sel
+        rects = recall.recalled(a.layout.monitors)
+        if not rects:
+            a.note = "no last selection"
+            return
+        i = 0
+        if self.recalled and same(sel.rect, self.recalled[1]):
+            i = (self.recalled[0] + 1) % len(rects)
+        sel.remember()
+        if sel.center:
+            sel.toggle_center()
+        sel.set_rect(rects[i])
+        self.recalled = (i, list(sel.rect))
+        a.note = f"last {i + 1}/{len(rects)}" if len(rects) > 1 else "last"
 
     def capturable(self):
         """At least one output pixel each way (a box can be under a pixel
@@ -110,6 +132,6 @@ class Select(BoxMode):
         return text
 
     def legend(self):
-        return ["o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  +/- scope  u undo",
+        return ["o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  +/- scope  . last  u undo",
                 "i insert  z loupe  e enhance  x censor  a annotate  f filter  1-9 layers",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit"]

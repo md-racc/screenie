@@ -12,7 +12,7 @@ import argparse
 import os
 import sys
 
-from . import output
+from . import output, recall
 from .frame import Frame
 from .hypr import Capture, Layout, capture_window
 
@@ -57,6 +57,8 @@ def main(argv=None):
     action = app.run()
     if action is None:
         return 1
+    if action.kind in ("image", "ocr", "pin"):  # for . next time
+        recall.remember(layout.monitors, action.rect)
 
     # The picture is the capture plus the committed layers; view filters
     # (the lenses') never reach the output.

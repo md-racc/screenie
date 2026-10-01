@@ -3,8 +3,8 @@
 
 The selected layer is shown on its own: the capture with only that layer
 applied, inside the box it was made in (hiding the layers below and above
-it). A list shows every layer and what's in it (placed like every tag:
-inside the box while it fits, else just outside).
+it). A list shows every layer and what's in it (placed like every tag: on a
+side of the box, outside it first).
 
 The list keys are the same as the filter stack's:
 
