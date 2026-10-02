@@ -20,7 +20,7 @@ pub struct Delivered {
     pub copied: bool,
 }
 
-fn notifies(out: &Output) -> bool {
+pub fn notifies(out: &Output) -> bool {
     out.notify
         .unwrap_or_else(|| !std::io::stdout().is_terminal())
 }
@@ -42,21 +42,59 @@ fn write_file(
     Ok(path)
 }
 
+/// A project to keep beside the image, encoded only if it's needed.
+pub type ProjectBytes<'a> = &'a dyn Fn() -> Result<Vec<u8>, String>;
+
+/// Write a shot's project beside it: private, never overwriting.
+fn write_project(beside: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = files::project_of(beside);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Deliver an image. `what` names it for the notification ("Area").
-pub fn image(img: &Image, out: &Output, what: &str) -> Result<Delivered, String> {
+/// `project`, if given, is kept beside the runtime copy (and beside the
+/// `--save` copy with `--save-project`).
+pub fn image(
+    img: &Image,
+    out: &Output,
+    what: &str,
+    project: Option<ProjectBytes>,
+) -> Result<Delivered, String> {
     let png = encode::png(img, out.png_level).map_err(|e| format!("encoding: {e}"))?;
     let mut d = Delivered::default();
+    let mut project_bytes: Option<Vec<u8>> = None;
+    let mut project_once = |p: ProjectBytes| -> Result<Vec<u8>, String> {
+        if project_bytes.is_none() {
+            project_bytes = Some(p()?);
+        }
+        Ok(project_bytes.clone().expect("just made"))
+    };
     if !out.no_history {
         let runtime = files::runtime_dir().map_err(|e| format!("runtime dir: {e}"))?;
         let shots = runtime.join("shots");
         let path = write_file(&shots, "png", 0o600, &png)?;
+        if let Some(p) = project {
+            write_project(&path, &project_once(p)?)?;
+        }
         files::prune(&shots, files::KEEP);
         let _ = std::fs::write(runtime.join("last"), format!("{}\n", path.display()));
         d.shot = Some(path);
     }
     if let Some(dir) = &out.save {
         let dir = files::expand(dir.as_deref().unwrap_or(&files::pictures_dir()));
-        d.saved = Some(write_file(&dir, "png", 0o644, &png)?);
+        let path = write_file(&dir, "png", 0o644, &png)?;
+        if let (true, Some(p)) = (out.save_project, project) {
+            write_project(&path, &project_once(p)?)?;
+        }
+        d.saved = Some(path);
     }
     if out.stdout {
         std::io::stdout()

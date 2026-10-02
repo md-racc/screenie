@@ -19,11 +19,28 @@ pub struct Output {
     /// `--notify` / `--no-notify`; `None` is on when stdout isn't a terminal.
     pub notify: Option<bool>,
     pub no_history: bool,
+    /// The tesseract language; `None` is `$SCREENIE_LANG`, else `eng`.
+    pub ocr_lang: Option<String>,
+    /// `--json`: one line describing what happened.
+    pub json: bool,
+    /// `--save-project`: the project beside the `--save` image too.
+    pub save_project: bool,
 }
 
 impl Output {
     pub fn copies(&self) -> bool {
         self.copy.unwrap_or(!self.stdout)
+    }
+
+    pub fn ocr_lang(&self) -> String {
+        self.ocr_lang
+            .clone()
+            .or_else(|| {
+                std::env::var("SCREENIE_LANG")
+                    .ok()
+                    .filter(|l| !l.is_empty())
+            })
+            .unwrap_or_else(|| "eng".into())
     }
 }
 
@@ -45,6 +62,16 @@ pub struct Shot {
 pub enum Command {
     Pick(Pick),
     Shot(Shot),
+    /// `edit last[:N]`: the picker over a past shot's project.
+    Edit {
+        which: usize,
+        pick: Pick,
+    },
+    /// `history [-n N] [--json]`.
+    History {
+        n: usize,
+        json: bool,
+    },
     Help,
     Version,
     /// Internal: serve the clipboard (see platform::clipboard).
@@ -54,12 +81,28 @@ pub enum Command {
 pub const USAGE: &str = "\
 usage: screenie [pick] [--region REGION] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
        screenie shot [REGION] [OUTPUT OPTIONS]
+       screenie edit last[:N] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
+       screenie history [-n N] [--json]
 
 output options: --save [DIR]  --stdout  --copy | --no-copy  --png-level 0-9
-                --notify | --no-notify  --quiet  --no-history
+                --notify | --no-notify  --quiet  --no-history  --ocr-lang LANG  --json
+                --save-project
 
 REGION: all | monitor | monitor:NAME | X,Y WxH | last-region[:N] | -
 See README.md for the picker's keys, and docs/cli.md for the rest.";
+
+/// `last` (1) or `last:N`. Plain image files aren't editable yet.
+fn parse_last(s: &str) -> Result<usize, String> {
+    match s.strip_prefix("last") {
+        Some("") => Ok(1),
+        Some(n) => n
+            .strip_prefix(':')
+            .and_then(|n| n.parse().ok())
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| format!("bad shot {s:?}: last or last:N")),
+        None => Err("only past shots (last, last:N) can be edited so far".into()),
+    }
+}
 
 fn looks_like_a_path(s: &str) -> bool {
     s.contains('/') || s.starts_with('~') || s.starts_with('.')
@@ -84,6 +127,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         ..Pick::default()
     };
     let mut positional: Vec<String> = Vec::new();
+    let mut history_n: usize = 20;
     let err = |e: lexopt::Error| e.to_string();
     while let Some(arg) = p.next().map_err(err)? {
         let o = &mut pick.output;
@@ -114,12 +158,20 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 o.save = Some(dir);
             }
             Arg::Long("stdout") => o.stdout = true,
+            Arg::Long("json") => o.json = true,
+            Arg::Long("save-project") => o.save_project = true,
+            Arg::Short('n') if verb.as_deref() == Some("history") => {
+                history_n = p.value().map_err(err)?.parse().map_err(err)?;
+            }
             Arg::Long("copy") => o.copy = Some(true),
             Arg::Long("no-copy") => o.copy = Some(false),
             Arg::Long("notify") => o.notify = Some(true),
             Arg::Long("no-notify") => o.notify = Some(false),
             Arg::Long("quiet") => o.quiet = true,
             Arg::Long("no-history") => o.no_history = true,
+            Arg::Long("ocr-lang") => {
+                o.ocr_lang = Some(p.value().map_err(err)?.string().map_err(err)?)
+            }
             Arg::Long("png-level") => {
                 let n: u8 = p.value().map_err(err)?.parse().map_err(err)?;
                 if n > 9 {
@@ -129,7 +181,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             Arg::Value(v) => {
                 let v = v.string().map_err(err)?;
-                if verb.is_none() && positional.is_empty() && (v == "pick" || v == "shot") {
+                if verb.is_none()
+                    && positional.is_empty()
+                    && matches!(v.as_str(), "pick" | "shot" | "edit" | "history")
+                {
                     verb = Some(v);
                 } else {
                     positional.push(v);
@@ -138,7 +193,27 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             other => return Err(other.unexpected().to_string()),
         }
     }
+    if pick.output.stdout && pick.output.json {
+        return Err("--stdout and --json both claim stdout: pick one".into());
+    }
     match verb.as_deref() {
+        Some("history") => {
+            if let Some(extra) = positional.first() {
+                return Err(format!("unexpected argument {extra:?}"));
+            }
+            Ok(Command::History {
+                n: history_n,
+                json: pick.output.json,
+            })
+        }
+        Some("edit") => {
+            let which = match positional.as_slice() {
+                [w] => parse_last(w)?,
+                [] => return Err("edit what? (edit last, or last:N)".into()),
+                _ => return Err("edit takes one shot".into()),
+            };
+            Ok(Command::Edit { which, pick })
+        }
         Some("shot") => {
             if pick.keys.is_some() || pick.no_ui {
                 return Err("shot has no picker: --keys and --no-ui are for pick".into());
@@ -220,6 +295,29 @@ mod tests {
         assert!(cmd("shot --keys x").is_err());
         assert!(cmd("--png-level 12").is_err());
         assert!(cmd("shot all --region all").is_err());
+        assert!(cmd("--stdout --json").is_err());
+    }
+
+    #[test]
+    fn edit_and_history() {
+        assert!(matches!(
+            cmd("edit last").unwrap(),
+            Command::Edit { which: 1, .. }
+        ));
+        assert!(matches!(
+            cmd("edit last:3").unwrap(),
+            Command::Edit { which: 3, .. }
+        ));
+        assert!(cmd("edit last:0").is_err());
+        assert!(cmd("edit pic.png").is_err());
+        assert_eq!(
+            cmd("history -n 5 --json").unwrap(),
+            Command::History { n: 5, json: true }
+        );
+        assert_eq!(
+            cmd("history").unwrap(),
+            Command::History { n: 20, json: false }
+        );
     }
 
     #[test]

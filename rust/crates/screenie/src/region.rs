@@ -16,9 +16,13 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
                 .ok_or_else(|| "no focused monitor".into());
         }
         "active" => {
-            return Err("active (a window's own pixels) isn't in the port yet; \
-                        use pick, or `shot monitor`"
-                .into());
+            // In the picker, the active window's box (shot captures the
+            // window's own pixels instead).
+            return layout
+                .active
+                .and_then(|id| layout.window(id))
+                .map(|w| w.rect)
+                .ok_or_else(|| "no active window".into());
         }
         _ => {}
     }

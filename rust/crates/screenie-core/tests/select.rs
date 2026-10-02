@@ -204,7 +204,6 @@ fn the_finishing_keys() {
         ("KP_Enter", FinishedAction::Image { rect: START }),
         ("y", FinishedAction::Ocr { rect: START }),
         ("P", FinishedAction::Pin { rect: START }),
-        ("Q", FinishedAction::Code { rect: START }),
         (
             "p",
             FinishedAction::Colour {
@@ -217,6 +216,39 @@ fn the_finishing_keys() {
         s.keys(key);
         assert_eq!(done(&s), Some(&want), "{key}");
     }
+}
+
+struct Reads(Option<&'static str>);
+
+impl screenie_core::session::CodeReader for Reads {
+    fn read(
+        &mut self,
+        _: &Session,
+        _: screenie_core::geometry::LogicalRect,
+    ) -> Result<Option<String>, String> {
+        Ok(self.0.map(String::from))
+    }
+}
+
+#[test]
+fn q_reads_a_code_or_says_none_was_found_and_stays() {
+    let mut s = session();
+    s.set_code_reader(Box::new(Reads(None)));
+    s.keys("Q");
+    assert_eq!(
+        (s.outcome(), s.note()),
+        (None, Some("no QR / barcode found"))
+    );
+    let mut s = session();
+    s.set_code_reader(Box::new(Reads(Some("https://example.org"))));
+    s.keys("Q");
+    assert_eq!(
+        done(&s),
+        Some(&FinishedAction::Code {
+            rect: START,
+            text: "https://example.org".into()
+        })
+    );
 }
 
 #[test]

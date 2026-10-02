@@ -276,6 +276,14 @@ impl PixelMap {
         (self.px(p.x, Axis::X), self.px(p.y, Axis::Y))
     }
 
+    /// The inverse of `to_device`: an (unrounded) pixel position, logical.
+    pub fn from_device(&self, x: f64, y: f64) -> LogicalPoint {
+        LogicalPoint::new(
+            self.origin.x + x / self.scale,
+            self.origin.y + y / self.scale,
+        )
+    }
+
     /// A logical rectangle as image pixels, rounding each edge on its own.
     pub fn to_pixels(&self, r: LogicalRect) -> PixelRect {
         let x0 = rnd(self.px(r.x, Axis::X));

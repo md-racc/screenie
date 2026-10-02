@@ -43,6 +43,11 @@ pub const SELECT: &[&[Item]] = &[
         ("1-9 layers", &[]),
     ],
     &[
+        ("insert", &[Intent::Insert]),
+        ("loupe", &[Intent::Loupe]),
+        ("enhance", &[Intent::Enhance]),
+    ],
+    &[
         ("capture", &[Intent::Confirm]),
         ("text", &[Intent::Ocr]),
         ("colour", &[Intent::CopyColour]),
@@ -171,6 +176,94 @@ pub const LAYERS: &[&[Item]] = &[
     ],
 ];
 
+pub const INSERT: &[&[Item]] = &[
+    &[
+        (
+            "move",
+            &[
+                Intent::Steer(Dir::Left),
+                Intent::Steer(Dir::Down),
+                Intent::Steer(Dir::Up),
+                Intent::Steer(Dir::Right),
+            ],
+        ),
+        ("step", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("Shift ×4  Alt half to edge", &[]),
+        (
+            "edges",
+            &[
+                Intent::EdgeJump(Dir::Right),
+                Intent::EdgeJump(Dir::Left),
+                Intent::EdgeJump(Dir::Down),
+                Intent::EdgeJump(Dir::Up),
+            ],
+        ),
+    ],
+    &[
+        (
+            "box sides",
+            &[
+                Intent::FarEdge(Dir::Left),
+                Intent::FarEdge(Dir::Right),
+                Intent::FarEdge(Dir::Up),
+                Intent::FarEdge(Dir::Down),
+            ],
+        ),
+        ("middle", &[Intent::Middle]),
+        ("back", &[Intent::Undo]),
+        ("click place", &[]),
+    ],
+    &[
+        ("loupe", &[Intent::Loupe]),
+        ("enhance", &[Intent::Enhance]),
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
+        ("colour", &[Intent::CopyColour]),
+        ("back", &[Intent::Confirm, Intent::Back]),
+    ],
+];
+
+pub const LOUPE: &[&[Item]] = &[
+    &[
+        ("1px  Shift a loupe-width", &[]),
+        ("size", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        (
+            "view filter",
+            &[Intent::ViewFilter(1), Intent::ViewFilter(-1)],
+        ),
+        ("click/drag place", &[]),
+    ],
+    &[
+        ("colour", &[Intent::CopyColour]),
+        ("enhance", &[Intent::Enhance]),
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
+        ("off", &[Intent::Loupe, Intent::Confirm, Intent::Back]),
+    ],
+];
+
+pub const ENHANCE: &[&[Item]] = &[
+    &[
+        (
+            "move lens  Shift faster  Alt / Alt+Shift halve / double",
+            &[],
+        ),
+        ("zoom", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+    ],
+    &[
+        (
+            "view filter",
+            &[Intent::ViewFilter(1), Intent::ViewFilter(-1)],
+        ),
+        ("sharp/smooth", &[Intent::ToggleSharp]),
+        ("drag new lens  click centre", &[]),
+        ("loupe", &[Intent::Loupe]),
+        ("back", &[Intent::Confirm, Intent::Back]),
+    ],
+];
+
 /// The lines of a legend, with each item's keys looked up in `map` (then
 /// the session keys). An item listing intents none of which is bound is
 /// left out; one listing none is a plain note.
@@ -209,6 +302,7 @@ mod tests {
             [
                 "o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  + - scope  . last  u undo",
                 "x censor  a annotate  f filter  1-9 layers",
+                "i insert  z loupe  e enhance",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",
             ]
         );
@@ -235,6 +329,9 @@ mod tests {
                 "shape" => SHAPE,
                 "filter" => FILTER,
                 "layers" => LAYERS,
+                "insert" => INSERT,
+                "loupe" => LOUPE,
+                "enhance" => ENHANCE,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {

@@ -163,6 +163,9 @@ impl Session {
             Intent::Back => return self.back_from_tool(),
             _ => {}
         }
+        if let Some(t) = self.lens_at(intent, f.sel.rect().centre()) {
+            return t;
+        }
         match boxes::apply(&mut f.sel, &self.snap, &mut f.drag, intent) {
             BoxOutcome::NotMine => {}
             outcome => {

@@ -288,6 +288,46 @@ impl Project {
     }
 }
 
+/// What a project file holds beside the capture: the project, and the
+/// layout the capture was taken on.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFile {
+    pub format: String,
+    pub project: Project,
+    pub layout: crate::layout::Layout,
+}
+
+/// The project file's `format` tag.
+pub const FORMAT: &str = "screenie-project";
+
+impl ProjectFile {
+    pub fn new(project: Project, layout: crate::layout::Layout) -> Self {
+        Self {
+            format: FORMAT.into(),
+            project,
+            layout,
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("plain data serializes")
+    }
+
+    pub fn from_json(s: &str) -> Result<ProjectFile, String> {
+        let f: ProjectFile = serde_json::from_str(s).map_err(|e| e.to_string())?;
+        if f.format != FORMAT {
+            return Err(format!("not a screenie project ({:?})", f.format));
+        }
+        if f.project.version > VERSION {
+            return Err(format!(
+                "project version {} is newer than this screenie",
+                f.project.version
+            ));
+        }
+        Ok(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +372,24 @@ mod tests {
         let json = sample().to_json();
         assert!(json.contains(r#""version":1"#), "{json}");
         assert!(json.contains(r#""op":"censor","rect":{"x":0.0,"y":10.0,"w":20.0,"h":20.0},"kind":"pixelate","amount":10.0"#), "{json}");
+    }
+
+    #[test]
+    fn a_project_file_round_trips_with_its_layout() {
+        use crate::layout::{Layout, Monitor, MonitorId};
+        let layout = Layout::new(
+            vec![Monitor {
+                id: MonitorId(0),
+                name: "DP-1".into(),
+                rect: LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
+                scale: 1.0,
+            }],
+            vec![],
+            MonitorId(0),
+        );
+        let f = ProjectFile::new(sample(), layout);
+        assert_eq!(ProjectFile::from_json(&f.to_json()).unwrap(), f);
+        assert!(ProjectFile::from_json(&f.to_json().replace(FORMAT, "other")).is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub mod image;
 pub mod picture;
 pub mod render;
 pub mod ui;
+pub mod view;
 
 pub use frame::Frame;
 pub use image::{Image, Rgb};

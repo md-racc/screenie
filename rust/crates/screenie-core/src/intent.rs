@@ -124,6 +124,20 @@ pub enum Intent {
     /// `r` / `c` in Annotate: a shape, as a box of its own.
     Shape(crate::model::ShapeKind),
 
+    // Lenses and points.
+    /// `z`: the loupe.
+    Loupe,
+    /// `e`: enhance.
+    Enhance,
+    /// `i`: Insert, a point cursor in the box.
+    Insert,
+    /// `m` in Insert: the box's centre.
+    Middle,
+    /// `v` / `V`: the next or previous view filter (lenses only).
+    ViewFilter(i32),
+    /// `s` in Enhance: sharp or smooth pixels.
+    ToggleSharp,
+
     // Lists (Filter, Layers).
     /// `[` / `]`: select the item below (-1) or above (+1).
     ListStep(i32),

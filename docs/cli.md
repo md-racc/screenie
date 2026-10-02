@@ -216,7 +216,8 @@ Output options are composable and apply to any verb that produces a result.
     (as wl-copy does).
 
 `--save [DIR|TEMPLATE]`
-: Also save to a file. With no argument, the configured directory is used.
+: Also save to a file. With no argument, the configured directory is used,
+  else `$XDG_PICTURES_DIR/Screenshots`.
   A TEMPLATE may use strftime fields plus:
   - `{class}` `{title}` `{monitor}`: where the box was;
   - `{w}` `{h}`: the size in output pixels;
@@ -357,7 +358,8 @@ pick.mode = "annotate"
   and `history` read. The newest `[history] keep` shots are kept.
   - A project is the uncensored capture, the layout snapshot (monitors,
     windows, scales), the box, the layer stack as ops, and any measure
-    calibration. Its format is a versioned archive.
+    calibration. The file is a PNG of the capture, with the versioned
+    project as JSON in a `screenie-project` text chunk.
   - Projects are 0600 and never leave the runtime directory unless you
     pass `--save-project`.
   - `--no-history` writes neither the project nor the copy.
@@ -455,13 +457,9 @@ If one is ever added:
 
 - `--notify` default: on when stdout isn't a terminal (hotkeys), off in a
   shell?
-- Should `--save` with no argument and no configured directory be an error,
-  or use `$XDG_PICTURES_DIR/Screenshots`?
 - `edit -` from stdin plus `--stdout`: allowed (a filter in a pipeline), or
   too clever?
 - Should `--result text` (OCR) put confidence or per-word boxes in
   `--json`? Auto-redact computes them anyway.
 - Shell completions for REGION: complete window classes and monitor names
   live from Hyprland?
-- Is the project format our own archive, or something standard (an ORA/PSD
-  with layers loses the ops, so the layers wouldn't be editable)?

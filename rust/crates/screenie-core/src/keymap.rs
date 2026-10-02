@@ -141,7 +141,25 @@ pub fn box_grammar() -> Keymap {
         .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
         .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
         .bind(Chord::ch('c'), Intent::ToggleCentre)
-        .bind(Chord::ch('u'), Intent::Undo);
+        .bind(Chord::ch('u'), Intent::Undo)
+        .extend(&lens_keys());
+    m
+}
+
+/// `z` (and `Z`) the loupe, `e` enhance: from every mode with a box.
+pub fn lens_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('z'), Intent::Loupe)
+        .alias(Chord::ch('Z'), Intent::Loupe)
+        .bind(Chord::ch('e'), Intent::Enhance);
+    m
+}
+
+/// `v` / `V` cycle the view filter (the lenses only).
+fn view_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('v'), Intent::ViewFilter(1))
+        .bind(Chord::ch('V'), Intent::ViewFilter(-1));
     m
 }
 
@@ -171,6 +189,7 @@ pub static SELECT: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('p'), Intent::CopyColour)
         .bind(Chord::ch('Q'), Intent::DecodeCode)
         .bind(Chord::ch('P'), Intent::Pin)
+        .bind(Chord::ch('i'), Intent::Insert)
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
@@ -241,7 +260,8 @@ pub static ANNOTATE: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
-        .bind(Chord::ch('u'), Intent::Undo);
+        .bind(Chord::ch('u'), Intent::Undo)
+        .extend(&lens_keys());
     m
 });
 
@@ -288,6 +308,76 @@ pub static FILTER: LazyLock<Keymap> = LazyLock::new(|| {
     m
 });
 
+fn build_tool_openers() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+    m
+}
+
+/// Insert: a pixel cursor. hjkl step (Shift: four steps; Alt: halfway to
+/// the box edge); Ctrl and Alt+Shift mean nothing here.
+pub static INSERT: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = direction_grammar();
+    m.bindings.retain(|b| {
+        !matches!(
+            b.intent,
+            Intent::Jump(_) | Intent::Slide(_) | Intent::Scale(_, Scale::Double)
+        )
+    });
+    m.extend(&adjust_keys())
+        .extend(&lens_keys())
+        .extend(&build_tool_openers())
+        .bind(Chord::ch('w'), Intent::EdgeJump(Dir::Right))
+        .bind(Chord::ch('b'), Intent::EdgeJump(Dir::Left))
+        .bind(Chord::ch('}'), Intent::EdgeJump(Dir::Down))
+        .bind(Chord::ch('{'), Intent::EdgeJump(Dir::Up))
+        .bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
+        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
+        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
+        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
+        .bind(Chord::ch('m'), Intent::Middle)
+        .bind(Chord::ch('u'), Intent::Undo)
+        .bind(Chord::ch('p'), Intent::CopyColour)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
+/// Loupe: one pixel a tap, a loupe-width with Shift; z, Enter or Esc close.
+pub static LOUPE: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = direction_grammar();
+    m.bindings
+        .retain(|b| matches!(b.intent, Intent::Steer(_) | Intent::Translate(_)));
+    m.extend(&adjust_keys())
+        .extend(&view_keys())
+        .extend(&build_tool_openers())
+        .bind(Chord::ch('z'), Intent::Loupe)
+        .alias(Chord::ch('Z'), Intent::Loupe)
+        .bind(Chord::ch('e'), Intent::Enhance)
+        .bind(Chord::ch('p'), Intent::CopyColour)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
+/// Enhance: hjkl move the lens (Shift: bigger steps), Alt / Alt+Shift halve
+/// or double it; Ctrl means nothing.
+pub static ENHANCE: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = direction_grammar();
+    m.bindings
+        .retain(|b| !matches!(b.intent, Intent::Jump(_) | Intent::Slide(_)));
+    m.extend(&adjust_keys())
+        .extend(&view_keys())
+        .bind(Chord::ch('s'), Intent::ToggleSharp)
+        .bind(Chord::ch('z'), Intent::Loupe)
+        .alias(Chord::ch('Z'), Intent::Loupe)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
     vec![
@@ -297,6 +387,9 @@ pub fn all() -> Vec<(&'static str, &'static Keymap)> {
         ("shape", &*SHAPE),
         ("filter", &*FILTER),
         ("layers", &*LAYERS),
+        ("insert", &*INSERT),
+        ("loupe", &*LOUPE),
+        ("enhance", &*ENHANCE),
     ]
 }
 

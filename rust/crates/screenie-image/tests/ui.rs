@@ -43,6 +43,10 @@ fn view(top: Vec<String>) -> View {
         swatch: None,
         lists: vec![],
         inspect: None,
+        pixel_cursor: None,
+        loupe: None,
+        enhance: None,
+        filter: screenie_core::lens::ViewFilter::Off,
         status: "SELECT  560×90  (659,259)".into(),
         top,
         monitors: MONS.to_vec(),
@@ -321,4 +325,69 @@ fn the_layer_view_shows_a_layer_alone() {
         pic.crop(START).rgb(PixelPoint::new(280, 45)),
         Some(Rgb(255, 255, 255))
     ); // output unchanged
+}
+
+fn render(
+    s: &screenie_core::session::Session,
+    pic: &mut Picture,
+    ui: &mut Ui,
+    name: &str,
+) -> Image {
+    pic.sync(s.layers(), s.open_layer(), s.editing().as_ref());
+    pic.inspect(s.inspected());
+    let mut into = Image::new(1920, 1080);
+    ui.draw(pic, 0, MONS[0], &View::of(s), &mut into);
+    save(name, &into);
+    into
+}
+
+#[test]
+fn the_loupe_magnifies_its_pixels_and_lenses_see_the_pending_layer() {
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut pic = frame(1);
+    let mut s = session(START);
+    s.play("x t x z", 0.0).unwrap(); // a black bar locked; the loupe from the censor
+    let into = render(&s, &mut pic, &mut ui, "loupe.png");
+    let view = View::of(&s);
+    let l = view.loupe.expect("the loupe is up");
+    assert_eq!(l.at, PixelPoint::new(380, 215));
+    assert_eq!(pic.rgb(l.at), Some(Rgb(0, 0, 0))); // sees the censor
+    assert!(s.layers().is_empty()); // still only pending
+    // The magnifier's centre cell shows that black pixel, 10px a pixel.
+    let c = (l.rect.x + 10.0 * 10.0 + 5.0, l.rect.y + 10.0 * 10.0 + 5.0);
+    assert_eq!(at(&into, c.0 as i32, c.1 as i32), Rgb(0, 0, 0));
+    // Tags keep clear of the magnifier.
+    assert!(!view.occupied().is_empty());
+}
+
+#[test]
+fn enhance_shows_the_box_magnified_and_view_filters_change_only_the_lens() {
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut pic = frame(1);
+    let mut s = session(START);
+    s.play("e", 0.0).unwrap();
+    let plain = render(&s, &mut pic, &mut ui, "enhance.png");
+    // The lens (240..520 x 192..238) at 2x around its centre (380, 215):
+    // the light block fills it.
+    assert_eq!(at(&plain, 300, 215), Rgb(217, 217, 217));
+    s.play("v v", 0.0).unwrap(); // invert
+    let inverted = render(&s, &mut pic, &mut ui, "enhance-invert.png");
+    assert_eq!(at(&inverted, 300, 215), Rgb(38, 38, 38));
+    assert_eq!(at(&inverted, 110, 175), at(&plain, 110, 175)); // outside the lens: as it was
+    assert_eq!(pic.crop(START), frame(1).crop(START)); // never in the output
+}
+
+#[test]
+fn insert_draws_an_inverted_pixel_cursor() {
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut pic = frame(1);
+    let mut s = session(START);
+    s.play("i", 0.0).unwrap();
+    let into = render(&s, &mut pic, &mut ui, "insert.png");
+    assert_eq!(at(&into, 380, 215), Rgb(38, 38, 38)); // the light block, inverted
+    assert_eq!(at(&into, 373, 215), Rgb(38, 38, 38)); // the hollow square's edge
+    assert_eq!(at(&into, 375, 215), Rgb(217, 217, 217)); // inside it: untouched
 }

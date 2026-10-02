@@ -525,11 +525,13 @@ dependencies = [
 name = "screenie"
 version = "0.1.0"
 dependencies = [
+ "fontdue",
  "jiff",
  "lexopt",
  "screenie-core",
  "screenie-image",
  "screenie-platform",
+ "serde_json",
 ]
 
 [[package]]
@@ -554,6 +556,7 @@ dependencies = [
 name = "screenie-platform"
 version = "0.1.0"
 dependencies = [
+ "png",
  "rustix",
  "screenie-core",
  "screenie-image",

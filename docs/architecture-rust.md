@@ -2346,8 +2346,35 @@ says what was chosen and why. Smaller judgement calls live in
   scope step and per recall. `u` skips entries that would change
   nothing, so every `u` visibly does something.
 
+- **The host provides what core can't**: pixels for the eyedropper
+  (`Sampler`) and code reading for `Q` (`CodeReader`), as trait objects set
+  on the session. Core still never sees a pixel buffer.
+- **Repeat is per mode**: box modes 20→300 steps/s, Insert scaled to cross
+  the box in about a second, the loupe 15→200 px/s (Shift 4→12 widths/s);
+  amounts that explicitly repeat (`+`/`-` in tools) follow the keyboard's
+  own repeat rate, which the compositor reports.
+
+## Platform
+
+- **One Wayland connection** (smithay-client-toolkit 0.21) for capture and
+  overlays: wlr-screencopy for the frame, composed at the highest scale;
+  ext-image-copy-capture with a foreign-toplevel source for a window's own
+  pixels; layer-shell overlays drawn into shm. A capture that gets no
+  frame fails after 2 s rather than hanging (monitors asleep).
+- **The clipboard is served by a detached copy of screenie**
+  (`__serve-clipboard`, wl-clipboard-rs in the foreground): Wayland's
+  clipboard dies with its owner, and this needs no `unsafe` fork.
+- **tiny-skia** draws strokes and shapes; **fontdue** draws the tags;
+  filters and view filters are our own per-pixel maths.
+- OCR (tesseract, TSV), codes (zbarimg) and pins (swayimg) are external
+  programs, as in the prototype.
+
 ## Files
 
+- **Project files are PNGs**: the uncensored capture, with the versioned
+  project and its layout as JSON in a `screenie-project` iTXt chunk. One
+  self-contained, private (0600) file beside each shot; any viewer opens
+  it as the plain capture.
 - **The recall ring keeps the prototype's `regions.json` format** in the
   same place (`$XDG_STATE_HOME/screenie/regions.json`), so the Python and
   Rust pickers share one ring until the cutover. Core holds the data and

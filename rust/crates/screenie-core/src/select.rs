@@ -37,9 +37,17 @@ impl Session {
             }
             BoxOutcome::NotMine => {}
         }
+        if let Some(t) = self.lens_at(intent, self.sel.rect().centre()) {
+            return t;
+        }
         let needs_box = matches!(
             intent,
-            Intent::Confirm | Intent::Ocr | Intent::DecodeCode | Intent::Pin | Intent::Tool(_)
+            Intent::Confirm
+                | Intent::Ocr
+                | Intent::DecodeCode
+                | Intent::Pin
+                | Intent::Tool(_)
+                | Intent::Insert
         );
         if needs_box && !self.capturable() {
             self.note = Some("empty box".into());
@@ -52,6 +60,10 @@ impl Session {
                 self.snap.scope(&mut self.sel, step);
             }
             Intent::Recall => self.recall(),
+            Intent::Insert => {
+                let m = crate::insert::InsertMode::new(&self.pixels, self.sel.rect());
+                return Transition::Push(crate::session::Mode::Insert(m));
+            }
             Intent::Choose(n) => {
                 // The layer view, at that layer.
                 if self.project.layers.is_empty() {
@@ -62,11 +74,23 @@ impl Session {
                 }
             }
             Intent::Tool(tool) => return Transition::OpenTool(self.tool_mode(tool)),
-            Intent::Confirm | Intent::Ocr | Intent::DecodeCode | Intent::Pin => {
+            Intent::DecodeCode => {
+                let rect = self.sel.rect();
+                match self.read_code(rect) {
+                    Ok(text) => {
+                        return Transition::Finish(Outcome::Done(FinishedAction::Code {
+                            rect,
+                            text,
+                        }));
+                    }
+                    // Nothing there: say so, and stay (adjust the box, retry).
+                    Err(why) => self.note = Some(why),
+                }
+            }
+            Intent::Confirm | Intent::Ocr | Intent::Pin => {
                 let rect = self.sel.rect();
                 return Transition::Finish(Outcome::Done(match intent {
                     Intent::Ocr => FinishedAction::Ocr { rect },
-                    Intent::DecodeCode => FinishedAction::Code { rect },
                     Intent::Pin => FinishedAction::Pin { rect },
                     _ => FinishedAction::Image { rect },
                 }));

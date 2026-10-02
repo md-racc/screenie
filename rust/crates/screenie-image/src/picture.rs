@@ -31,6 +31,8 @@ pub struct Picture {
     /// The layer the Layers view shows alone: the capture with only it
     /// applied, over its clip.
     isolated: Option<(Layer, PixelRect, Image)>,
+    /// Bumps whenever what's shown changes (for caches of it).
+    generation: u64,
 }
 
 fn clip_to(r: PixelRect, ext: PixelRect) -> PixelRect {
@@ -43,6 +45,9 @@ fn clip_to(r: PixelRect, ext: PixelRect) -> PixelRect {
         ((r.y + r.h).min(ext.y + ext.h) - y0).max(0),
     )
 }
+
+/// OCR upscales frames under this scale.
+pub const OCR_SCALE: f64 = 1.5;
 
 /// Open-layer prefixes kept.
 pub const PREFIXES: usize = 12;
@@ -59,7 +64,23 @@ impl Picture {
             prefixes: Vec::new(),
             applied: 0,
             isolated: None,
+            generation: 0,
         }
+    }
+
+    /// Bumps whenever what's shown changes.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// What's shown over a rectangle: the committed picture with the open
+    /// layer's view over its clip.
+    pub fn shown_crop(&self, r: PixelRect) -> Image {
+        let mut img = self.committed.image().crop(r);
+        if let Some((pr, patch)) = self.open_patch() {
+            img.blit(patch, patch.extent(), pr.x - r.x, pr.y - r.y);
+        }
+        img
     }
 
     /// The layer the Layers view is inspecting, if any.
@@ -130,11 +151,15 @@ impl Picture {
             self.committed = Frame::new(img, self.base.layout());
             self.made_from = layers.to_vec();
             self.version += 1;
+            self.generation += 1;
             self.locked = None;
             self.shown = None;
             self.prefixes.clear();
         }
         let Some(open) = open else {
+            if self.locked.is_some() {
+                self.generation += 1;
+            }
             self.locked = None;
             self.shown = None;
             self.prefixes.clear();
@@ -214,6 +239,7 @@ impl Picture {
             );
         }
         self.shown = Some((editing, img));
+        self.generation += 1;
     }
 
     /// The open layer's view over its clip (frame px), if a layer is open.
@@ -233,6 +259,28 @@ impl Picture {
             }
         }
         self.committed.rgb(p)
+    }
+
+    /// What OCR reads for a box: the committed pixels in greyscale, dark
+    /// backgrounds flipped (tesseract wants dark text on light), and
+    /// doubled when the frame is under 1.5x (screen text is small). Also
+    /// returns the crop's origin and its upscale, to map word boxes back.
+    pub fn ocr_crop(&self, rect: LogicalRect) -> (Image, PixelPoint, u32) {
+        let r = self.committed.map().to_pixels(rect);
+        let mut img = self.committed.image().crop(r);
+        crate::view::apply(&mut img, screenie_core::lens::ViewFilter::Grey);
+        if crate::view::is_dark(&img) {
+            crate::view::apply(&mut img, screenie_core::lens::ViewFilter::Invert);
+        }
+        let up = if self.committed.map().scale() < OCR_SCALE {
+            2
+        } else {
+            1
+        };
+        if up > 1 {
+            img = crate::compose::resize(&img, img.width() * up, img.height() * up);
+        }
+        (img, PixelPoint::new(r.x, r.y), up)
     }
 
     /// The output for a box: the committed picture's pixels.

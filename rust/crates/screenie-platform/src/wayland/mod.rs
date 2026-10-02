@@ -4,6 +4,7 @@
 mod capture;
 mod keys;
 mod overlay;
+mod window;
 
 pub use overlay::OverlayApp;
 
@@ -39,6 +40,7 @@ pub struct Wayland {
     conn: Connection,
     queue: EventQueue<State>,
     state: State,
+    globals: GlobalList,
 }
 
 pub(crate) struct State {
@@ -56,6 +58,9 @@ pub(crate) struct State {
     overlay: Option<overlay::Overlay>,
     /// The keyboard's repeat rate (per second) and delay (seconds).
     key_repeat: Option<(f64, f64)>,
+    /// Toplevels, bound only for a window capture.
+    toplevels: Option<smithay_client_toolkit::foreign_toplevel_list::ForeignToplevelList>,
+    window: Option<window::WindowCapture>,
 }
 
 /// The empty user data for globals with no events of interest.
@@ -88,11 +93,18 @@ impl Wayland {
             capture: Vec::new(),
             overlay: None,
             key_repeat: None,
+            toplevels: None,
+            window: None,
         };
         queue
             .roundtrip(&mut state)
             .map_err(|e| Error::Protocol(format!("roundtrip: {e}")))?;
-        Ok(Self { conn, queue, state })
+        Ok(Self {
+            conn,
+            queue,
+            state,
+            globals,
+        })
     }
 
     fn qh(&self) -> QueueHandle<State> {

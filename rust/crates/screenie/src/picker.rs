@@ -35,6 +35,18 @@ impl Picker {
     }
 }
 
+/// `Q`'s reader: zbar over the committed pixels of the box.
+pub struct Codes(pub Picture);
+
+impl screenie_core::session::CodeReader for Codes {
+    fn read(&mut self, s: &Session, rect: LogicalRect) -> Result<Option<String>, String> {
+        self.0.sync(s.layers(), None, None);
+        let png = screenie_image::encode::png(&self.0.crop(rect), 1).map_err(|e| e.to_string())?;
+        let dir = crate::files::runtime_dir().map_err(|e| format!("runtime dir: {e}"))?;
+        screenie_platform::codes::decode(&png, &dir)
+    }
+}
+
 impl OverlayApp for Picker {
     fn input(&mut self, ev: RawEvent, now: f64) {
         self.session.handle(ev, now);

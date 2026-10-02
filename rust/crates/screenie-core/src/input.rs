@@ -212,6 +212,11 @@ impl InputState {
         (n >= 1.0).then_some((dirs, n as u32))
     }
 
+    /// The directions held down now.
+    pub fn held_dirs(&self) -> DirSet {
+        self.held.iter().map(|h| h.dir).collect()
+    }
+
     /// Whether anything held repeats (the host should keep ticking).
     pub fn repeating(&self) -> bool {
         !self.held.is_empty() || self.held_key.is_some()

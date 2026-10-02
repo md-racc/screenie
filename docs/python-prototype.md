@@ -200,7 +200,9 @@ frozen.
    - Layers keeps the same index, which selects the item *above* (later),
      else the new top.
 
-   The README doesn't define which direction "next" is.
+   The README now settles it: the next row down the displayed list (the
+   item below in the stack), else the row above. That's the prototype's
+   Filter behaviour; its Layers list differs.
 2. **Hiding a layer** (`Space` in Layers) isn't an undo step in the
    prototype. It's a view toggle. The README lists visibility changes in
    project history.

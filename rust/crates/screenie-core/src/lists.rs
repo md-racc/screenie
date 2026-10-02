@@ -24,9 +24,8 @@ pub fn swap_with<T: Copy + PartialEq>(ids: &[T], selected: Option<T>, delta: i32
 /// What's selected after deleting the item at `index` (of `before`, the
 /// list as it was): the next surviving item, else the previous one.
 ///
-/// PROVISIONAL (rust/PROGRESS.md, open question 1): "next" is taken in
-/// display order, top first, so it's the item below in the stack; with
-/// none below, the one above.
+/// "Next" is the next row down the list as displayed (top first), so the
+/// item below in the stack; with none below, the one above (README, Lists).
 pub fn after_delete<T: Copy>(before: &[T], index: usize) -> Option<T> {
     if index > 0 {
         before.get(index - 1).copied()

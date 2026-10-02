@@ -17,11 +17,13 @@ use crate::filter::FilterMode;
 use crate::geometry::{Axis, End, LogicalPoint, LogicalRect, PixelMap, PixelPoint};
 use crate::history::{LayerUndo, ProjectEntry, ProjectHistory};
 use crate::input::{InputState, Press};
+use crate::insert::InsertMode;
 use crate::intent::Intent;
 use crate::keymap::{self, Keymap};
 use crate::keys::{Chord, Key, Mods};
 use crate::layers::LayersMode;
 use crate::layout::Layout;
+use crate::lens::{EnhanceMode, LoupeMode, View};
 use crate::model::{Layer, Op, OpData, OpId, Project};
 use crate::select::SelectState;
 use crate::targets::SnapEnv;
@@ -83,11 +85,23 @@ pub enum Button {
 /// What the picker produced. The front end delivers it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FinishedAction {
-    Image { rect: LogicalRect },
-    Ocr { rect: LogicalRect },
-    Colour { pixel: PixelPoint },
-    Code { rect: LogicalRect },
-    Pin { rect: LogicalRect },
+    Image {
+        rect: LogicalRect,
+    },
+    Ocr {
+        rect: LogicalRect,
+    },
+    Colour {
+        pixel: PixelPoint,
+    },
+    /// A QR code or barcode, already read.
+    Code {
+        rect: LogicalRect,
+        text: String,
+    },
+    Pin {
+        rect: LogicalRect,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +131,27 @@ pub enum Mode {
     Shape(ShapeMode),
     Filter(FilterMode),
     Layers(LayersMode),
+    Insert(InsertMode),
+    Loupe(LoupeMode),
+    Enhance(EnhanceMode),
+}
+
+/// What a temporary child hands back to the mode below when it closes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChildResult {
+    /// A pixel position (the loupe's): Insert adopts it.
+    Position(PixelPoint),
+}
+
+/// Where a build tool opens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Place {
+    /// The box's centre.
+    Default,
+    /// Centred on a point (from a lens).
+    Centre(LogicalPoint),
+    /// A censor's top-left on a point (from Insert's cursor).
+    Corner(LogicalPoint),
 }
 
 impl Mode {
@@ -127,6 +162,9 @@ impl Mode {
             Mode::Shape(_) => "shape",
             Mode::Filter(_) => "filter",
             Mode::Layers(_) => "layers",
+            Mode::Insert(_) => "insert",
+            Mode::Loupe(_) => "loupe",
+            Mode::Enhance(_) => "enhance",
         }
     }
 
@@ -136,7 +174,11 @@ impl Mode {
             Mode::Censor(c) => Some(&c.sel),
             Mode::Shape(s) => Some(&s.sel),
             Mode::Filter(f) => Some(&f.sel),
-            Mode::Annotate(_) | Mode::Layers(_) => None,
+            Mode::Annotate(_)
+            | Mode::Layers(_)
+            | Mode::Insert(_)
+            | Mode::Loupe(_)
+            | Mode::Enhance(_) => None,
         }
     }
 
@@ -144,6 +186,12 @@ impl Mode {
     fn shows_ink(&self) -> bool {
         matches!(self, Mode::Annotate(_) | Mode::Shape(_))
     }
+}
+
+/// Reads QR codes and barcodes for `Q`. The host provides it; with none
+/// found, the picker stays open.
+pub trait CodeReader {
+    fn read(&mut self, session: &Session, rect: LogicalRect) -> Result<Option<String>, String>;
 }
 
 /// Reads the picture for the eyedropper. The host provides it: core has
@@ -166,6 +214,8 @@ pub enum Transition {
     Push(Mode),
     /// Back to the mode below.
     Pop,
+    /// Back to the mode below, with a result for it.
+    PopWith(ChildResult),
     /// Back to the mode at this depth (0 is Select).
     PopTo(usize),
     Finish(Outcome),
@@ -211,7 +261,11 @@ pub struct Session {
     pub(crate) open: Option<OpenLayer>,
     pub(crate) ink: Ink,
     pub(crate) ink_width: f64,
+    pub(crate) view: View,
+    /// The loupe window, frame pixels across.
+    pub(crate) loupe_px: i32,
     sampler: Option<Box<dyn Sampler>>,
+    code_reader: Option<Box<dyn CodeReader>>,
     stack: Vec<Mode>,
     pending: Option<Pending>,
     input: InputState,
@@ -255,7 +309,10 @@ impl Session {
             open: None,
             ink: Ink::palette(DEFAULT_INK),
             ink_width: WIDTH,
+            view: View::default(),
+            loupe_px: crate::lens::SIZE,
             sampler: None,
+            code_reader: None,
             stack: Vec::new(),
             pending: None,
             show_help: false,
@@ -264,9 +321,36 @@ impl Session {
         }
     }
 
+    /// Pick up a saved project: its layers (still editable, with their
+    /// ids) and its selection. Project history starts afresh.
+    pub fn restore(&mut self, project: Project) {
+        self.sel.set_rect(project.selection);
+        self.project = project;
+    }
+
     /// Give the session a way to read the picture (the eyedropper).
     pub fn set_sampler(&mut self, sampler: Box<dyn Sampler>) {
         self.sampler = Some(sampler);
+    }
+
+    /// Give the session a way to read codes (`Q`).
+    pub fn set_code_reader(&mut self, reader: Box<dyn CodeReader>) {
+        self.code_reader = Some(reader);
+    }
+
+    /// Read a code in a rect: its text, or a note why not.
+    pub(crate) fn read_code(&mut self, rect: LogicalRect) -> Result<String, String> {
+        let mut r = self
+            .code_reader
+            .take()
+            .ok_or_else(|| "no code reader".to_string())?;
+        let found = r.read(self, rect);
+        self.code_reader = Some(r);
+        match found {
+            Ok(Some(text)) => Ok(text),
+            Ok(None) => Err("no QR / barcode found".into()),
+            Err(e) => Err(e),
+        }
     }
 
     pub(crate) fn sample(&mut self, at: PixelPoint) -> Option<[u8; 3]> {
@@ -274,6 +358,20 @@ impl Session {
         let c = s.sample(self, at);
         self.sampler = Some(s);
         c
+    }
+
+    /// What the lenses show the picture through.
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// The loupe window, frame pixels across.
+    pub fn loupe_px(&self) -> i32 {
+        self.loupe_px
+    }
+
+    pub(crate) fn input_mods(&self) -> Mods {
+        self.input.mods()
     }
 
     /// The annotation ink and width.
@@ -397,6 +495,8 @@ impl Session {
     pub fn cursor_pixel(&self) -> Option<PixelPoint> {
         match self.stack.last() {
             None => Some(corner_pixel(&self.pixels, &self.sel)),
+            Some(Mode::Insert(m)) => Some(m.cursor.at),
+            Some(Mode::Loupe(m)) => Some(m.cursor.at),
             Some(m) => m.box_sel().map(|s| corner_pixel(&self.pixels, s)),
         }
     }
@@ -431,6 +531,14 @@ impl Session {
         match self.stack.last() {
             Some(Mode::Filter(f)) => s.push_str(&format!("  {}", self.filter_status(f))),
             Some(Mode::Layers(m)) => s.push_str(&format!("  {}", self.layers_status(m))),
+            Some(Mode::Insert(m)) => s.push_str(&format!("  step {}px", m.step)),
+            Some(Mode::Loupe(_)) => {
+                s.push_str(&format!("  {}px{}", self.loupe_px, self.view_tag()))
+            }
+            Some(Mode::Enhance(m)) => {
+                let how = if self.view.sharp { "sharp" } else { "smooth" };
+                s.push_str(&format!("  {:.1}x {how}{}", m.zoom, self.view_tag()));
+            }
             _ => {}
         }
         if let (Some(what), Some(sel)) = (what, self.stack.last().and_then(Mode::box_sel)) {
@@ -460,6 +568,9 @@ impl Session {
             Some(Mode::Shape(_)) => &keymap::SHAPE,
             Some(Mode::Filter(_)) => &keymap::FILTER,
             Some(Mode::Layers(_)) => &keymap::LAYERS,
+            Some(Mode::Insert(_)) => &keymap::INSERT,
+            Some(Mode::Loupe(_)) => &keymap::LOUPE,
+            Some(Mode::Enhance(_)) => &keymap::ENHANCE,
         }
     }
 
@@ -472,6 +583,9 @@ impl Session {
             Some(Mode::Shape(_)) => crate::legend::SHAPE,
             Some(Mode::Filter(_)) => crate::legend::FILTER,
             Some(Mode::Layers(_)) => crate::legend::LAYERS,
+            Some(Mode::Insert(_)) => crate::legend::INSERT,
+            Some(Mode::Loupe(_)) => crate::legend::LOUPE,
+            Some(Mode::Enhance(_)) => crate::legend::ENHANCE,
         };
         crate::legend::render(self.keymap(), lines)
     }
@@ -578,6 +692,9 @@ impl Session {
                         | Mode::Shape(_)
                         | Mode::Filter(_)
                         | Mode::Layers(_)
+                        | Mode::Insert(_)
+                        | Mode::Loupe(_)
+                        | Mode::Enhance(_)
                 ),
                 Intent::Adjust(_)
             )
@@ -599,7 +716,12 @@ impl Session {
         let rates = if mods.ctrl || mods.alt {
             None // jumps and scaling are one-shot
         } else {
-            Some(crate::boxes::RATES)
+            match self.stack.last() {
+                Some(Mode::Annotate(_) | Mode::Layers(_)) => None,
+                Some(Mode::Insert(m)) => Some(m.rates(self.input.held_dirs(), mods.shift)),
+                Some(Mode::Loupe(_)) => Some(self.loupe_rates()),
+                _ => Some(crate::boxes::RATES),
+            }
         };
         match self.input.repeat(now, rates) {
             Some((dirs, n)) if mods.shift => self.dispatch(Intent::HeldTranslate(dirs, n)),
@@ -656,6 +778,9 @@ impl Session {
                     Mode::Shape(sh) => self.shape_intent(sh, intent),
                     Mode::Filter(f) => self.filter_intent(f, intent),
                     Mode::Layers(m) => self.layers_intent(m, intent),
+                    Mode::Insert(m) => self.insert_intent(m, intent),
+                    Mode::Loupe(m) => self.loupe_intent(m, intent),
+                    Mode::Enhance(m) => self.enhance_intent(m, intent),
                 };
                 self.stack.push(mode);
                 t
@@ -687,12 +812,23 @@ impl Session {
                 self.input.transition();
             }
             Transition::Push(mode) => {
+                self.leave_top();
                 self.stack.push(mode);
                 self.input.transition();
             }
             Transition::Pop => {
                 self.stack.pop();
                 self.input.transition();
+            }
+            Transition::PopWith(result) => {
+                self.stack.pop();
+                self.input.transition();
+                // Insert adopts the loupe's position; other parents don't.
+                if let (Some(Mode::Insert(m)), ChildResult::Position(p)) =
+                    (self.stack.last_mut(), result)
+                {
+                    m.cursor.put(p.x, p.y, true);
+                }
             }
             Transition::PopTo(depth) => {
                 self.stack.truncate(depth);
@@ -707,6 +843,16 @@ impl Session {
         if self.stack.is_empty() {
             self.select.drag = None;
         }
+    }
+
+    /// The lenses on the stack, bottom first (for drawing).
+    pub fn lenses(&self) -> impl Iterator<Item = (&Mode, bool)> {
+        let n = self.stack.len();
+        self.stack
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m, Mode::Loupe(_) | Mode::Enhance(_) | Mode::Insert(_)))
+            .map(move |(i, m)| (m, i + 1 == n))
     }
 
     pub(crate) fn finish(&mut self, outcome: Outcome) {

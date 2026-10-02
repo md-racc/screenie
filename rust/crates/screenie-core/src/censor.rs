@@ -55,6 +55,15 @@ impl CensorMode {
         }
     }
 
+    /// A censor with its top-left at `corner` (Insert's cursor); its own
+    /// cursor starts bottom-right.
+    pub fn from_corner(main: LogicalRect, corner: LogicalPoint) -> Self {
+        Self {
+            sel: AnchorCursor::new(LogicalRect::new(corner.x, corner.y, SIZE, SIZE), main),
+            ..Self::at(main, main.centre())
+        }
+    }
+
     pub fn amount(&self) -> f64 {
         match self.kind {
             CensorKind::Pixelate => self.pixelate,
@@ -96,6 +105,9 @@ impl CensorMode {
 
 impl Session {
     pub(crate) fn censor_intent(&mut self, c: &mut CensorMode, intent: Intent) -> Transition {
+        if let Some(t) = self.lens_at(intent, c.sel.rect().centre()) {
+            return t;
+        }
         match boxes::apply(&mut c.sel, &self.snap, &mut c.drag, intent) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {

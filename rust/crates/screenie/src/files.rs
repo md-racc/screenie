@@ -105,18 +105,36 @@ pub fn create_unique(
     unreachable!()
 }
 
-/// Keep the newest `keep` files in `dir`.
-pub fn prune(dir: &Path, keep: usize) {
+/// The shots in `dir` (their PNGs), newest first.
+pub fn shots_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = fs::read_dir(dir) else {
-        return;
+        return vec![];
     };
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
         .filter_map(Result::ok)
-        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "png"))
+        .filter_map(|p| Some((fs::metadata(&p).ok()?.modified().ok()?, p)))
         .collect();
-    files.sort_by_key(|f| std::cmp::Reverse(f.0));
-    for (_, p) in files.into_iter().skip(keep) {
-        let _ = fs::remove_file(p);
+    files.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    files.into_iter().map(|(_, p)| p).collect()
+}
+
+/// The runtime shots, newest first.
+pub fn shots() -> Vec<PathBuf> {
+    runtime_dir().map_or_else(|_| vec![], |d| shots_in(&d.join("shots")))
+}
+
+/// A shot's project file.
+pub fn project_of(shot: &Path) -> PathBuf {
+    shot.with_extension("screenie")
+}
+
+/// Keep the newest `keep` shots in `dir`, with their projects.
+pub fn prune(dir: &Path, keep: usize) {
+    for old in shots_in(dir).into_iter().skip(keep) {
+        let _ = fs::remove_file(project_of(&old));
+        let _ = fs::remove_file(old);
     }
 }
 
@@ -136,6 +154,26 @@ mod tests {
         let (b, _) = create_unique(&d, "stamp", "png", 0o600).unwrap();
         assert_ne!(a, b);
         assert!(b.ends_with("stamp-1.png"));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_shots_and_their_projects() {
+        let d = std::env::temp_dir().join(format!("screenie-prune-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        for i in 0..4 {
+            fs::write(d.join(format!("s{i}.png")), b"").unwrap();
+            fs::write(d.join(format!("s{i}.screenie")), b"").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        prune(&d, 2);
+        let mut left: Vec<String> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["s2.png", "s2.screenie", "s3.png", "s3.screenie"]);
+        assert_eq!(shots_in(&d)[0].file_name().unwrap(), "s3.png");
         fs::remove_dir_all(d).unwrap();
     }
 

@@ -606,7 +606,7 @@ Both display the top of the stack first.
 
 Selection follows the item when it is reordered.
 
-Deleting an item selects the next surviving item where possible, otherwise the previous one.
+Deleting an item selects the next row down the list as displayed (the item below it in the stack) where possible, otherwise the row above it.
 
 The wheel remains `+` / `-`; it is not repurposed for list scrolling.
 

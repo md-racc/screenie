@@ -12,6 +12,10 @@ lexopt = "0.3"
 screenie-core.workspace = true
 screenie-image.workspace = true
 screenie-platform.workspace = true
+serde_json = "1"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+fontdue = "0.9"

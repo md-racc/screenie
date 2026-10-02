@@ -144,9 +144,20 @@ impl Session {
 
     /// The build tool a tool key opens, in this layer.
     pub(crate) fn tool_mode(&self, tool: Tool) -> Mode {
+        self.tool_mode_at(tool, crate::session::Place::Default)
+    }
+
+    /// The build tool a tool key opens, placed (a censor goes where it's
+    /// asked; the pen and filters take the whole box).
+    pub(crate) fn tool_mode_at(&self, tool: Tool, place: crate::session::Place) -> Mode {
+        use crate::session::Place;
         let main = self.sel.rect();
         match tool {
-            Tool::Censor => Mode::Censor(crate::censor::CensorMode::at(main, main.centre())),
+            Tool::Censor => Mode::Censor(match place {
+                Place::Default => crate::censor::CensorMode::at(main, main.centre()),
+                Place::Centre(at) => crate::censor::CensorMode::at(main, at),
+                Place::Corner(at) => crate::censor::CensorMode::from_corner(main, at),
+            }),
             Tool::Annotate => Mode::Annotate(AnnotateMode::new(main)),
             Tool::Filter => Mode::Filter(crate::filter::FilterMode::new(main)),
         }
@@ -173,6 +184,9 @@ impl Session {
                 }
             }
             Intent::Eyedropper => self.eyedrop(a.pointer),
+            Intent::Loupe | Intent::Enhance => {
+                return self.lens_at(intent, a.pointer).expect("a lens");
+            }
             Intent::Shape(kind) => {
                 return Transition::Push(Mode::Shape(ShapeMode::new(a.main, kind)));
             }
@@ -228,6 +242,9 @@ impl Session {
             }
             _ => {}
         }
+        if let Some(t) = self.lens_at(intent, s.sel.rect().centre()) {
+            return t;
+        }
         match boxes::apply(&mut s.sel, &self.snap, &mut s.drag, intent) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
@@ -250,7 +267,7 @@ impl Session {
         match mode {
             Mode::Annotate(a) => a.trace.as_deref().and_then(|t| self.stroke(t)),
             Mode::Shape(s) => self.shape(s),
-            Mode::Censor(_) | Mode::Filter(_) | Mode::Layers(_) => None,
+            _ => None,
         }
     }
 }

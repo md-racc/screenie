@@ -235,10 +235,24 @@ impl Wayland {
             // monitors asleep, none comes.
             let left = CAPTURE_TIMEOUT.saturating_sub(start.elapsed());
             if left.is_zero() {
+                let waiting: Vec<String> = self
+                    .state
+                    .capture
+                    .iter()
+                    .filter(|p| matches!(p.progress, Progress::Describing | Progress::Copying))
+                    .map(|p| {
+                        let stage = match p.progress {
+                            Progress::Describing => "no buffer offered",
+                            _ => "no frame",
+                        };
+                        format!("{} ({stage})", p.name.as_deref().unwrap_or("an output"))
+                    })
+                    .collect();
                 self.state.capture.clear();
-                return Err(Error::Unavailable(
-                    "the capture timed out (are the monitors asleep?)".into(),
-                ));
+                return Err(Error::Unavailable(format!(
+                    "the capture timed out waiting on {} (are the monitors asleep?)",
+                    waiting.join(", ")
+                )));
             }
             self.wait(Some(left))?;
         }
