@@ -7,8 +7,13 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+rustix = { version = "1", features = ["event"] }
 screenie-core.workspace = true
 screenie-image.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+smithay-client-toolkit = "0.21"
+wl-clipboard-rs = "0.9"
 
 [lints]
 workspace = true

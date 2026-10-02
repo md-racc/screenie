@@ -74,6 +74,10 @@ impl InputState {
         self.mods
     }
 
+    pub fn set_mods(&mut self, mods: Mods) {
+        self.mods = mods;
+    }
+
     /// A key went down. `mods` is the modifier state including this key.
     pub fn press(&mut self, code: u32, key: Key, mods: Mods, now: f64) -> Press {
         self.mods = mods;

@@ -18,4 +18,5 @@ pub mod recall;
 pub mod script;
 pub mod select;
 pub mod session;
+pub mod tags;
 pub mod targets;

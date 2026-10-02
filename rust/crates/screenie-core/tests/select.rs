@@ -8,7 +8,7 @@ use common::*;
 use screenie_core::geometry::PixelPoint;
 use screenie_core::input::{DELAY, RAMP};
 use screenie_core::keys::Mods;
-use screenie_core::session::{Button, FinishedAction, Outcome, Session};
+use screenie_core::session::{Button, FinishedAction, Outcome, RawEvent, Session};
 
 fn done(s: &Session) -> Option<&FinishedAction> {
     match s.outcome() {
@@ -292,6 +292,18 @@ fn held_directions_combine_and_shift_moves_the_box() {
     assert_eq!((r1.w, r1.h), (100.0, 100.0)); // moved, not resized
     assert_eq!(r1.x, 1000.0); // h and l cancel
     assert!(r1.y < 500.0 - 5.0); // up, past the tap
+}
+
+#[test]
+fn shift_from_a_separate_modifiers_event_moves_the_held_box() {
+    // Wayland: the Shift key's press, then a modifiers event saying so.
+    let mut s = session_at(r(1000.0, 500.0, 100.0, 100.0), vec![]);
+    s.press(50, "Shift_L", Mods::NONE, 0.0);
+    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
+    s.press(1, "L", Mods::SHIFT, 0.0);
+    s.tick(DELAY + 0.1);
+    assert_eq!(s.rect().w, 100.0);
+    assert!(s.rect().x > 1005.0);
 }
 
 #[test]

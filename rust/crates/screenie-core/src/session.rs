@@ -31,6 +31,10 @@ pub enum RawEvent {
         key: Key,
         mods: Mods,
     },
+    /// The modifier state changed (Wayland reports it apart from keys).
+    Modifiers {
+        mods: Mods,
+    },
     ButtonPress {
         button: Button,
         at: LogicalPoint,
@@ -251,6 +255,7 @@ impl Session {
                 }
             }
             RawEvent::KeyRelease { code, mods, .. } => self.input.release(code, mods),
+            RawEvent::Modifiers { mods } => self.input.set_mods(mods),
             RawEvent::ButtonPress { button, at } => {
                 self.pointer = at;
                 self.user_acted();

@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+jiff = "0.2"
+lexopt = "0.3"
 screenie-core.workspace = true
 screenie-image.workspace = true
 screenie-platform.workspace = true
