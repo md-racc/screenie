@@ -8,7 +8,7 @@
 //!   the open layer, whichever tool made it.
 
 use crate::geometry::LogicalRect;
-use crate::model::{LayerId, OpId};
+use crate::model::{Layer, LayerId, Op, OpData, OpId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProjectEntry {
@@ -16,6 +16,19 @@ pub enum ProjectEntry {
     Selection(LogicalRect),
     /// A layer was committed, with the selection as it was then.
     LayerCommitted { layer: LayerId, rect: LogicalRect },
+    /// A layer was deleted from this index.
+    LayerDeleted { layer: Layer, index: usize },
+    /// A layer moved from this index.
+    LayerMoved { layer: LayerId, from: usize },
+    /// A layer was hidden or shown (undo flips it back).
+    LayerToggled { layer: LayerId },
+}
+
+impl ProjectEntry {
+    /// Whether it's a layer-management action (`u` in Layers).
+    pub fn is_layer(&self) -> bool {
+        !matches!(self, ProjectEntry::Selection(_))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -47,11 +60,23 @@ impl ProjectHistory {
     pub fn pop(&mut self) -> Option<ProjectEntry> {
         self.entries.pop()
     }
+
+    /// Take out the most recent layer-management entry, wherever it is.
+    pub fn pop_layer(&mut self) -> Option<ProjectEntry> {
+        let i = self.entries.iter().rposition(ProjectEntry::is_layer)?;
+        Some(self.entries.remove(i))
+    }
 }
 
 /// How to reverse one action on the open layer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LayerUndo {
-    /// An op was locked in: take it out.
+    /// An op was added: take it out.
     Remove(OpId),
+    /// An op was deleted from this index: put it back.
+    Restore { index: usize, op: Op },
+    /// An op was changed (amount, rect, mute): this is what it was.
+    Revert { id: OpId, data: OpData },
+    /// Two ops swapped places: swap them back.
+    Swap(OpId, OpId),
 }

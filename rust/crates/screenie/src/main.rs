@@ -107,6 +107,9 @@ fn pick(args: cli::Pick) -> Result<Exit, Failure> {
         start,
         recall: ring,
     });
+    session.set_sampler(Box::new(screenie_image::picture::PictureSampler::new(
+        frame.clone(),
+    )));
     if let Some(keys) = &args.keys {
         session
             .play(keys, 0.0)

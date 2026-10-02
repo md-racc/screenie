@@ -270,6 +270,12 @@ impl PixelMap {
         (v - o) * self.scale
     }
 
+    /// A logical point in (unrounded) pixel coordinates: where drawing
+    /// happens. Edges and crops use `to_pixels` instead.
+    pub fn to_device(&self, p: LogicalPoint) -> (f64, f64) {
+        (self.px(p.x, Axis::X), self.px(p.y, Axis::Y))
+    }
+
     /// A logical rectangle as image pixels, rounding each edge on its own.
     pub fn to_pixels(&self, r: LogicalRect) -> PixelRect {
         let x0 = rnd(self.px(r.x, Axis::X));

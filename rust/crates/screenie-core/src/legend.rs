@@ -4,6 +4,7 @@
 use crate::geometry::Dir;
 use crate::intent::{Intent, Tool};
 use crate::keymap::{Keymap, SESSION};
+use crate::model::ShapeKind;
 
 /// One legend entry: a label and the intents whose keys it lists.
 pub type Item = (&'static str, &'static [Intent]);
@@ -35,7 +36,12 @@ pub const SELECT: &[&[Item]] = &[
         ("last", &[Intent::Recall]),
         ("undo", &[Intent::Undo]),
     ],
-    &[("censor", &[Intent::Tool(Tool::Censor)])],
+    &[
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
+        ("1-9 layers", &[]),
+    ],
     &[
         ("capture", &[Intent::Confirm]),
         ("text", &[Intent::Ocr]),
@@ -53,12 +59,115 @@ pub const CENSOR: &[&[Item]] = &[
         ("pixelate/bar", &[Intent::CycleKind]),
         ("amount", &[Intent::Adjust(1), Intent::Adjust(-1)]),
         ("next", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
     ],
     &[
         ("undo", &[Intent::Undo]),
         ("commit", &[Intent::Confirm]),
         ("discard", &[Intent::Back]),
         ("(box keys as in Select)", &[]),
+    ],
+];
+
+const INKS: &[Item] = &[
+    ("white", &[Intent::Choose(1)]),
+    ("black", &[Intent::Choose(2)]),
+    ("red", &[Intent::Choose(3)]),
+    ("green", &[Intent::Choose(4)]),
+    ("blue", &[Intent::Choose(5)]),
+];
+
+/// Annotate's palette: the inks and the shapes, always shown.
+pub const ANNOTATE_PALETTE: &[&[Item]] = &[&[
+    INKS[0],
+    INKS[1],
+    INKS[2],
+    INKS[3],
+    INKS[4],
+    ("rectangle", &[Intent::Shape(ShapeKind::Rect)]),
+    ("circle", &[Intent::Shape(ShapeKind::Circle)]),
+]];
+
+pub const ANNOTATE: &[&[Item]] = &[
+    &[
+        ("width", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("pick colour", &[Intent::Eyedropper]),
+        ("drag draw", &[]),
+    ],
+    &[
+        ("undo", &[Intent::Undo]),
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
+        ("commit", &[Intent::Confirm]),
+        ("discard", &[Intent::Back]),
+    ],
+];
+
+pub const SHAPE_PALETTE: &[&[Item]] = &[&[
+    INKS[0],
+    INKS[1],
+    INKS[2],
+    INKS[3],
+    INKS[4],
+    ("rectangle/circle", &[Intent::CycleKind]),
+]];
+
+pub const SHAPE: &[&[Item]] = &[
+    &[
+        ("width", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("pick colour", &[Intent::Eyedropper]),
+    ],
+    &[
+        ("next shape", &[Intent::Tool(Tool::Annotate)]),
+        ("drop this one", &[Intent::Back]),
+        ("undo", &[Intent::Undo]),
+        ("commit", &[Intent::Confirm]),
+    ],
+    &[
+        ("centre", &[Intent::ToggleCentre]),
+        ("(box keys as in Select)", &[]),
+    ],
+];
+
+pub const FILTER_PALETTE: &[&[Item]] = &[&[
+    ("grey", &[Intent::Choose(1)]),
+    ("invert", &[Intent::Choose(2)]),
+    ("bright", &[Intent::Choose(3)]),
+    ("contrast", &[Intent::Choose(4)]),
+    ("blur", &[Intent::Choose(5)]),
+]];
+
+pub const FILTER: &[&[Item]] = &[
+    &[
+        ("amount", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("select", &[Intent::ListStep(-1), Intent::ListStep(1)]),
+        ("move", &[Intent::ListMove(-1), Intent::ListMove(1)]),
+        ("delete", &[Intent::ListDelete]),
+        ("mute", &[Intent::ListToggle]),
+        ("duplicate", &[Intent::Tool(Tool::Filter)]),
+        ("undo", &[Intent::Undo]),
+    ],
+    &[
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("commit", &[Intent::Confirm]),
+        ("discard", &[Intent::Back]),
+    ],
+];
+
+pub const LAYERS: &[&[Item]] = &[
+    &[
+        ("1-9 pick", &[]),
+        ("select", &[Intent::ListStep(-1), Intent::ListStep(1)]),
+        ("move", &[Intent::ListMove(-1), Intent::ListMove(1)]),
+        ("delete", &[Intent::ListDelete]),
+        ("hide", &[Intent::ListToggle]),
+    ],
+    &[
+        ("undo", &[Intent::Undo]),
+        ("click pick", &[]),
+        ("back", &[Intent::Confirm, Intent::Back]),
     ],
 ];
 
@@ -99,9 +208,20 @@ mod tests {
             render(&keymap::SELECT, SELECT),
             [
                 "o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  + - scope  . last  u undo",
-                "x censor",
+                "x censor  a annotate  f filter  1-9 layers",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",
             ]
+        );
+    }
+
+    #[test]
+    fn the_ink_palette_is_the_ink_table() {
+        let names: Vec<&str> = crate::annotate::INKS.iter().map(|(_, n, _)| *n).collect();
+        let shown: Vec<&str> = INKS.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, shown);
+        assert_eq!(
+            render(&keymap::ANNOTATE, ANNOTATE_PALETTE),
+            ["1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle"]
         );
     }
 
@@ -111,6 +231,10 @@ mod tests {
             let lines = match name {
                 "select" => SELECT,
                 "censor" => CENSOR,
+                "annotate" => ANNOTATE,
+                "shape" => SHAPE,
+                "filter" => FILTER,
+                "layers" => LAYERS,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {

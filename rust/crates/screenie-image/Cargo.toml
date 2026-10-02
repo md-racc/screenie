@@ -10,6 +10,7 @@ publish.workspace = true
 fontdue = "0.9"
 png = "0.18"
 screenie-core.workspace = true
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 
 [lints]
 workspace = true

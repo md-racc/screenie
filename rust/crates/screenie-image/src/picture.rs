@@ -23,7 +23,29 @@ pub struct Picture {
     locked: Option<(LogicalRect, Vec<Op>, PixelRect, Image)>,
     /// The same, plus the item being edited: what's shown.
     shown: Option<(Option<OpData>, Image)>,
+    /// The open layer's prefixes: the clip patch after its first n ops, so
+    /// changing the top filter doesn't re-run the ones under it.
+    prefixes: Vec<(Vec<Op>, Image)>,
+    /// Open-layer ops applied so far (to measure the cache).
+    applied: usize,
+    /// The layer the Layers view shows alone: the capture with only it
+    /// applied, over its clip.
+    isolated: Option<(Layer, PixelRect, Image)>,
 }
+
+fn clip_to(r: PixelRect, ext: PixelRect) -> PixelRect {
+    let x0 = r.x.max(ext.x);
+    let y0 = r.y.max(ext.y);
+    PixelRect::new(
+        x0,
+        y0,
+        ((r.x + r.w).min(ext.x + ext.w) - x0).max(0),
+        ((r.y + r.h).min(ext.y + ext.h) - y0).max(0),
+    )
+}
+
+/// Open-layer prefixes kept.
+pub const PREFIXES: usize = 12;
 
 impl Picture {
     pub fn new(base: Frame) -> Self {
@@ -34,7 +56,45 @@ impl Picture {
             version: 0,
             locked: None,
             shown: None,
+            prefixes: Vec::new(),
+            applied: 0,
+            isolated: None,
         }
+    }
+
+    /// The layer the Layers view is inspecting, if any.
+    pub fn inspect(&mut self, layer: Option<&Layer>) {
+        let Some(layer) = layer else {
+            self.isolated = None;
+            return;
+        };
+        if self.isolated.as_ref().is_some_and(|(l, ..)| l == layer) {
+            return;
+        }
+        let map = *self.base.map();
+        let r = clip_to(map.to_pixels(layer.clip), self.base.image().extent());
+        let mut img = self.base.image().crop(r);
+        let mut shown = layer.clone();
+        shown.hidden = false; // inspecting a hidden layer still shows it
+        apply_layer(
+            &mut Patch {
+                img: &mut img,
+                origin: PixelPoint::new(r.x, r.y),
+            },
+            &map,
+            &shown,
+        );
+        self.isolated = Some((layer.clone(), r, img));
+    }
+
+    /// The inspected layer alone, over its clip (frame px).
+    pub fn isolated_patch(&self) -> Option<(PixelRect, &Image)> {
+        self.isolated.as_ref().map(|(_, r, img)| (*r, img))
+    }
+
+    /// How many open-layer ops have been applied, all told.
+    pub fn ops_applied(&self) -> usize {
+        self.applied
     }
 
     /// The capture, untouched.
@@ -72,10 +132,12 @@ impl Picture {
             self.version += 1;
             self.locked = None;
             self.shown = None;
+            self.prefixes.clear();
         }
         let Some(open) = open else {
             self.locked = None;
             self.shown = None;
+            self.prefixes.clear();
             return;
         };
         let fresh = self
@@ -94,15 +156,41 @@ impl Picture {
                 ((px.x + px.w).min(ext.w) - x0).max(0),
                 ((px.y + px.h).min(ext.h) - y0).max(0),
             );
-            let mut img = self.committed.image().crop(r);
-            apply_layer(
-                &mut Patch {
-                    img: &mut img,
-                    origin: PixelPoint::new(r.x, r.y),
-                },
-                &map,
-                open,
-            );
+            if self
+                .locked
+                .as_ref()
+                .is_some_and(|(clip, ..)| *clip != open.clip)
+            {
+                self.prefixes.clear();
+            }
+            // Keep the prefixes still true of the ops, and start from the
+            // longest.
+            self.prefixes
+                .retain(|(ops, _)| open.ops.len() >= ops.len() && open.ops[..ops.len()] == ops[..]);
+            let (start, mut img) = self
+                .prefixes
+                .iter()
+                .max_by_key(|(ops, _)| ops.len())
+                .map_or_else(
+                    || (0, self.committed.image().crop(r)),
+                    |(ops, img)| (ops.len(), img.clone()),
+                );
+            let clip = map.to_pixels(open.clip);
+            for i in start..open.ops.len() {
+                apply_op(
+                    &mut Patch {
+                        img: &mut img,
+                        origin: PixelPoint::new(r.x, r.y),
+                    },
+                    &map,
+                    clip,
+                    &open.ops[i].data,
+                );
+                self.applied += 1;
+                self.prefixes.push((open.ops[..=i].to_vec(), img.clone()));
+            }
+            let extra = self.prefixes.len().saturating_sub(PREFIXES);
+            self.prefixes.drain(..extra);
             self.locked = Some((open.clip, open.ops.clone(), r, img));
             self.shown = None;
         }
@@ -150,6 +238,24 @@ impl Picture {
     /// The output for a box: the committed picture's pixels.
     pub fn crop(&self, rect: LogicalRect) -> Image {
         self.committed.crop(rect)
+    }
+}
+
+/// The eyedropper's view of the picture: a picture of its own (the
+/// capture is shared), brought up to date with the session on each read.
+pub struct PictureSampler(Picture);
+
+impl PictureSampler {
+    pub fn new(base: Frame) -> Self {
+        Self(Picture::new(base))
+    }
+}
+
+impl screenie_core::session::Sampler for PictureSampler {
+    fn sample(&mut self, s: &screenie_core::session::Session, at: PixelPoint) -> Option<[u8; 3]> {
+        self.0
+            .sync(s.layers(), s.open_layer(), s.editing().as_ref());
+        self.0.rgb(at).map(|c| [c.0, c.1, c.2])
     }
 }
 
@@ -232,6 +338,23 @@ mod tests {
         p.sync(&[], Some(&open), Some(&bar(3, 45.0).data));
         assert_eq!(at(&p, 48), Rgb(255, 255, 255));
         assert_eq!(at(&p, 51), Rgb(10, 10, 10)); // past the 50px clip
+    }
+
+    #[test]
+    fn changing_the_top_op_reuses_the_ones_under_it() {
+        let mut p = picture();
+        let mut open = layer(1, vec![bar(2, 0.0), bar(3, 10.0), bar(4, 20.0)]);
+        p.sync(&[], Some(&open), None);
+        assert_eq!(p.ops_applied(), 3);
+        open.ops[2] = bar(4, 30.0); // the top one moves
+        p.sync(&[], Some(&open), None);
+        assert_eq!(p.ops_applied(), 4); // only it ran again
+        assert_eq!(at(&p, 35), Rgb(255, 255, 255));
+        assert_eq!(at(&p, 25), Rgb(10, 10, 10));
+        open.ops.remove(0); // under everything: from scratch
+        p.sync(&[], Some(&open), None);
+        assert_eq!(p.ops_applied(), 6);
+        assert_eq!(at(&p, 5), Rgb(10, 10, 10));
     }
 
     #[test]

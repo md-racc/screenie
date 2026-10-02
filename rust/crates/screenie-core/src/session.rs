@@ -11,15 +11,18 @@
 //! survive tool changes.
 
 use crate::anchor_cursor::AnchorCursor;
+use crate::annotate::{AnnotateMode, DEFAULT_INK, Ink, ShapeMode, WIDTH};
 use crate::censor::CensorMode;
+use crate::filter::FilterMode;
 use crate::geometry::{Axis, End, LogicalPoint, LogicalRect, PixelMap, PixelPoint};
 use crate::history::{LayerUndo, ProjectEntry, ProjectHistory};
 use crate::input::{InputState, Press};
 use crate::intent::Intent;
 use crate::keymap::{self, Keymap};
 use crate::keys::{Chord, Key, Mods};
+use crate::layers::LayersMode;
 use crate::layout::Layout;
-use crate::model::{Layer, Op, OpData, Project};
+use crate::model::{Layer, Op, OpData, OpId, Project};
 use crate::select::SelectState;
 use crate::targets::SnapEnv;
 
@@ -109,14 +112,45 @@ pub struct Setup {
 #[derive(Clone, Debug)]
 pub enum Mode {
     Censor(CensorMode),
+    Annotate(AnnotateMode),
+    /// A temporary child of Annotate.
+    Shape(ShapeMode),
+    Filter(FilterMode),
+    Layers(LayersMode),
 }
 
 impl Mode {
     pub fn name(&self) -> &'static str {
         match self {
             Mode::Censor(_) => "censor",
+            Mode::Annotate(_) => "annotate",
+            Mode::Shape(_) => "shape",
+            Mode::Filter(_) => "filter",
+            Mode::Layers(_) => "layers",
         }
     }
+
+    /// The mode's box, if it has one.
+    fn box_sel(&self) -> Option<&AnchorCursor> {
+        match self {
+            Mode::Censor(c) => Some(&c.sel),
+            Mode::Shape(s) => Some(&s.sel),
+            Mode::Filter(f) => Some(&f.sel),
+            Mode::Annotate(_) | Mode::Layers(_) => None,
+        }
+    }
+
+    /// Whether the status line shows the ink.
+    fn shows_ink(&self) -> bool {
+        matches!(self, Mode::Annotate(_) | Mode::Shape(_))
+    }
+}
+
+/// Reads the picture for the eyedropper. The host provides it: core has
+/// no pixels of its own.
+pub trait Sampler {
+    /// The colour shown at `at` (what you see, the open layer included).
+    fn sample(&mut self, session: &Session, at: PixelPoint) -> Option<[u8; 3]>;
 }
 
 /// What a mode asks the session to do after an intent.
@@ -125,6 +159,13 @@ pub enum Transition {
     Stay,
     /// Open a build tool: the open layer is created first if there's none.
     OpenTool(Mode),
+    /// Another build tool in the same layer: back to where the layer was
+    /// opened, then this tool.
+    SwitchTool(Mode),
+    /// A temporary child on top.
+    Push(Mode),
+    /// Back to the mode below.
+    Pop,
     /// Back to the mode at this depth (0 is Select).
     PopTo(usize),
     Finish(Outcome),
@@ -168,6 +209,9 @@ pub struct Session {
     pub(crate) note: Option<String>,
     pub(crate) project: Project,
     pub(crate) open: Option<OpenLayer>,
+    pub(crate) ink: Ink,
+    pub(crate) ink_width: f64,
+    sampler: Option<Box<dyn Sampler>>,
     stack: Vec<Mode>,
     pending: Option<Pending>,
     input: InputState,
@@ -209,12 +253,32 @@ impl Session {
             recall,
             note: None,
             open: None,
+            ink: Ink::palette(DEFAULT_INK),
+            ink_width: WIDTH,
+            sampler: None,
             stack: Vec::new(),
             pending: None,
             show_help: false,
             outcome: None,
             pointer: LogicalPoint::default(),
         }
+    }
+
+    /// Give the session a way to read the picture (the eyedropper).
+    pub fn set_sampler(&mut self, sampler: Box<dyn Sampler>) {
+        self.sampler = Some(sampler);
+    }
+
+    pub(crate) fn sample(&mut self, at: PixelPoint) -> Option<[u8; 3]> {
+        let mut s = self.sampler.take()?;
+        let c = s.sample(self, at);
+        self.sampler = Some(s);
+        c
+    }
+
+    /// The annotation ink and width.
+    pub fn ink(&self) -> (&Ink, f64) {
+        (&self.ink, self.ink_width)
     }
 
     // --- what the host reads ------------------------------------------------
@@ -265,6 +329,7 @@ impl Session {
     pub fn editing(&self) -> Option<OpData> {
         match self.stack.last()? {
             Mode::Censor(c) => c.current(),
+            m => self.annotate_editing(m),
         }
     }
 
@@ -279,12 +344,13 @@ impl Session {
         self.stack
             .iter()
             .enumerate()
-            .map(|(i, m)| match m {
-                Mode::Censor(c) => BoxView {
-                    rect: c.sel.rect(),
-                    cursor: c.sel.cursor_point(),
+            .filter_map(|(i, m)| {
+                let sel = m.box_sel()?;
+                Some(BoxView {
+                    rect: sel.rect(),
+                    cursor: sel.cursor_point(),
                     active: i + 1 == n,
-                },
+                })
             })
             .collect()
     }
@@ -326,11 +392,12 @@ impl Session {
         self.history.len()
     }
 
-    /// The pixel the active cursor is on, for the status line.
-    pub fn cursor_pixel(&self) -> PixelPoint {
+    /// The pixel the active cursor is on, for the status line (none for a
+    /// mode without a cursor, like the pen).
+    pub fn cursor_pixel(&self) -> Option<PixelPoint> {
         match self.stack.last() {
-            None => corner_pixel(&self.pixels, &self.sel),
-            Some(Mode::Censor(c)) => corner_pixel(&self.pixels, &c.sel),
+            None => Some(corner_pixel(&self.pixels, &self.sel)),
+            Some(m) => m.box_sel().map(|s| corner_pixel(&self.pixels, s)),
         }
     }
 
@@ -338,17 +405,15 @@ impl Session {
     /// pixels, the active cursor's pixel, then whatever's worth knowing.
     pub fn status(&self) -> String {
         let px = self.pixels.to_pixels(self.sel.rect());
-        let c = self.cursor_pixel();
-        let mut s = format!(
-            "{}  {}×{}  ({},{})",
-            self.mode_name().to_uppercase(),
-            px.w,
-            px.h,
-            c.x,
-            c.y
-        );
+        let mut s = format!("{}  {}×{}", self.mode_name().to_uppercase(), px.w, px.h);
+        if let Some(c) = self.cursor_pixel() {
+            s.push_str(&format!("  ({},{})", c.x, c.y));
+        }
         if self.sel.is_centred() {
             s.push_str("  centre");
+        }
+        if self.stack.last().is_some_and(Mode::shows_ink) {
+            s.push_str(&format!("  {} {}px", self.ink.name, self.ink_width));
         }
         let locked = self.open.as_ref().map_or(0, |o| o.layer.ops.len());
         if self.open.is_some() {
@@ -358,10 +423,20 @@ impl Session {
                 s.push_str("  layer");
             }
         }
-        if let Some(Mode::Censor(c)) = self.stack.last() {
-            let b = self.pixels.to_pixels(c.sel.rect());
-            s.push_str(&format!("  {}  {}×{}", c.describe(), b.w, b.h));
-            if c.sel.is_centred() {
+        let what = match self.stack.last() {
+            Some(Mode::Censor(c)) => Some(c.describe()),
+            Some(Mode::Shape(sh)) => Some(sh.kind.name().to_string()),
+            _ => None,
+        };
+        match self.stack.last() {
+            Some(Mode::Filter(f)) => s.push_str(&format!("  {}", self.filter_status(f))),
+            Some(Mode::Layers(m)) => s.push_str(&format!("  {}", self.layers_status(m))),
+            _ => {}
+        }
+        if let (Some(what), Some(sel)) = (what, self.stack.last().and_then(Mode::box_sel)) {
+            let b = self.pixels.to_pixels(sel.rect());
+            s.push_str(&format!("  {what}  {}×{}", b.w, b.h));
+            if sel.is_centred() {
                 s.push_str("  centre");
             }
         }
@@ -381,6 +456,10 @@ impl Session {
         match self.stack.last() {
             None => &keymap::SELECT,
             Some(Mode::Censor(_)) => &keymap::CENSOR,
+            Some(Mode::Annotate(_)) => &keymap::ANNOTATE,
+            Some(Mode::Shape(_)) => &keymap::SHAPE,
+            Some(Mode::Filter(_)) => &keymap::FILTER,
+            Some(Mode::Layers(_)) => &keymap::LAYERS,
         }
     }
 
@@ -389,6 +468,34 @@ impl Session {
         let lines = match self.stack.last() {
             None => crate::legend::SELECT,
             Some(Mode::Censor(_)) => crate::legend::CENSOR,
+            Some(Mode::Annotate(_)) => crate::legend::ANNOTATE,
+            Some(Mode::Shape(_)) => crate::legend::SHAPE,
+            Some(Mode::Filter(_)) => crate::legend::FILTER,
+            Some(Mode::Layers(_)) => crate::legend::LAYERS,
+        };
+        crate::legend::render(self.keymap(), lines)
+    }
+
+    /// The list tags of the modes on the stack (the filter stack), bottom
+    /// mode first.
+    pub fn lists(&self) -> Vec<Vec<String>> {
+        self.stack
+            .iter()
+            .filter_map(|m| match m {
+                Mode::Filter(f) => Some(self.filter_list(f)),
+                Mode::Layers(m) => Some(self.layers_list(m)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the top mode's keys directly pick: always shown, above the box.
+    pub fn palette(&self) -> Vec<String> {
+        let lines = match self.stack.last() {
+            Some(Mode::Annotate(_)) => crate::legend::ANNOTATE_PALETTE,
+            Some(Mode::Shape(_)) => crate::legend::SHAPE_PALETTE,
+            Some(Mode::Filter(_)) => crate::legend::FILTER_PALETTE,
+            _ => return vec![],
         };
         crate::legend::render(self.keymap(), lines)
     }
@@ -464,7 +571,16 @@ impl Session {
     fn repeats(&self, intent: Intent) -> bool {
         matches!(
             (self.stack.last(), intent),
-            (Some(Mode::Censor(_)), Intent::Adjust(_))
+            (
+                Some(
+                    Mode::Censor(_)
+                        | Mode::Annotate(_)
+                        | Mode::Shape(_)
+                        | Mode::Filter(_)
+                        | Mode::Layers(_)
+                ),
+                Intent::Adjust(_)
+            )
         )
     }
 
@@ -536,6 +652,10 @@ impl Session {
             Some(mut mode) => {
                 let t = match &mut mode {
                     Mode::Censor(c) => self.censor_intent(c, intent),
+                    Mode::Annotate(a) => self.annotate_intent(a, intent),
+                    Mode::Shape(sh) => self.shape_intent(sh, intent),
+                    Mode::Filter(f) => self.filter_intent(f, intent),
+                    Mode::Layers(m) => self.layers_intent(m, intent),
                 };
                 self.stack.push(mode);
                 t
@@ -558,6 +678,20 @@ impl Session {
                 }
                 self.leave_top();
                 self.stack.push(mode);
+                self.input.transition();
+            }
+            Transition::SwitchTool(mode) => {
+                let depth = self.open.as_ref().map_or(self.stack.len(), |o| o.depth);
+                self.stack.truncate(depth);
+                self.stack.push(mode);
+                self.input.transition();
+            }
+            Transition::Push(mode) => {
+                self.stack.push(mode);
+                self.input.transition();
+            }
+            Transition::Pop => {
+                self.stack.pop();
                 self.input.transition();
             }
             Transition::PopTo(depth) => {
@@ -584,12 +718,56 @@ impl Session {
     /// Lock an item into the open layer, on top. New work also takes back
     /// a pending Esc or q warning.
     pub(crate) fn lock(&mut self, data: Option<OpData>) {
-        let Some(data) = data else { return };
+        if let Some(data) = data {
+            self.insert_op(data, None);
+        }
+    }
+
+    /// Add an op to the open layer just above `after` (on top if `None`),
+    /// as an undoable action. Returns its id.
+    pub(crate) fn insert_op(&mut self, data: OpData, after: Option<OpId>) -> OpId {
         let id = self.project.new_op_id();
+        let Some(open) = &mut self.open else {
+            return id;
+        };
+        let at = after
+            .and_then(|a| open.layer.op_index(a))
+            .map_or(open.layer.ops.len(), |i| i + 1);
+        open.layer.ops.insert(at, Op { id, data });
+        self.log_layer(LayerUndo::Remove(id));
+        id
+    }
+
+    /// Take an op out of the open layer, as an undoable action.
+    pub(crate) fn delete_op(&mut self, id: OpId) {
         let Some(open) = &mut self.open else { return };
-        open.layer.ops.push(Op { id, data });
-        open.log.push(LayerUndo::Remove(id));
+        let Some(index) = open.layer.op_index(id) else {
+            return;
+        };
+        let op = open.layer.ops.remove(index);
+        self.log_layer(LayerUndo::Restore { index, op });
+    }
+
+    /// Swap two ops' places in the open layer, as an undoable action.
+    pub(crate) fn swap_ops(&mut self, a: OpId, b: OpId) {
+        let Some(open) = &mut self.open else { return };
+        if let (Some(i), Some(j)) = (open.layer.op_index(a), open.layer.op_index(b)) {
+            open.layer.ops.swap(i, j);
+            self.log_layer(LayerUndo::Swap(a, b));
+        }
+    }
+
+    /// Record an action on the open layer. New work takes back a pending
+    /// Esc or q warning.
+    pub(crate) fn log_layer(&mut self, entry: LayerUndo) {
+        if let Some(open) = &mut self.open {
+            open.log.push(entry);
+        }
         self.pending = None;
+    }
+
+    pub(crate) fn layer_log_len(&self) -> usize {
+        self.open.as_ref().map_or(0, |o| o.log.len())
     }
 
     /// `u` in a build tool: the last action on the open layer, whichever
@@ -597,8 +775,22 @@ impl Session {
     /// project history.
     pub(crate) fn undo_layer(&mut self) {
         let Some(open) = &mut self.open else { return };
+        let ops = &mut open.layer.ops;
         match open.log.pop() {
-            Some(LayerUndo::Remove(id)) => open.layer.ops.retain(|o| o.id != id),
+            Some(LayerUndo::Remove(id)) => ops.retain(|o| o.id != id),
+            Some(LayerUndo::Restore { index, op }) => ops.insert(index.min(ops.len()), op),
+            Some(LayerUndo::Revert { id, data }) => {
+                if let Some(o) = ops.iter_mut().find(|o| o.id == id) {
+                    o.data = data;
+                }
+            }
+            Some(LayerUndo::Swap(a, b)) => {
+                let i = ops.iter().position(|o| o.id == a);
+                let j = ops.iter().position(|o| o.id == b);
+                if let (Some(i), Some(j)) = (i, j) {
+                    ops.swap(i, j);
+                }
+            }
             None => {}
         }
     }
@@ -640,24 +832,7 @@ impl Session {
     /// nothing are skipped, so every `u` visibly does something.
     pub(crate) fn undo(&mut self) {
         while let Some(entry) = self.history.pop() {
-            let changed = match entry {
-                ProjectEntry::Selection(r) => {
-                    let changed = r != self.sel.rect();
-                    self.sel.set_rect(r);
-                    changed
-                }
-                ProjectEntry::LayerCommitted { layer, rect } => {
-                    // (it may have been deleted since)
-                    let i = self.project.layer_index(layer);
-                    if let Some(i) = i {
-                        self.project.layers.remove(i);
-                    }
-                    let moved = rect != self.sel.rect();
-                    self.sel.set_rect(rect);
-                    i.is_some() || moved
-                }
-            };
-            if changed {
+            if self.undo_layer_entry(entry, true) {
                 return;
             }
         }

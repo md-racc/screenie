@@ -27,7 +27,7 @@ fn the_status_shows_the_mode_size_and_cursor_pixel() {
 #[test]
 fn the_tag_tracks_the_cursor_corner() {
     let mut s = session();
-    let at = |s: &Session| s.cursor_pixel();
+    let at = |s: &Session| s.cursor_pixel().unwrap();
     s.keys("o");
     assert_eq!(at(&s), PixelPoint::new(100, 170)); // top-left
     s.keys("O");
@@ -77,7 +77,7 @@ fn a_meaningless_modifier_does_nothing_at_all() {
     s.keys("<C-o> <C-A-l> <A-Return> <C-c> <C-q>");
     assert_eq!(s.rect(), START);
     assert!(!s.selection().is_centred());
-    assert_eq!(s.cursor_pixel(), PixelPoint::new(659, 259));
+    assert_eq!(s.cursor_pixel().unwrap(), PixelPoint::new(659, 259));
     assert_eq!(s.outcome(), None);
 }
 
@@ -108,7 +108,7 @@ fn centre_mode_resizes_around_the_centre() {
     s.keys("j");
     assert_eq!(s.rect(), r(1995.0, 105.0, 210.0, 90.0));
     assert!(s.status().ends_with("  centre"));
-    assert_eq!(s.cursor_pixel(), PixelPoint::new(2100, 150)); // the centre
+    assert_eq!(s.cursor_pixel().unwrap(), PixelPoint::new(2100, 150)); // the centre
 }
 
 // --- scope ----------------------------------------------------------------------
@@ -148,7 +148,7 @@ fn a_drag_draws_a_region() {
     assert_eq!(s.outcome(), None); // a drag never finishes anything
     s.keys("drag:300,240:100,100"); // up and left: the cursor is top-left
     assert_eq!(s.rect(), r(100.0, 100.0, 200.0, 140.0));
-    assert_eq!(s.cursor_pixel(), PixelPoint::new(100, 100));
+    assert_eq!(s.cursor_pixel().unwrap(), PixelPoint::new(100, 100));
 }
 
 #[test]

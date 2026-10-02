@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::LogicalRect;
+use crate::geometry::{LogicalPoint, LogicalRect};
 
 /// The project format's version. Bump it on any breaking change, with a
 /// migration.
@@ -38,11 +38,83 @@ pub struct CensorOp {
     pub amount: f64,
 }
 
+/// An opaque colour, 0..1 a channel.
+pub type Rgb = [f64; 3];
+
+/// A freehand line through `points`, with round caps and joins. One point
+/// is a dot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StrokeOp {
+    pub points: Vec<LogicalPoint>,
+    pub rgb: Rgb,
+    /// Line width, logical px.
+    pub width: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShapeKind {
+    Rect,
+    /// An ellipse filling the rect: a square makes a circle.
+    Circle,
+}
+
+impl ShapeKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ShapeKind::Rect => "rect",
+            ShapeKind::Circle => "circle",
+        }
+    }
+}
+
+/// An outlined rectangle or ellipse.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ShapeOp {
+    pub kind: ShapeKind,
+    pub rect: LogicalRect,
+    pub rgb: Rgb,
+    pub width: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterKind {
+    /// amount 0.25-1: how far toward grey.
+    Grey,
+    /// No amount.
+    Invert,
+    /// amount -5..5: 10% toward white (or black) a step.
+    Brightness,
+    /// amount -4..4: an S-curve per step (or toward mid-grey, 20% a step).
+    Contrast,
+    /// amount: radius, logical px.
+    Blur,
+}
+
+/// An image filter over a rect. A muted filter stays in the stack but
+/// isn't applied.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FilterOp {
+    pub rect: LogicalRect,
+    pub kind: FilterKind,
+    pub amount: f64,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+fn grown(r: LogicalRect, m: f64) -> LogicalRect {
+    LogicalRect::new(r.x - m, r.y - m, r.w + 2.0 * m, r.h + 2.0 * m)
+}
+
 /// What an operation does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum OpData {
     Censor(CensorOp),
+    Stroke(StrokeOp),
+    Shape(ShapeOp),
+    Filter(FilterOp),
 }
 
 impl OpData {
@@ -50,6 +122,24 @@ impl OpData {
     pub fn bbox(&self) -> LogicalRect {
         match self {
             OpData::Censor(c) => c.rect,
+            OpData::Stroke(s) => {
+                if s.points.is_empty() {
+                    return LogicalRect::default();
+                }
+                let xs = s.points.iter().map(|p| p.x);
+                let ys = s.points.iter().map(|p| p.y);
+                let (x0, x1) = (
+                    xs.clone().fold(f64::INFINITY, f64::min),
+                    xs.fold(f64::NEG_INFINITY, f64::max),
+                );
+                let (y0, y1) = (
+                    ys.clone().fold(f64::INFINITY, f64::min),
+                    ys.fold(f64::NEG_INFINITY, f64::max),
+                );
+                grown(LogicalRect::from_edges(x0, y0, x1, y1), s.width)
+            }
+            OpData::Shape(s) => grown(s.rect, s.width),
+            OpData::Filter(f) => f.rect,
         }
     }
 
@@ -57,6 +147,9 @@ impl OpData {
     pub fn noun(&self) -> &'static str {
         match self {
             OpData::Censor(_) => "censor",
+            OpData::Stroke(_) => "line",
+            OpData::Shape(_) => "shape",
+            OpData::Filter(_) => "filter",
         }
     }
 }
@@ -112,6 +205,28 @@ impl Layer {
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// The area its ops can touch, within the clip (`None` if nothing).
+    pub fn bbox(&self) -> Option<LogicalRect> {
+        let mut it = self.ops.iter().map(|o| o.data.bbox());
+        let first = it.next()?;
+        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.right(), first.bottom());
+        for b in it {
+            x0 = x0.min(b.x);
+            y0 = y0.min(b.y);
+            x1 = x1.max(b.right());
+            y1 = y1.max(b.bottom());
+        }
+        let c = self.clip;
+        let (x0, y0) = (x0.max(c.x), y0.max(c.y));
+        let (x1, y1) = (x1.min(c.right()), y1.min(c.bottom()));
+        Some(LogicalRect::new(
+            x0,
+            y0,
+            (x1 - x0).max(0.0),
+            (y1 - y0).max(0.0),
+        ))
     }
 
     pub fn op_index(&self, id: OpId) -> Option<usize> {
@@ -225,6 +340,26 @@ mod tests {
             .to_json()
             .replace(r#""version":1"#, r#""version":99"#);
         assert!(Project::from_json(&json).unwrap_err().contains("newer"));
+    }
+
+    #[test]
+    fn strokes_and_shapes_round_trip_and_bound_their_ink() {
+        let stroke = OpData::Stroke(StrokeOp {
+            points: vec![LogicalPoint::new(10.0, 10.0), LogicalPoint::new(30.0, 20.0)],
+            rgb: [0.9, 0.12, 0.12],
+            width: 3.0,
+        });
+        assert_eq!(stroke.bbox(), LogicalRect::new(7.0, 7.0, 26.0, 16.0));
+        let shape = OpData::Shape(ShapeOp {
+            kind: ShapeKind::Circle,
+            rect: LogicalRect::new(0.0, 0.0, 10.0, 10.0),
+            rgb: [0.0, 0.0, 1.0],
+            width: 2.0,
+        });
+        for op in [stroke, shape] {
+            let json = serde_json::to_string(&op).unwrap();
+            assert_eq!(serde_json::from_str::<OpData>(&json).unwrap(), op, "{json}");
+        }
     }
 
     #[test]

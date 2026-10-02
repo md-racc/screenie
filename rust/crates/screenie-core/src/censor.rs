@@ -122,6 +122,11 @@ impl Session {
                 self.lock(c.current());
                 c.sel = square_at(centre, c.sel.bounds());
             }
+            Intent::Tool(other) => {
+                // Another tool, same layer.
+                self.lock(c.current());
+                return Transition::SwitchTool(self.tool_mode(other));
+            }
             Intent::Undo => self.undo_layer(),
             Intent::Confirm => {
                 self.lock(c.current());

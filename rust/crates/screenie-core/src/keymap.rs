@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use crate::geometry::Dir;
 use crate::intent::{Intent, Scale, Tool};
 use crate::keys::{Chord, Key, Mods};
+use crate::model::ShapeKind;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Binding {
@@ -51,6 +52,12 @@ impl Keymap {
             intent,
             alias: true,
         });
+        self
+    }
+
+    /// Drop a chord's binding (a mode giving a shared key its own meaning).
+    fn unbind(&mut self, chord: Chord) -> &mut Self {
+        self.bindings.retain(|b| b.chord != chord);
         self
     }
 
@@ -165,6 +172,30 @@ pub static SELECT: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('Q'), Intent::DecodeCode)
         .bind(Chord::ch('P'), Intent::Pin)
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m.extend(&digits());
+    m
+});
+
+/// `1`-`9`: pick that option (an ink, a filter, a layer).
+fn digits() -> Keymap {
+    let mut m = Keymap::default();
+    for n in 1..=9u8 {
+        m.bind(Chord::ch(char::from(b'0' + n)), Intent::Choose(n));
+    }
+    m
+}
+
+/// Layers: the list grammar over the committed layers; `+`/`-` (and the
+/// wheel) select too.
+pub static LAYERS: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = list_keys();
+    m.extend(&digits())
+        .extend(&adjust_keys())
+        .bind(Chord::ch('u'), Intent::Undo)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
         .bind(Chord::plain(Key::Escape), Intent::Back);
     m
 });
@@ -183,13 +214,90 @@ pub static CENSOR: LazyLock<Keymap> = LazyLock::new(|| {
     m.extend(&adjust_keys())
         .extend(&build_tool_keys())
         .bind(Chord::ch('t'), Intent::CycleKind)
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor));
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+    m
+});
+
+/// The ink keys, `1`-`5`, and the eyedropper.
+fn ink_keys() -> Keymap {
+    let mut m = Keymap::default();
+    for (i, (key, _, _)) in crate::annotate::INKS.iter().enumerate() {
+        m.bind(Chord::ch(*key), Intent::Choose(i as u8 + 1));
+    }
+    m.bind(Chord::ch('p'), Intent::Eyedropper);
+    m
+}
+
+/// The pen: no box, so hjkl mean nothing here.
+pub static ANNOTATE: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = Keymap::default();
+    m.extend(&adjust_keys())
+        .extend(&ink_keys())
+        .extend(&build_tool_keys())
+        .bind(Chord::ch('r'), Intent::Shape(ShapeKind::Rect))
+        .bind(Chord::ch('c'), Intent::Shape(ShapeKind::Circle))
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
+        .bind(Chord::ch('u'), Intent::Undo);
+    m
+});
+
+/// A shape is a box: the box grammar (`c` is centre mode here), plus ink.
+pub static SHAPE: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = box_grammar();
+    m.extend(&adjust_keys())
+        .extend(&ink_keys())
+        .extend(&build_tool_keys())
+        .bind(Chord::ch('t'), Intent::CycleKind)
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+    m
+});
+
+/// The list keys (Filter, Layers): `[ ]` select, `< >` move, `d` delete,
+/// `Space` mute or hide.
+fn list_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('['), Intent::ListStep(-1))
+        .bind(Chord::ch(']'), Intent::ListStep(1))
+        .bind(Chord::ch('<'), Intent::ListMove(-1))
+        .bind(Chord::ch('>'), Intent::ListMove(1))
+        .bind(Chord::ch('d'), Intent::ListDelete)
+        .bind(Chord::plain(Key::Space), Intent::ListToggle);
+    m
+}
+
+/// Filter: a box (the selected filter's), the filter kinds, and a list.
+/// Space mutes here; Shift+Space is still the sideways corner.
+pub static FILTER: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = box_grammar();
+    m.unbind(Chord::plain(Key::Space))
+        .extend(&adjust_keys())
+        .extend(&build_tool_keys())
+        .extend(&list_keys())
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+    for (i, (key, ..)) in crate::filter::KINDS.iter().enumerate() {
+        m.bind(Chord::ch(*key), Intent::Choose(i as u8 + 1));
+    }
     m
 });
 
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
-    vec![("select", &*SELECT), ("censor", &*CENSOR)]
+    vec![
+        ("select", &*SELECT),
+        ("censor", &*CENSOR),
+        ("annotate", &*ANNOTATE),
+        ("shape", &*SHAPE),
+        ("filter", &*FILTER),
+        ("layers", &*LAYERS),
+    ]
 }
 
 #[cfg(test)]

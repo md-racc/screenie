@@ -1,10 +1,9 @@
 //! Select: the base mode. Edit the box, open tools, finish.
 
 use crate::boxes::{self, BoxOutcome, Drag};
-use crate::censor::CensorMode;
 use crate::geometry::LogicalRect;
-use crate::intent::{Intent, Tool};
-use crate::session::{FinishedAction, Mode, Outcome, Session, Transition};
+use crate::intent::Intent;
+use crate::session::{FinishedAction, Outcome, Session, Transition};
 
 pub use crate::boxes::RATES;
 
@@ -53,10 +52,16 @@ impl Session {
                 self.snap.scope(&mut self.sel, step);
             }
             Intent::Recall => self.recall(),
-            Intent::Tool(Tool::Censor) => {
-                let main = self.sel.rect();
-                return Transition::OpenTool(Mode::Censor(CensorMode::at(main, main.centre())));
+            Intent::Choose(n) => {
+                // The layer view, at that layer.
+                if self.project.layers.is_empty() {
+                    self.note = Some("no layers yet".into());
+                } else {
+                    let m = self.layers_at(usize::from(n).saturating_sub(1));
+                    return Transition::Push(crate::session::Mode::Layers(m));
+                }
             }
+            Intent::Tool(tool) => return Transition::OpenTool(self.tool_mode(tool)),
             Intent::Confirm | Intent::Ocr | Intent::DecodeCode | Intent::Pin => {
                 let rect = self.sel.rect();
                 return Transition::Finish(Outcome::Done(match intent {
@@ -67,7 +72,7 @@ impl Session {
                 }));
             }
             Intent::CopyColour => {
-                let pixel = self.cursor_pixel();
+                let pixel = self.cursor_pixel().expect("Select has a cursor");
                 return Transition::Finish(Outcome::Done(FinishedAction::Colour { pixel }));
             }
             Intent::Back => return Transition::Finish(Outcome::Cancelled),

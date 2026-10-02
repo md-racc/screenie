@@ -31,6 +31,7 @@ impl Picker {
         let s = &self.session;
         self.picture
             .sync(s.layers(), s.open_layer(), s.editing().as_ref());
+        self.picture.inspect(s.inspected());
     }
 }
 

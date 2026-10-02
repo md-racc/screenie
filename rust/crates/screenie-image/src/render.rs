@@ -5,7 +5,13 @@
 //! in frame pixels. A layer never touches pixels outside its clip.
 
 use screenie_core::geometry::{PixelMap, PixelPoint, PixelRect};
-use screenie_core::model::{CensorKind, CensorOp, Layer, OpData};
+use screenie_core::model::{
+    CensorKind, CensorOp, FilterKind, FilterOp, Layer, OpData, Rgb, ShapeKind, ShapeOp, StrokeOp,
+};
+use tiny_skia::{
+    Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, PixmapMut, Rect, Stroke,
+    Transform,
+};
 
 use crate::image::Image;
 
@@ -52,7 +58,265 @@ pub fn apply_layer(patch: &mut Patch, map: &PixelMap, layer: &Layer) {
 pub fn apply_op(patch: &mut Patch, map: &PixelMap, clip: PixelRect, op: &OpData) {
     match op {
         OpData::Censor(c) => censor(patch, map, clip, c),
+        OpData::Stroke(st) => stroke(patch, map, clip, st),
+        OpData::Shape(sh) => shape(patch, map, clip, sh),
+        OpData::Filter(f) => filter(patch, map, clip, f),
     }
+}
+
+/// Apply `f` to every pixel's RGB in `area`.
+fn per_pixel(patch: &mut Patch, area: PixelRect, mut f: impl FnMut([f32; 3]) -> [f32; 3]) {
+    for y in area.y..area.y + area.h {
+        let i = patch.offset(area.x, y);
+        for px in patch.img.data_mut()[i..i + area.w as usize * 4].chunks_exact_mut(4) {
+            let c = [f32::from(px[0]), f32::from(px[1]), f32::from(px[2])];
+            let out = f(c);
+            for k in 0..3 {
+                px[k] = out[k].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Luminance, as the HSL blend modes define it.
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn lerp(c: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|k| c[k] + (to[k] - c[k]) * t)
+}
+
+/// One S-curve pass around mid-grey (overlaying a picture on itself).
+fn s_curve(v: f32) -> f32 {
+    let x = v / 255.0;
+    let y = if x < 0.5 {
+        2.0 * x * x
+    } else {
+        1.0 - 2.0 * (1.0 - x) * (1.0 - x)
+    };
+    y * 255.0
+}
+
+fn filter(patch: &mut Patch, map: &PixelMap, clip: PixelRect, f: &FilterOp) {
+    if f.muted {
+        return;
+    }
+    let area = intersect(intersect(map.to_pixels(f.rect), clip), patch.extent());
+    if area.is_empty() {
+        return;
+    }
+    let a = f.amount as f32;
+    match f.kind {
+        FilterKind::Grey => per_pixel(patch, area, |c| lerp(c, [lum(c); 3], a.clamp(0.0, 1.0))),
+        FilterKind::Invert => per_pixel(patch, area, |c| c.map(|v| 255.0 - v)),
+        FilterKind::Brightness if a > 0.0 => per_pixel(patch, area, |c| c.map(|v| v + 25.5 * a)),
+        FilterKind::Brightness => {
+            per_pixel(patch, area, |c| c.map(|v| v * (1.0 + 0.1 * a).max(0.0)))
+        }
+        FilterKind::Contrast if a > 0.0 => {
+            let passes = a.round() as u32;
+            per_pixel(patch, area, |c| {
+                c.map(|mut v| {
+                    for _ in 0..passes {
+                        v = s_curve(v);
+                    }
+                    v
+                })
+            })
+        }
+        FilterKind::Contrast => {
+            per_pixel(patch, area, |c| lerp(c, [127.5; 3], (-0.2 * a).min(1.0)))
+        }
+        FilterKind::Blur => blur(patch, area, (f.amount * map.scale()).max(1.0)),
+    }
+}
+
+/// Three box-blur passes (close to a Gaussian), reading past `area` where
+/// the patch has pixels (edges are clamped), writing only inside it.
+fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
+    let r = ((radius / 2.0).round() as i32).max(1);
+    let margin = 3 * r;
+    let src = intersect(
+        PixelRect::new(
+            area.x - margin,
+            area.y - margin,
+            area.w + 2 * margin,
+            area.h + 2 * margin,
+        ),
+        patch.extent(),
+    );
+    let (w, h) = (src.w as usize, src.h as usize);
+    let mut buf: Vec<[f32; 4]> = Vec::with_capacity(w * h);
+    for y in src.y..src.y + src.h {
+        let i = patch.offset(src.x, y);
+        for px in patch.img.data()[i..i + w * 4].chunks_exact(4) {
+            buf.push([0, 1, 2, 3].map(|k| f32::from(px[k])));
+        }
+    }
+    let mut tmp = buf.clone();
+    let pass = |from: &[[f32; 4]], to: &mut [[f32; 4]], horizontal: bool| {
+        let (n, lines) = if horizontal { (w, h) } else { (h, w) };
+        let at = |line: usize, i: usize| {
+            if horizontal {
+                line * w + i
+            } else {
+                i * w + line
+            }
+        };
+        let norm = 1.0 / (2 * r + 1) as f32;
+        for line in 0..lines {
+            for i in 0..n {
+                let mut acc = [0.0f32; 4];
+                for d in -r..=r {
+                    let j = (i as i32 + d).clamp(0, n as i32 - 1) as usize;
+                    let p = from[at(line, j)];
+                    for k in 0..4 {
+                        acc[k] += p[k];
+                    }
+                }
+                to[at(line, i)] = acc.map(|v| v * norm);
+            }
+        }
+    };
+    for _ in 0..3 {
+        pass(&buf, &mut tmp, true);
+        pass(&tmp, &mut buf, false);
+    }
+    for y in area.y..area.y + area.h {
+        let i = patch.offset(area.x, y);
+        let row = (y - src.y) as usize * w + (area.x - src.x) as usize;
+        for (n, px) in patch.img.data_mut()[i..i + area.w as usize * 4]
+            .chunks_exact_mut(4)
+            .enumerate()
+        {
+            let v = buf[row + n];
+            for k in 0..4 {
+                px[k] = v[k].round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
+/// Paint for ink: opaque, anti-aliased.
+fn ink(rgb: Rgb) -> Paint<'static> {
+    let mut paint = Paint::default();
+    paint.set_color(
+        Color::from_rgba(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, 1.0).unwrap_or(Color::BLACK),
+    );
+    paint.anti_alias = true;
+    paint
+}
+
+/// The clip as a mask over the patch, or `None` if it covers it all.
+/// `Err` if nothing of the patch is inside the clip.
+fn clip_mask(patch: &Patch, clip: PixelRect) -> Result<Option<Mask>, ()> {
+    let ext = patch.extent();
+    let inside = intersect(clip, ext);
+    if inside.is_empty() {
+        return Err(());
+    }
+    if inside == ext {
+        return Ok(None);
+    }
+    let (w, h) = (patch.img.width(), patch.img.height());
+    let mut mask = Mask::new(w, h).ok_or(())?;
+    let r = Rect::from_xywh(
+        (inside.x - patch.origin.x) as f32,
+        (inside.y - patch.origin.y) as f32,
+        inside.w as f32,
+        inside.h as f32,
+    )
+    .ok_or(())?;
+    mask.fill_path(
+        &PathBuilder::from_rect(r),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    Ok(Some(mask))
+}
+
+/// Run `draw` on the patch as a tiny-skia pixmap, in frame pixels (the
+/// transform takes them to the patch), clipped.
+fn with_pixmap(
+    patch: &mut Patch,
+    clip: PixelRect,
+    draw: impl FnOnce(&mut PixmapMut, Transform, Option<&Mask>),
+) {
+    let Ok(mask) = clip_mask(patch, clip) else {
+        return;
+    };
+    let (w, h) = (patch.img.width(), patch.img.height());
+    let t = Transform::from_translate(-patch.origin.x as f32, -patch.origin.y as f32);
+    if let Some(mut pm) = PixmapMut::from_bytes(patch.img.data_mut(), w, h) {
+        draw(&mut pm, t, mask.as_ref());
+    }
+}
+
+fn round_stroke(width: f32) -> Stroke {
+    Stroke {
+        width,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    }
+}
+
+fn stroke(patch: &mut Patch, map: &PixelMap, clip: PixelRect, st: &StrokeOp) {
+    let width = (st.width * map.scale()) as f32;
+    let pts: Vec<(f32, f32)> = st
+        .points
+        .iter()
+        .map(|&p| {
+            let (x, y) = map.to_device(p);
+            (x as f32, y as f32)
+        })
+        .collect();
+    let Some(&(x0, y0)) = pts.first() else { return };
+    let paint = ink(st.rgb);
+    with_pixmap(patch, clip, |pm, t, mask| {
+        let mut pb = PathBuilder::new();
+        if pts.iter().all(|&p| p == (x0, y0)) {
+            // A click: a dot, as round caps on a zero-length line would be.
+            pb.push_circle(x0, y0, width / 2.0);
+            if let Some(path) = pb.finish() {
+                pm.fill_path(&path, &paint, FillRule::Winding, t, mask);
+            }
+            return;
+        }
+        pb.move_to(x0, y0);
+        for &(x, y) in &pts[1..] {
+            pb.line_to(x, y);
+        }
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, &paint, &round_stroke(width), t, mask);
+        }
+    });
+}
+
+fn shape(patch: &mut Patch, map: &PixelMap, clip: PixelRect, sh: &ShapeOp) {
+    let (x0, y0) = map.to_device(screenie_core::geometry::LogicalPoint::new(
+        sh.rect.x, sh.rect.y,
+    ));
+    let (x1, y1) = map.to_device(screenie_core::geometry::LogicalPoint::new(
+        sh.rect.right(),
+        sh.rect.bottom(),
+    ));
+    let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
+    let Some(r) = Rect::from_xywh(x0 as f32, y0 as f32, w as f32, h as f32) else {
+        return;
+    };
+    let path = match sh.kind {
+        ShapeKind::Rect => Some(PathBuilder::from_rect(r)),
+        ShapeKind::Circle => PathBuilder::from_oval(r),
+    };
+    let Some(path) = path else { return };
+    let paint = ink(sh.rgb);
+    let width = (sh.width * map.scale()) as f32;
+    with_pixmap(patch, clip, |pm, t, mask| {
+        pm.stroke_path(&path, &paint, &round_stroke(width), t, mask);
+    });
 }
 
 fn censor(patch: &mut Patch, map: &PixelMap, clip: PixelRect, c: &CensorOp) {
@@ -220,6 +484,150 @@ mod tests {
         };
         apply_layer(&mut p, &map(), &layer);
         assert_eq!(img.rgb(PixelPoint::new(15, 5)), Some(Rgb(128, 128, 128)));
+    }
+
+    fn red() -> screenie_core::model::Rgb {
+        [1.0, 0.0, 0.0]
+    }
+
+    #[test]
+    fn a_stroke_is_drawn_along_its_points_and_clipped() {
+        use screenie_core::geometry::LogicalPoint;
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Stroke(StrokeOp {
+            points: vec![LogicalPoint::new(10.0, 50.0), LogicalPoint::new(90.0, 50.0)],
+            rgb: red(),
+            width: 4.0,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 60, 100), &op);
+        assert_eq!(img.rgb(PixelPoint::new(30, 50)), Some(Rgb(255, 0, 0)));
+        assert_eq!(img.rgb(PixelPoint::new(30, 40)), Some(Rgb(0, 0, 0)));
+        assert_eq!(img.rgb(PixelPoint::new(70, 50)), Some(Rgb(0, 0, 0))); // clipped
+    }
+
+    #[test]
+    fn a_click_is_a_dot() {
+        use screenie_core::geometry::LogicalPoint;
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Stroke(StrokeOp {
+            points: vec![LogicalPoint::new(50.0, 50.0)],
+            rgb: red(),
+            width: 6.0,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        assert_eq!(img.rgb(PixelPoint::new(50, 50)), Some(Rgb(255, 0, 0)));
+        assert_eq!(img.rgb(PixelPoint::new(50, 56)), Some(Rgb(0, 0, 0)));
+    }
+
+    #[test]
+    fn shapes_outline_their_rect() {
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let rect = LogicalRect::new(20.0, 20.0, 60.0, 60.0);
+        for kind in [ShapeKind::Rect, ShapeKind::Circle] {
+            let op = OpData::Shape(ShapeOp {
+                kind,
+                rect,
+                rgb: red(),
+                width: 4.0,
+            });
+            apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        }
+        assert_eq!(img.rgb(PixelPoint::new(50, 20)), Some(Rgb(255, 0, 0))); // both pass here
+        assert_eq!(img.rgb(PixelPoint::new(21, 21)), Some(Rgb(255, 0, 0))); // the rect's corner
+        assert_eq!(img.rgb(PixelPoint::new(36, 36)), Some(Rgb(0, 0, 0))); // inside both: untouched
+        assert_eq!(img.rgb(PixelPoint::new(50, 50)), Some(Rgb(0, 0, 0)));
+    }
+
+    use crate::image::Rgb as Rgb3;
+
+    fn filtered(kind: FilterKind, amount: f64, c: Rgb3) -> Rgb3 {
+        let mut img = Image::filled(10, 10, c);
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Filter(FilterOp {
+            rect: LogicalRect::new(0.0, 0.0, 10.0, 10.0),
+            kind,
+            amount,
+            muted: false,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        img.rgb(PixelPoint::new(5, 5)).unwrap()
+    }
+
+    #[test]
+    fn filters_per_pixel() {
+        let c = Rgb3(200, 100, 50);
+        let l = (0.3 * 200.0 + 0.59 * 100.0 + 0.11 * 50.0_f64).round() as u8;
+        assert_eq!(filtered(FilterKind::Grey, 1.0, c), Rgb3(l, l, l));
+        assert_eq!(filtered(FilterKind::Invert, 1.0, c), Rgb3(55, 155, 205));
+        assert_eq!(
+            filtered(FilterKind::Brightness, 2.0, c),
+            Rgb3(251, 151, 101)
+        );
+        assert_eq!(filtered(FilterKind::Brightness, -5.0, c), Rgb3(100, 50, 25));
+        // Contrast: the S-curve pushes away from mid-grey; less pulls toward it.
+        let more = filtered(FilterKind::Contrast, 1.0, c);
+        assert!(more.0 > 200 && more.2 < 50, "{more:?}");
+        assert_eq!(filtered(FilterKind::Contrast, -5.0, c), Rgb3(128, 128, 128));
+        // A flat colour stays flat under blur.
+        assert_eq!(filtered(FilterKind::Blur, 4.0, c), c);
+    }
+
+    #[test]
+    fn blur_spreads_an_edge_and_stays_in_its_rect() {
+        let mut img = Image::filled(40, 10, Rgb3(0, 0, 0));
+        for y in 0..10 {
+            for x in 20..40 {
+                let i = (y * 40 + x) * 4;
+                img.data_mut()[i..i + 3].copy_from_slice(&[255, 255, 255]);
+            }
+        }
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Filter(FilterOp {
+            rect: LogicalRect::new(10.0, 0.0, 20.0, 10.0),
+            kind: FilterKind::Blur,
+            amount: 6.0,
+            muted: false,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        let v = |x| img.rgb(PixelPoint::new(x, 5)).unwrap().0;
+        assert!(v(19) > 40 && v(20) < 215, "{} {}", v(19), v(20)); // the edge softened
+        assert_eq!(v(9), 0); // outside the rect: untouched
+        assert_eq!(v(30), 255);
+    }
+
+    #[test]
+    fn a_muted_filter_does_nothing() {
+        let mut img = Image::filled(10, 10, Rgb3(10, 20, 30));
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Filter(FilterOp {
+            rect: LogicalRect::new(0.0, 0.0, 10.0, 10.0),
+            kind: FilterKind::Invert,
+            amount: 1.0,
+            muted: true,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        assert_eq!(img.rgb(PixelPoint::new(5, 5)), Some(Rgb3(10, 20, 30)));
     }
 
     #[test]

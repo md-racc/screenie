@@ -23,6 +23,7 @@ fn kinds(ops: &[screenie_core::model::Op]) -> Vec<CensorKind> {
     ops.iter()
         .map(|o| match &o.data {
             OpData::Censor(c) => c.kind,
+            other => panic!("not a censor: {other:?}"),
         })
         .collect()
 }

@@ -27,6 +27,12 @@ pub struct View {
     pub status: String,
     /// The palette and legend lines, shown above the box.
     pub top: Vec<String>,
+    /// The ink, shown as a swatch after the status (Annotate, Shape).
+    pub swatch: Option<[f64; 3]>,
+    /// List tags (the filter stack), shown beside the box.
+    pub lists: Vec<Vec<String>>,
+    /// The clip of the layer shown alone (Layers), outlined.
+    pub inspect: Option<LogicalRect>,
     /// Every monitor's rectangle (tags stay on one).
     pub monitors: Vec<LogicalRect>,
 }
@@ -40,7 +46,16 @@ impl View {
             active: s.select_is_top(),
             boxes: s.boxes(),
             status: s.status(),
-            top: if s.show_help() { s.legend() } else { vec![] },
+            top: {
+                let mut top = s.palette();
+                if s.show_help() {
+                    top.extend(s.legend());
+                }
+                top
+            },
+            swatch: matches!(s.mode_name(), "annotate" | "shape").then(|| s.ink().0.rgb),
+            lists: s.lists(),
+            inspect: s.inspected().map(|l| l.clip),
             monitors: s.layout().monitor_rects(),
         }
     }
@@ -212,8 +227,13 @@ impl Ui {
         let b = dev(view.rect);
         into.blit(&base.plain, b, b.x, b.y);
 
-        // The open layer, over its clip.
-        if let Some((px, patch)) = pic.open_patch() {
+        // The open layer over its clip; or the inspected layer alone.
+        let patch = if view.inspect.is_some() {
+            pic.isolated_patch()
+        } else {
+            pic.open_patch()
+        };
+        if let Some((px, patch)) = patch {
             let m = pic.committed().map();
             let at = m.to_logical(screenie_core::geometry::PixelPoint::new(px.x, px.y));
             let k = m.scale();
@@ -242,6 +262,14 @@ impl Ui {
         if view.active {
             marker(into, view.cursor);
         }
+        if let Some(clip) = view.inspect {
+            outline(
+                into,
+                dev(clip),
+                rnd(s).max(1),
+                Paint::rgba(1.0, 1.0, 1.0, 0.9),
+            );
+        }
         for bx in &view.boxes {
             outline(into, dev(bx.rect), t, Paint::rgba(1.0, 1.0, 1.0, 0.9));
             if bx.active {
@@ -252,11 +280,21 @@ impl Ui {
         // Tags, status first so the others keep clear of it.
         let status = vec![view.status.clone()];
         let mut placed: Vec<LogicalRect> = Vec::new();
-        for (lines, spots) in [(&status, tags::STATUS), (&view.top, tags::LEGEND)] {
+        let blocks = [(&status, tags::STATUS), (&view.top, tags::LEGEND)]
+            .into_iter()
+            .chain(view.lists.iter().map(|l| (l, tags::LIST)));
+        for (lines, spots) in blocks {
             if lines.is_empty() {
                 continue;
             }
-            let bw = lines.iter().map(|l| self.chip_width(l)).fold(0.0, f64::max);
+            let is_status = std::ptr::eq(lines, &status);
+            // Room for the ink swatch after the status chip.
+            let extra = if is_status && view.swatch.is_some() {
+                SWATCH + 5.0
+            } else {
+                0.0
+            };
+            let bw = lines.iter().map(|l| self.chip_width(l)).fold(0.0, f64::max) + extra;
             let bh = ROW * lines.len() as f64;
             let r = tags::place(view.rect, bw, bh, spots, &view.monitors, &placed);
             placed.push(r);
@@ -266,6 +304,11 @@ impl Ui {
             for (i, line) in lines.iter().enumerate() {
                 let bottom = r.y + ROW * (i as f64 + 1.0) - 2.0;
                 self.chip(into, monitor, s, r.x, bottom, line);
+            }
+            if let (true, Some(rgb)) = (is_status, view.swatch) {
+                let x = r.x + self.chip_width(&lines[0]) + 5.0 - monitor.x;
+                let y = r.y + ROW - 2.0 - monitor.y;
+                swatch(into, s, x, y, rgb);
             }
         }
     }
@@ -295,6 +338,30 @@ impl Ui {
             pen += advance;
         }
     }
+}
+
+/// The ink swatch's side, logical px.
+const SWATCH: f64 = 13.0;
+
+/// A colour square whose bottom-left is at `(x, y)` (monitor-relative
+/// logical px), with a thin two-tone border so it shows on anything.
+fn swatch(into: &mut Image, s: f64, x: f64, y: f64, rgb: [f64; 3]) {
+    let px = |v: f64| rnd(v * s);
+    let r = PixelRect::new(
+        px(x),
+        px(y - SWATCH - 2.0),
+        px(x + SWATCH) - px(x),
+        px(y - 2.0) - px(y - SWATCH - 2.0),
+    );
+    let t = px(1.0).max(1);
+    outline(into, r, t, Paint::rgba(1.0, 1.0, 1.0, 0.8));
+    let inner = PixelRect::new(r.x + t, r.y + t, r.w - 2 * t, r.h - 2 * t);
+    outline(into, inner, t, Paint::rgba(0.0, 0.0, 0.0, 0.8));
+    fill(
+        into,
+        inner,
+        Paint::rgba(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, 1.0),
+    );
 }
 
 /// A `t`-pixel outline just outside `b`.

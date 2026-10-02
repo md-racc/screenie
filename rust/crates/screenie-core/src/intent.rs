@@ -65,6 +65,10 @@ impl FromIterator<Dir> for DirSet {
 pub enum Tool {
     /// `x`
     Censor,
+    /// `a`
+    Annotate,
+    /// `f`
+    Filter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -112,6 +116,23 @@ pub enum Intent {
     Tool(Tool),
     /// `t`: the next kind (censor type, shape).
     CycleKind,
+    /// `1`-`9` in a palette: pick that option (an ink colour).
+    Choose(u8),
+    /// `p` in Annotate and Shape: the colour under the pointer becomes the
+    /// ink.
+    Eyedropper,
+    /// `r` / `c` in Annotate: a shape, as a box of its own.
+    Shape(crate::model::ShapeKind),
+
+    // Lists (Filter, Layers).
+    /// `[` / `]`: select the item below (-1) or above (+1).
+    ListStep(i32),
+    /// `<` / `>`: move the selected item down (-1) or up (+1).
+    ListMove(i32),
+    /// `d`: delete the selected item.
+    ListDelete,
+    /// `Space`: mute or hide the selected item.
+    ListToggle,
 
     // Select.
     /// `.`: the previously accepted boxes.
