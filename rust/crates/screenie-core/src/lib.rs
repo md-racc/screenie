@@ -6,6 +6,8 @@
 //! driven headlessly, by events or by a `--keys` script.
 
 pub mod anchor_cursor;
+pub mod boxes;
+pub mod censor;
 pub mod geometry;
 pub mod history;
 pub mod input;
@@ -14,6 +16,7 @@ pub mod keymap;
 pub mod keys;
 pub mod layout;
 pub mod legend;
+pub mod model;
 pub mod recall;
 pub mod script;
 pub mod select;

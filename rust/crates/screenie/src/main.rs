@@ -12,8 +12,8 @@ use std::time::Duration;
 use screenie_core::geometry::LogicalRect;
 use screenie_core::layout::Layout;
 use screenie_core::session::{FinishedAction, Outcome, Session, Setup};
-use screenie_image::Frame;
 use screenie_image::ui::Ui;
+use screenie_image::{Frame, Picture};
 use screenie_platform::desktop::{DesktopInfo, hyprland::Hyprland};
 use screenie_platform::wayland::Wayland;
 
@@ -119,19 +119,28 @@ fn pick(args: cli::Pick) -> Result<Exit, Failure> {
         let font = screenie_platform::fonts::monospace()
             .ok_or_else(|| Failure::capture("no monospace font found"))?;
         let ui = Ui::new(&font).map_err(Failure::capture)?;
-        let mut app = picker::Picker::new(session, frame.clone(), ui);
+        let mut app = picker::Picker::new(session, Picture::new(frame), ui);
         wl.run_overlay(&layout, &mut app, deadline())
             .map_err(Failure::capture)?;
-        session = app.session;
+        drop(wl);
+        return finish(
+            app.session.outcome().cloned(),
+            &layout,
+            &app.picture,
+            &args.output,
+        );
     }
     drop(wl);
-    finish(session.outcome().cloned(), &layout, &frame, &args.output)
+    let mut picture = Picture::new(frame);
+    picture.sync(session.layers(), None, None);
+    finish(session.outcome().cloned(), &layout, &picture, &args.output)
 }
 
+/// Deliver what the picker produced, from the committed picture.
 fn finish(
     outcome: Option<Outcome>,
     layout: &Layout,
-    frame: &Frame,
+    picture: &Picture,
     out: &cli::Output,
 ) -> Result<Exit, Failure> {
     let Some(Outcome::Done(action)) = outcome else {
@@ -139,11 +148,11 @@ fn finish(
     };
     match action {
         FinishedAction::Image { rect } => {
-            deliver::image(&frame.crop(rect), out, "Area").map_err(Failure::delivery)?;
+            deliver::image(&picture.crop(rect), out, "Area").map_err(Failure::delivery)?;
             files::remember(&layout.monitors, rect);
         }
         FinishedAction::Colour { pixel } => {
-            let rgb = frame
+            let rgb = picture
                 .rgb(pixel)
                 .ok_or_else(|| Failure::delivery("the cursor is off the frame"))?;
             deliver::text(&rgb.hex(), out, "Colour copied").map_err(Failure::delivery)?;

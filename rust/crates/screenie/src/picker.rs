@@ -2,49 +2,50 @@
 
 use screenie_core::geometry::LogicalRect;
 use screenie_core::session::{RawEvent, Session};
-use screenie_image::Frame;
-use screenie_image::Image;
 use screenie_image::ui::{Ui, View};
+use screenie_image::{Image, Picture};
 use screenie_platform::wayland::OverlayApp;
 
 pub struct Picker {
     pub session: Session,
-    pub frame: Frame,
+    pub picture: Picture,
     pub ui: Ui,
     monitors: Vec<LogicalRect>,
 }
 
 impl Picker {
-    pub fn new(session: Session, frame: Frame, ui: Ui) -> Self {
+    pub fn new(session: Session, picture: Picture, ui: Ui) -> Self {
         let monitors = session.layout().monitor_rects();
-        Self {
+        let mut p = Self {
             session,
-            frame,
+            picture,
             ui,
             monitors,
-        }
+        };
+        p.sync();
+        p
     }
 
-    fn view(&self) -> View {
+    /// Bring the picture up to date with the session.
+    fn sync(&mut self) {
         let s = &self.session;
-        View {
-            rect: s.rect(),
-            cursor: s.selection().cursor_point(),
-            active: true,
-            status: s.status(),
-            top: if s.show_help() { s.legend() } else { vec![] },
-            monitors: self.monitors.clone(),
-        }
+        self.picture
+            .sync(s.layers(), s.open_layer(), s.editing().as_ref());
     }
 }
 
 impl OverlayApp for Picker {
     fn input(&mut self, ev: RawEvent, now: f64) {
         self.session.handle(ev, now);
+        self.sync();
     }
 
     fn tick(&mut self, now: f64) -> bool {
-        self.session.tick(now)
+        let moved = self.session.tick(now);
+        if moved {
+            self.sync();
+        }
+        moved
     }
 
     fn wants_ticks(&self) -> bool {
@@ -56,9 +57,9 @@ impl OverlayApp for Picker {
     }
 
     fn draw(&mut self, index: usize, into: &mut Image) {
-        let view = self.view();
+        let view = View::of(&self.session);
         let monitor = self.monitors[index];
-        self.ui.draw(&self.frame, index, monitor, &view, into);
+        self.ui.draw(&self.picture, index, monitor, &view, into);
     }
 }
 
@@ -69,7 +70,7 @@ mod tests {
     use screenie_core::keys::{Key, Mods};
     use screenie_core::layout::{Layout, Monitor, MonitorId};
     use screenie_core::session::{Outcome, Setup};
-    use screenie_image::Rgb;
+    use screenie_image::{Frame, Rgb};
 
     fn picker() -> Option<Picker> {
         let font = screenie_platform::fonts::monospace()?;
@@ -87,7 +88,11 @@ mod tests {
             start: Some(LogicalRect::new(100.0, 100.0, 200.0, 100.0)),
             recall: vec![],
         });
-        Some(Picker::new(session, frame, Ui::new(&font).ok()?))
+        Some(Picker::new(
+            session,
+            Picture::new(frame),
+            Ui::new(&font).ok()?,
+        ))
     }
 
     #[test]

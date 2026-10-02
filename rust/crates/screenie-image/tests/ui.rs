@@ -3,7 +3,7 @@
 
 use screenie_core::geometry::{LogicalPoint, LogicalRect, PixelPoint};
 use screenie_image::ui::{Ui, View};
-use screenie_image::{Frame, Image, Rgb, encode};
+use screenie_image::{Frame, Image, Picture, Rgb, encode};
 
 const MONS: [LogicalRect; 2] = [
     LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
@@ -21,7 +21,7 @@ fn font() -> Option<Vec<u8>> {
 }
 
 /// The prototype's synthetic frame: a dark grey desktop, at `scale`.
-fn frame(scale: u32) -> Frame {
+fn frame(scale: u32) -> Picture {
     let mut img = Image::filled(3840 * scale, 1080 * scale, Rgb(31, 31, 36));
     // A light block where the prototype draws its text, to see the box.
     let w = img.width() as usize;
@@ -31,7 +31,7 @@ fn frame(scale: u32) -> Frame {
             img.data_mut()[i..i + 3].copy_from_slice(&[217, 217, 217]);
         }
     }
-    Frame::new(img, LogicalRect::new(0.0, 0.0, 3840.0, 1080.0))
+    Picture::new(Frame::new(img, LogicalRect::new(0.0, 0.0, 3840.0, 1080.0)))
 }
 
 fn view(top: Vec<String>) -> View {
@@ -39,6 +39,7 @@ fn view(top: Vec<String>) -> View {
         rect: START,
         cursor: LogicalPoint::new(START.right(), START.bottom()),
         active: true,
+        boxes: vec![],
         status: "SELECT  560×90  (659,259)".into(),
         top,
         monitors: MONS.to_vec(),
@@ -114,4 +115,81 @@ fn the_legend_goes_above_the_box_and_scale_2_is_crisp() {
     // The box's outline at 2x is 4 device px.
     assert!(at(&into, 600, 336).0 > 200 && at(&into, 600, 339).0 > 200);
     assert_eq!(at(&into, 600, 335), Rgb(16, 16, 18));
+}
+
+fn session(start: LogicalRect) -> screenie_core::session::Session {
+    use screenie_core::layout::{Layout, Monitor, MonitorId};
+    let monitors = MONS
+        .iter()
+        .enumerate()
+        .map(|(i, &rect)| Monitor {
+            id: MonitorId(i as u32),
+            name: format!("DP-{i}"),
+            rect,
+            scale: 1.0,
+        })
+        .collect();
+    screenie_core::session::Session::new(screenie_core::session::Setup {
+        layout: Layout::new(monitors, vec![], MonitorId(0)),
+        pixels: screenie_core::geometry::PixelMap::new(
+            LogicalRect::new(0.0, 0.0, 3840.0, 1080.0),
+            3840,
+            1080,
+        ),
+        start: Some(start),
+        recall: vec![],
+    })
+}
+
+#[test]
+fn a_censor_shows_while_open_and_burns_in_on_commit() {
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut pic = frame(1);
+    let mut s = session(START);
+    s.play("x t", 0.0).unwrap(); // a black bar at the centre of the box
+    pic.sync(s.layers(), s.open_layer(), s.editing().as_ref());
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&pic, 0, MONS[0], &View::of(&s), &mut into);
+    save("censor.png", &into);
+    assert_eq!(at(&into, 380, 215), Rgb(0, 0, 0)); // the bar, shown
+    assert!(at(&into, 380, 203).0 > 200); // its outline, above it
+    assert_eq!(
+        pic.crop(START).rgb(PixelPoint::new(280, 45)),
+        Some(Rgb(217, 217, 217))
+    ); // not output yet
+    s.play("Return", 0.0).unwrap();
+    pic.sync(s.layers(), s.open_layer(), s.editing().as_ref());
+    assert_eq!(
+        pic.crop(START).rgb(PixelPoint::new(280, 45)),
+        Some(Rgb(0, 0, 0))
+    ); // committed
+    s.play("u", 0.0).unwrap();
+    pic.sync(s.layers(), s.open_layer(), s.editing().as_ref());
+    assert_eq!(
+        pic.crop(START).rgb(PixelPoint::new(280, 45)),
+        Some(Rgb(217, 217, 217))
+    ); // undone
+}
+
+#[test]
+fn a_project_serialized_and_read_back_renders_the_same_pixels() {
+    use screenie_core::model::Project;
+    let mut s = session(START);
+    // A pixelate, a black bar locked over it, both committed; then a
+    // second layer with a white bar.
+    s.play("x <S-l> <S-l> x t <S-h> Return x t plus plus plus plus plus plus plus plus plus plus Return", 0.0)
+        .unwrap();
+    let project = s.project();
+    assert_eq!(project.layers.len(), 2);
+    let back = Project::from_json(&project.to_json()).unwrap();
+    assert_eq!(back, project);
+    let render = |p: &Project| {
+        let mut pic = frame(1);
+        pic.sync(&p.layers, None, None);
+        pic.crop(p.selection)
+    };
+    let (a, b) = (render(&project), render(&back));
+    assert_eq!(a, b);
+    assert_ne!(a, frame(1).crop(START)); // and the layers did something
 }

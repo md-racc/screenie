@@ -21,7 +21,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
         pointer::{PointerEvent, PointerHandler, cursor_shape::CursorShapeManager},
     },
     shell::wlr_layer::{LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
@@ -54,6 +54,8 @@ pub(crate) struct State {
     pointer: Option<wl_pointer::WlPointer>,
     capture: Vec<capture::Pending>,
     overlay: Option<overlay::Overlay>,
+    /// The keyboard's repeat rate (per second) and delay (seconds).
+    key_repeat: Option<(f64, f64)>,
 }
 
 /// The empty user data for globals with no events of interest.
@@ -85,6 +87,7 @@ impl Wayland {
             pointer: None,
             capture: Vec::new(),
             overlay: None,
+            key_repeat: None,
         };
         queue
             .roundtrip(&mut state)
@@ -325,6 +328,16 @@ impl KeyboardHandler for State {
         }
     }
 
+    fn update_repeat_info(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        info: RepeatInfo,
+    ) {
+        self.repeat_info(info);
+    }
+
     fn update_modifiers(
         &mut self,
         _: &Connection,
@@ -337,6 +350,21 @@ impl KeyboardHandler for State {
     ) {
         if let Some(o) = &mut self.overlay {
             o.modifiers(modifiers);
+        }
+    }
+}
+
+impl State {
+    fn repeat_info(&mut self, info: RepeatInfo) {
+        let r = match info {
+            RepeatInfo::Repeat { rate, delay } => {
+                (f64::from(rate.get()), f64::from(delay) / 1000.0)
+            }
+            RepeatInfo::Disable => (0.0, 0.0),
+        };
+        self.key_repeat = Some(r);
+        if let Some(o) = &mut self.overlay {
+            o.key_repeat(r);
         }
     }
 }

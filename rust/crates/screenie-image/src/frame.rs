@@ -12,6 +12,7 @@ use crate::image::{Image, Rgb};
 pub struct Frame {
     image: Arc<Image>,
     map: PixelMap,
+    layout: LogicalRect,
 }
 
 impl Frame {
@@ -22,7 +23,13 @@ impl Frame {
         Self {
             image: Arc::new(image),
             map,
+            layout,
         }
+    }
+
+    /// The logical rectangle the frame covers.
+    pub fn layout(&self) -> LogicalRect {
+        self.layout
     }
 
     pub fn image(&self) -> &Image {

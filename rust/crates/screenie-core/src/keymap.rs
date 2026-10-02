@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use crate::geometry::Dir;
-use crate::intent::{Intent, Scale};
+use crate::intent::{Intent, Scale, Tool};
 use crate::keys::{Chord, Key, Mods};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -164,13 +164,32 @@ pub static SELECT: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('p'), Intent::CopyColour)
         .bind(Chord::ch('Q'), Intent::DecodeCode)
         .bind(Chord::ch('P'), Intent::Pin)
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
+/// The keys every build tool shares: commit, discard (undo is in the box
+/// grammar, and means the open layer's undo there).
+fn build_tool_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+}
+
+pub static CENSOR: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = box_grammar();
+    m.extend(&adjust_keys())
+        .extend(&build_tool_keys())
+        .bind(Chord::ch('t'), Intent::CycleKind)
+        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor));
     m
 });
 
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
-    vec![("select", &*SELECT)]
+    vec![("select", &*SELECT), ("censor", &*CENSOR)]
 }
 
 #[cfg(test)]

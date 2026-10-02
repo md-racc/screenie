@@ -6,25 +6,44 @@
 use std::collections::HashMap;
 
 use screenie_core::geometry::{LogicalPoint, LogicalRect, PixelRect, rnd};
+use screenie_core::session::BoxView;
 use screenie_core::tags::{self, ROW};
 
 use crate::compose::resize;
-use crate::frame::Frame;
 use crate::image::Image;
+use crate::picture::Picture;
 
 /// What a frame of the overlay shows. The front end fills it from the
 /// session.
 #[derive(Clone, Debug)]
 pub struct View {
+    /// The main box.
     pub rect: LogicalRect,
     pub cursor: LogicalPoint,
-    /// Whether the box's mode is the top one (bright outline, marker).
+    /// Whether Select is the top mode (bright outline, marker).
     pub active: bool,
+    /// The boxes of the modes above Select (a censor's), bottom first.
+    pub boxes: Vec<BoxView>,
     pub status: String,
     /// The palette and legend lines, shown above the box.
     pub top: Vec<String>,
     /// Every monitor's rectangle (tags stay on one).
     pub monitors: Vec<LogicalRect>,
+}
+
+impl View {
+    /// What a session shows now.
+    pub fn of(s: &screenie_core::session::Session) -> View {
+        View {
+            rect: s.rect(),
+            cursor: s.selection().cursor_point(),
+            active: s.select_is_top(),
+            boxes: s.boxes(),
+            status: s.status(),
+            top: if s.show_help() { s.legend() } else { vec![] },
+            monitors: s.layout().monitor_rects(),
+        }
+    }
 }
 
 /// Tag text size, logical px.
@@ -80,6 +99,7 @@ struct Glyph {
 /// The monitor's frame pixels at its device size, plain and dimmed.
 struct Base {
     size: (u32, u32),
+    version: u64,
     plain: Image,
     dimmed: Image,
 }
@@ -134,14 +154,18 @@ impl Ui {
 
     fn base(
         &mut self,
-        frame: &Frame,
+        pic: &Picture,
         index: usize,
         monitor: LogicalRect,
         size: (u32, u32),
     ) -> &Base {
-        let stale = self.bases.get(&index).is_none_or(|b| b.size != size);
+        let version = pic.version();
+        let stale = self
+            .bases
+            .get(&index)
+            .is_none_or(|b| b.size != size || b.version != version);
         if stale {
-            let plain = resize(&frame.crop(monitor), size.0, size.1);
+            let plain = resize(&pic.committed().crop(monitor), size.0, size.1);
             let mut dimmed = plain.clone();
             for px in dimmed.data_mut().chunks_exact_mut(4) {
                 for c in &mut px[..3] {
@@ -152,6 +176,7 @@ impl Ui {
                 index,
                 Base {
                     size,
+                    version,
                     plain,
                     dimmed,
                 },
@@ -160,15 +185,10 @@ impl Ui {
         &self.bases[&index]
     }
 
-    /// Forget cached frame pixels (after the picture changes).
-    pub fn invalidate(&mut self) {
-        self.bases.clear();
-    }
-
     /// Draw monitor `index` (logical rect `monitor`) into `into`.
     pub fn draw(
         &mut self,
-        frame: &Frame,
+        pic: &Picture,
         index: usize,
         monitor: LogicalRect,
         view: &View,
@@ -187,27 +207,46 @@ impl Ui {
             PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
         };
 
-        let base = self.base(frame, index, monitor, size);
+        let base = self.base(pic, index, monitor, size);
         into.data_mut().copy_from_slice(base.dimmed.data());
         let b = dev(view.rect);
         into.blit(&base.plain, b, b.x, b.y);
 
-        // The outline: 2 logical px, just outside the box.
-        let a = if view.active { 0.9 } else { 0.5 };
-        let white = Paint::rgba(1.0, 1.0, 1.0, a);
-        let t = rnd(2.0 * s).max(1);
-        for r in [
-            PixelRect::new(b.x - t, b.y - t, b.w + 2 * t, t),
-            PixelRect::new(b.x - t, b.y + b.h, b.w + 2 * t, t),
-            PixelRect::new(b.x - t, b.y, t, b.h),
-            PixelRect::new(b.x + b.w, b.y, t, b.h),
-        ] {
-            fill(into, r, white);
+        // The open layer, over its clip.
+        if let Some((px, patch)) = pic.open_patch() {
+            let m = pic.committed().map();
+            let at = m.to_logical(screenie_core::geometry::PixelPoint::new(px.x, px.y));
+            let k = m.scale();
+            let logical = LogicalRect::new(
+                at.x - 0.5 / k,
+                at.y - 0.5 / k,
+                f64::from(px.w) / k,
+                f64::from(px.h) / k,
+            );
+            let d = dev(logical);
+            if (patch.width(), patch.height()) == (d.w as u32, d.h as u32) {
+                into.blit(patch, patch.extent(), d.x, d.y);
+            } else if d.w > 0 && d.h > 0 {
+                let fitted = resize(patch, d.w as u32, d.h as u32);
+                into.blit(&fitted, fitted.extent(), d.x, d.y);
+            }
         }
-        if view.active {
-            let c = view.cursor;
+
+        let t = rnd(2.0 * s).max(1);
+        let a = if view.active { 0.9 } else { 0.5 };
+        outline(into, b, t, Paint::rgba(1.0, 1.0, 1.0, a));
+        let marker = |into: &mut Image, c: LogicalPoint| {
             let m = dev(LogicalRect::new(c.x - 4.0, c.y - 4.0, 8.0, 8.0));
             fill(into, m, Paint::rgba(1.0, 1.0, 1.0, 1.0));
+        };
+        if view.active {
+            marker(into, view.cursor);
+        }
+        for bx in &view.boxes {
+            outline(into, dev(bx.rect), t, Paint::rgba(1.0, 1.0, 1.0, 0.9));
+            if bx.active {
+                marker(into, bx.cursor);
+            }
         }
 
         // Tags, status first so the others keep clear of it.
@@ -255,6 +294,18 @@ impl Ui {
             blend_coverage(into, gx, gy, g.width, g.height, &g.coverage);
             pen += advance;
         }
+    }
+}
+
+/// A `t`-pixel outline just outside `b`.
+fn outline(into: &mut Image, b: PixelRect, t: i32, paint: Paint) {
+    for r in [
+        PixelRect::new(b.x - t, b.y - t, b.w + 2 * t, t),
+        PixelRect::new(b.x - t, b.y + b.h, b.w + 2 * t, t),
+        PixelRect::new(b.x - t, b.y, t, b.h),
+        PixelRect::new(b.x + b.w, b.y, t, b.h),
+    ] {
+        fill(into, r, paint);
     }
 }
 

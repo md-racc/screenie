@@ -128,6 +128,10 @@ impl Overlay {
         self.closed = true;
     }
 
+    pub(crate) fn key_repeat(&mut self, (rate, delay): (f64, f64)) {
+        self.push(RawEvent::RepeatInfo { rate, delay });
+    }
+
     pub(crate) fn focus_lost(&mut self) {
         self.push(RawEvent::FocusLost);
     }
@@ -349,6 +353,13 @@ impl Wayland {
             wheel: 0.0,
             closed: false,
         });
+        if let Some(r) = self.state.key_repeat {
+            self.state
+                .overlay
+                .as_mut()
+                .expect("just made")
+                .key_repeat(r);
+        }
 
         let end = loop {
             let timeout = if app.wants_ticks() {

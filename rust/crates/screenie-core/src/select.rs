@@ -1,28 +1,16 @@
-//! Select: the base mode. Edit the box, then finish.
+//! Select: the base mode. Edit the box, open tools, finish.
 
-use crate::geometry::{LogicalPoint, LogicalRect};
-use crate::input::Rates;
-use crate::intent::{Intent, Scale};
-use crate::session::{FinishedAction, Outcome, STEP, Session};
+use crate::boxes::{self, BoxOutcome, Drag};
+use crate::censor::CensorMode;
+use crate::geometry::LogicalRect;
+use crate::intent::{Intent, Tool};
+use crate::session::{FinishedAction, Mode, Outcome, Session, Transition};
 
-/// Box repeat speed, in steps per second: at the start, and at the top.
-pub const RATES: Rates = Rates {
-    start: 20.0,
-    top: 300.0,
-};
-
-/// A press that moves further than this (Manhattan, logical px) is a drag.
-pub const DRAG_SLOP: f64 = 3.0;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Drag {
-    from: LogicalPoint,
-    moved: bool,
-}
+pub use crate::boxes::RATES;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SelectState {
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
     /// The ring index `.` last gave, and the box it gave: `.` again, while
     /// the box is unchanged, steps to an older one.
     recalled: Option<(usize, LogicalRect)>,
@@ -34,108 +22,58 @@ impl Session {
         !self.pixels.to_pixels(self.sel.rect()).is_empty()
     }
 
-    pub(crate) fn select_intent(&mut self, intent: Intent) {
-        use Intent::*;
+    pub(crate) fn select_intent(&mut self, intent: Intent) -> Transition {
+        if boxes::starts_change(intent) {
+            self.remember();
+        }
+        match boxes::apply(&mut self.sel, &self.snap, &mut self.select.drag, intent) {
+            BoxOutcome::Done => return Transition::Stay,
+            BoxOutcome::Click(at) => {
+                // A click snaps to the window under the pointer, or the
+                // nearest monitor.
+                if let Some(r) = self.snap.click_target(at) {
+                    self.sel.set_rect(r);
+                }
+                return Transition::Stay;
+            }
+            BoxOutcome::NotMine => {}
+        }
+        let needs_box = matches!(
+            intent,
+            Intent::Confirm | Intent::Ocr | Intent::DecodeCode | Intent::Pin | Intent::Tool(_)
+        );
+        if needs_box && !self.capturable() {
+            self.note = Some("empty box".into());
+            return Transition::Stay;
+        }
         match intent {
-            Steer(d) => {
-                self.remember();
-                self.sel.step(d, STEP, false);
-            }
-            Translate(d) => {
-                self.remember();
-                self.sel.step(d, STEP, true);
-            }
-            Jump(d) => {
-                self.remember();
-                self.snap.neighbour(&mut self.sel, d);
-            }
-            Slide(d) => {
-                self.remember();
-                self.snap.slide(&mut self.sel, d);
-            }
-            Scale(d, k) => {
-                self.remember();
-                match k {
-                    self::Scale::Half => self.sel.halve(d),
-                    self::Scale::Double => self.sel.double(d),
-                }
-            }
-            // Repeats continue the press that started them: no new entry.
-            HeldSteer(dirs, n) => {
-                for d in dirs.iter() {
-                    self.sel.step(d, f64::from(n) * STEP, false);
-                }
-            }
-            HeldTranslate(dirs, n) => {
-                let (dx, dy) = dirs.vector();
-                let px = f64::from(n) * STEP;
-                self.sel.translate(dx * px, dy * px);
-            }
-            SwapOpposite => self.sel.swap_corner(true),
-            SwapSideways => self.sel.swap_corner(false),
-            EdgeJump(d) => {
-                self.remember();
-                self.snap.cursor_jump(&mut self.sel, d, false);
-            }
-            FarEdge(d) => {
-                self.remember();
-                self.snap.cursor_jump(&mut self.sel, d, true);
-            }
-            ToggleCentre => self.sel.toggle_centre(),
-            Undo => self.undo(),
-            Adjust(step) => {
+            Intent::Undo => self.undo(),
+            Intent::Adjust(step) => {
                 self.remember();
                 self.snap.scope(&mut self.sel, step);
             }
-            Recall => self.recall(),
-            Confirm | Ocr | DecodeCode | Pin => {
-                if !self.capturable() {
-                    self.note = Some("empty box".into());
-                    return;
-                }
+            Intent::Recall => self.recall(),
+            Intent::Tool(Tool::Censor) => {
+                let main = self.sel.rect();
+                return Transition::OpenTool(Mode::Censor(CensorMode::at(main, main.centre())));
+            }
+            Intent::Confirm | Intent::Ocr | Intent::DecodeCode | Intent::Pin => {
                 let rect = self.sel.rect();
-                self.finish(Outcome::Done(match intent {
-                    Ocr => FinishedAction::Ocr { rect },
-                    DecodeCode => FinishedAction::Code { rect },
-                    Pin => FinishedAction::Pin { rect },
+                return Transition::Finish(Outcome::Done(match intent {
+                    Intent::Ocr => FinishedAction::Ocr { rect },
+                    Intent::DecodeCode => FinishedAction::Code { rect },
+                    Intent::Pin => FinishedAction::Pin { rect },
                     _ => FinishedAction::Image { rect },
                 }));
             }
-            CopyColour => {
+            Intent::CopyColour => {
                 let pixel = self.cursor_pixel();
-                self.finish(Outcome::Done(FinishedAction::Colour { pixel }));
+                return Transition::Finish(Outcome::Done(FinishedAction::Colour { pixel }));
             }
-            Back => self.finish(Outcome::Cancelled),
-            Press(at) => {
-                self.remember();
-                self.select.drag = Some(Drag {
-                    from: at,
-                    moved: false,
-                });
-            }
-            Motion(at) => {
-                let Some(drag) = &mut self.select.drag else {
-                    return;
-                };
-                let (dx, dy) = (at.x - drag.from.x, at.y - drag.from.y);
-                if drag.moved || dx.abs() + dy.abs() > DRAG_SLOP {
-                    drag.moved = true;
-                    // Unrounded: the crop snaps to pixels, nothing coarser.
-                    let from = drag.from;
-                    self.sel.drag(from, at);
-                }
-            }
-            Release(at) => {
-                if let Some(Drag { moved: false, .. }) = self.select.drag.take() {
-                    // A click snaps to the window under the pointer, or
-                    // the nearest monitor.
-                    if let Some(r) = self.snap.click_target(at) {
-                        self.sel.set_rect(r);
-                    }
-                }
-            }
-            Quit | ToggleHelp => {}
+            Intent::Back => return Transition::Finish(Outcome::Cancelled),
+            _ => {}
         }
+        Transition::Stay
     }
 
     /// `.`: the last accepted box; `.` again, while the box is still the

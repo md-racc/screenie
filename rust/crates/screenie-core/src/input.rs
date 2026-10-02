@@ -38,6 +38,34 @@ impl Rates {
     }
 }
 
+/// The keyboard's own repeat (the compositor reports it): for keys whose
+/// action repeats, such as `+`/`-` on an amount.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyRepeat {
+    /// Repeats per second; 0 turns it off.
+    pub rate: f64,
+    /// Seconds before the first repeat.
+    pub delay: f64,
+}
+
+impl Default for KeyRepeat {
+    fn default() -> Self {
+        Self {
+            rate: 25.0,
+            delay: 0.6,
+        }
+    }
+}
+
+/// A held key whose action repeats.
+#[derive(Clone, Copy, Debug)]
+struct HeldKey<T> {
+    code: u32,
+    action: T,
+    since: f64,
+    done: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct HeldDir {
     code: u32,
@@ -60,6 +88,8 @@ pub enum Press {
 #[derive(Clone, Debug, Default)]
 pub struct InputState {
     mods: Mods,
+    key_repeat: KeyRepeat,
+    held_key: Option<HeldKey<crate::intent::Intent>>,
     held: Vec<HeldDir>,
     down: HashSet<u32>,
     stale: HashSet<u32>,
@@ -76,6 +106,33 @@ impl InputState {
 
     pub fn set_mods(&mut self, mods: Mods) {
         self.mods = mods;
+    }
+
+    pub fn set_key_repeat(&mut self, r: KeyRepeat) {
+        self.key_repeat = r;
+    }
+
+    /// The key just pressed (`code`) repeats `action` while it's held.
+    pub fn repeat_key(&mut self, code: u32, action: crate::intent::Intent, now: f64) {
+        self.held_key = Some(HeldKey {
+            code,
+            action,
+            since: now,
+            done: 0,
+        });
+    }
+
+    /// The repeats of a held repeating key due by `now`.
+    pub fn key_repeats(&mut self, now: f64) -> Option<(crate::intent::Intent, u32)> {
+        let r = self.key_repeat;
+        let h = self.held_key.as_mut()?;
+        if r.rate <= 0.0 || now < h.since + r.delay {
+            return None;
+        }
+        let due = ((now - h.since - r.delay) * r.rate).floor() as u32 + 1;
+        let n = due.saturating_sub(h.done);
+        h.done = due;
+        (n > 0).then_some((h.action, n))
     }
 
     /// A key went down. `mods` is the modifier state including this key.
@@ -104,19 +161,26 @@ impl InputState {
         self.down.remove(&code);
         self.stale.remove(&code);
         self.held.retain(|h| h.code != code);
+        if self.held_key.is_some_and(|h| h.code == code) {
+            self.held_key = None;
+        }
     }
 
     /// The top mode changed: every key down now goes stale until released.
     pub fn transition(&mut self) {
         self.stale.extend(self.down.drain());
         self.held.clear();
+        self.held_key = None;
         self.acc = 0.0;
         self.counted = None;
     }
 
     /// Focus went elsewhere: forget everything held.
     pub fn reset(&mut self) {
-        *self = InputState::default();
+        *self = InputState {
+            key_repeat: self.key_repeat,
+            ..InputState::default()
+        };
     }
 
     /// Repeat steps due by `now` for the held directions, at `rates` (none
@@ -148,9 +212,9 @@ impl InputState {
         (n >= 1.0).then_some((dirs, n as u32))
     }
 
-    /// Whether any direction is held (the host should keep ticking).
+    /// Whether anything held repeats (the host should keep ticking).
     pub fn repeating(&self) -> bool {
-        !self.held.is_empty()
+        !self.held.is_empty() || self.held_key.is_some()
     }
 }
 
@@ -242,6 +306,24 @@ mod tests {
         assert_eq!(s.press(1, Key::Char('h'), Mods::NONE, 1.0), Press::Ignored);
         s.release(1, Mods::NONE);
         assert_eq!(s.press(1, Key::Char('h'), Mods::NONE, 1.1), Press::Fresh);
+    }
+
+    #[test]
+    fn a_repeating_key_follows_the_keyboard_repeat() {
+        use crate::intent::Intent;
+        let mut s = InputState::default();
+        s.set_key_repeat(KeyRepeat {
+            rate: 10.0,
+            delay: 0.5,
+        });
+        s.press(9, Key::Char('+'), Mods::NONE, 0.0);
+        s.repeat_key(9, Intent::Adjust(1), 0.0);
+        assert_eq!(s.key_repeats(0.4), None);
+        assert_eq!(s.key_repeats(0.5), Some((Intent::Adjust(1), 1)));
+        assert_eq!(s.key_repeats(0.79), Some((Intent::Adjust(1), 2)));
+        s.release(9, Mods::NONE);
+        assert_eq!(s.key_repeats(5.0), None);
+        assert!(!s.repeating());
     }
 
     #[test]

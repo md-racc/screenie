@@ -2,7 +2,7 @@
 //! what the keys do.
 
 use crate::geometry::Dir;
-use crate::intent::Intent;
+use crate::intent::{Intent, Tool};
 use crate::keymap::{Keymap, SESSION};
 
 /// One legend entry: a label and the intents whose keys it lists.
@@ -35,6 +35,7 @@ pub const SELECT: &[&[Item]] = &[
         ("last", &[Intent::Recall]),
         ("undo", &[Intent::Undo]),
     ],
+    &[("censor", &[Intent::Tool(Tool::Censor)])],
     &[
         ("capture", &[Intent::Confirm]),
         ("text", &[Intent::Ocr]),
@@ -46,8 +47,24 @@ pub const SELECT: &[&[Item]] = &[
     ],
 ];
 
+/// Censor's legend.
+pub const CENSOR: &[&[Item]] = &[
+    &[
+        ("pixelate/bar", &[Intent::CycleKind]),
+        ("amount", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("next", &[Intent::Tool(Tool::Censor)]),
+    ],
+    &[
+        ("undo", &[Intent::Undo]),
+        ("commit", &[Intent::Confirm]),
+        ("discard", &[Intent::Back]),
+        ("(box keys as in Select)", &[]),
+    ],
+];
+
 /// The lines of a legend, with each item's keys looked up in `map` (then
-/// the session keys). An item with no bound keys is left out.
+/// the session keys). An item listing intents none of which is bound is
+/// left out; one listing none is a plain note.
 pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
     lines
         .iter()
@@ -59,6 +76,9 @@ pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
                         .iter()
                         .filter_map(|&i| map.keys_for(i).or_else(|| SESSION.keys_for(i)))
                         .collect();
+                    if intents.is_empty() {
+                        return Some(label.to_string());
+                    }
                     (!keys.is_empty()).then(|| format!("{} {label}", keys.join(" ")))
                 })
                 .collect::<Vec<_>>()
@@ -79,6 +99,7 @@ mod tests {
             render(&keymap::SELECT, SELECT),
             [
                 "o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  + - scope  . last  u undo",
+                "x censor",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",
             ]
         );
@@ -89,6 +110,7 @@ mod tests {
         for (name, map) in keymap::all() {
             let lines = match name {
                 "select" => SELECT,
+                "censor" => CENSOR,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {

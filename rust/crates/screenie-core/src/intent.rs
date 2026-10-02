@@ -60,6 +60,13 @@ impl FromIterator<Dir> for DirSet {
     }
 }
 
+/// The build tools, by the key that opens them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tool {
+    /// `x`
+    Censor,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Intent {
     // The box grammar on hjkl and its modifiers.
@@ -98,6 +105,13 @@ pub enum Intent {
     Back,
     Quit,
     ToggleHelp,
+
+    // Build tools.
+    /// A build tool's key: from Select it opens the tool (and a layer);
+    /// in that tool it locks the item and begins another.
+    Tool(Tool),
+    /// `t`: the next kind (censor type, shape).
+    CycleKind,
 
     // Select.
     /// `.`: the previously accepted boxes.
