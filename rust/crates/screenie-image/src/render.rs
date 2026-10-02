@@ -6,7 +6,8 @@
 
 use screenie_core::geometry::{PixelMap, PixelPoint, PixelRect};
 use screenie_core::model::{
-    CensorKind, CensorOp, FilterKind, FilterOp, Layer, OpData, Rgb, ShapeKind, ShapeOp, StrokeOp,
+    CalloutOp, CensorKind, CensorOp, FilterKind, FilterOp, Heads, HighlightOp, Layer, LineOp,
+    OpData, Rgb, ShapeKind, ShapeOp, StrokeOp, TextOp,
 };
 use tiny_skia::{
     Color, FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, PixmapMut, Rect, Stroke,
@@ -60,6 +61,10 @@ pub fn apply_op(patch: &mut Patch, map: &PixelMap, clip: PixelRect, op: &OpData)
         OpData::Censor(c) => censor(patch, map, clip, c),
         OpData::Stroke(st) => stroke(patch, map, clip, st),
         OpData::Shape(sh) => shape(patch, map, clip, sh),
+        OpData::Line(l) => line(patch, map, clip, l),
+        OpData::Highlight(h) => highlight(patch, map, clip, h),
+        OpData::Text(t) => text(patch, map, clip, t),
+        OpData::Callout(c) => callout(patch, map, clip, c),
         OpData::Filter(f) => filter(patch, map, clip, f),
     }
 }
@@ -198,6 +203,142 @@ fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
     }
 }
 
+static FONT: std::sync::OnceLock<fontdue::Font> = std::sync::OnceLock::new();
+
+/// The font text and callouts are drawn in (the tags' monospace). Set once
+/// by the host; until then text ops draw nothing.
+pub fn set_font(bytes: &[u8]) -> Result<(), String> {
+    if FONT.get().is_some() {
+        return Ok(());
+    }
+    let f = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
+        .map_err(|e| format!("font: {e}"))?;
+    let _ = FONT.set(f);
+    Ok(())
+}
+
+fn ink_lum(rgb: Rgb) -> f64 {
+    0.3 * rgb[0] + 0.59 * rgb[1] + 0.11 * rgb[2]
+}
+
+/// The advance of a line of text, device px.
+fn advance(font: &fontdue::Font, line: &str, px: f32) -> f32 {
+    line.chars()
+        .map(|c| font.metrics(c, px).advance_width)
+        .sum()
+}
+
+/// Draw a line of text with its baseline at (x, y), device px, in `rgb`.
+fn glyphs(
+    patch: &mut Patch,
+    clip: PixelRect,
+    font: &fontdue::Font,
+    line: &str,
+    (x, y): (f32, f32),
+    px: f32,
+    rgb: Rgb,
+) {
+    let area = intersect(clip, patch.extent());
+    let col = rgb.map(|v| (v * 255.0) as f32);
+    let mut pen = x;
+    for c in line.chars() {
+        let (m, cov) = font.rasterize(c, px);
+        let gx = pen.round() as i32 + m.xmin;
+        let gy = y.round() as i32 - m.height as i32 - m.ymin;
+        for j in 0..m.height as i32 {
+            for i in 0..m.width as i32 {
+                let (fx, fy) = (gx + i, gy + j);
+                if fx < area.x || fy < area.y || fx >= area.x + area.w || fy >= area.y + area.h {
+                    continue;
+                }
+                let a = f32::from(cov[(j * m.width as i32 + i) as usize]) / 255.0;
+                if a == 0.0 {
+                    continue;
+                }
+                let k = patch.offset(fx, fy);
+                let px_ = &mut patch.img.data_mut()[k..k + 4];
+                for ch in 0..3 {
+                    px_[ch] = (col[ch] * a + f32::from(px_[ch]) * (1.0 - a)).round() as u8;
+                }
+                px_[3] = (255.0 * a + f32::from(px_[3]) * (1.0 - a)).round() as u8;
+            }
+        }
+        pen += m.advance_width;
+    }
+}
+
+fn text(patch: &mut Patch, map: &PixelMap, clip: PixelRect, t: &TextOp) {
+    let Some(font) = FONT.get() else { return };
+    let k = map.scale();
+    let px = (t.size * k) as f32;
+    let (ox, oy) = map.to_device(t.origin);
+    let lh = t.line_height() * k;
+    let ascent = font
+        .horizontal_line_metrics(px)
+        .map_or(px * 0.8, |m| m.ascent);
+    let lines: Vec<&str> = t.text.split('\n').collect();
+    if t.chip {
+        let w = lines
+            .iter()
+            .map(|l| advance(font, l, px))
+            .fold(0.0, f32::max) as f64;
+        let pad = t.pad() * k;
+        let h = lh * lines.len() as f64;
+        // Black behind light ink, white behind dark.
+        let v = if ink_lum(t.rgb) > 0.5 { 0.0 } else { 1.0 };
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba(v, v, v, 0.85).unwrap_or(Color::BLACK));
+        if let Some(r) = Rect::from_xywh(
+            (ox - pad) as f32,
+            (oy - pad) as f32,
+            (w + 2.0 * pad) as f32,
+            (h + 2.0 * pad) as f32,
+        ) {
+            with_pixmap(patch, clip, |pm, tr, mask| {
+                pm.fill_rect(r, &paint, tr, mask);
+            });
+        }
+    }
+    for (i, line) in lines.iter().enumerate() {
+        let y = oy + lh * i as f64 + f64::from(ascent);
+        glyphs(patch, clip, font, line, (ox as f32, y as f32), px, t.rgb);
+    }
+}
+
+fn callout(patch: &mut Patch, map: &PixelMap, clip: PixelRect, c: &CalloutOp) {
+    let (cx, cy) = map.to_device(c.centre);
+    let r = (c.size / 2.0 * map.scale()) as f32;
+    let paint = ink(c.rgb);
+    with_pixmap(patch, clip, |pm, t, mask| {
+        let mut pb = PathBuilder::new();
+        pb.push_circle(cx as f32, cy as f32, r);
+        if let Some(path) = pb.finish() {
+            pm.fill_path(&path, &paint, FillRule::Winding, t, mask);
+        }
+    });
+    let Some(font) = FONT.get() else { return };
+    let label = c.n.to_string();
+    let px = r * 1.2;
+    let w = advance(font, &label, px);
+    let m = font.horizontal_line_metrics(px);
+    let (asc, desc) = m.map_or((px * 0.8, -px * 0.2), |m| (m.ascent, m.descent));
+    let num = if ink_lum(c.rgb) > 0.55 {
+        [0.0; 3]
+    } else {
+        [1.0; 3]
+    };
+    let baseline = cy as f32 + (asc + desc) / 2.0;
+    glyphs(
+        patch,
+        clip,
+        font,
+        &label,
+        (cx as f32 - w / 2.0, baseline),
+        px,
+        num,
+    );
+}
+
 /// Paint for ink: opaque, anti-aliased.
 fn ink(rgb: Rgb) -> Paint<'static> {
     let mut paint = Paint::default();
@@ -291,6 +432,93 @@ fn stroke(patch: &mut Patch, map: &PixelMap, clip: PixelRect, st: &StrokeOp) {
         }
         if let Some(path) = pb.finish() {
             pm.stroke_path(&path, &paint, &round_stroke(width), t, mask);
+        }
+    });
+}
+
+/// A highlighter trace: one path, so overlaps don't double up, multiplied
+/// at its opacity so dark text under it stays dark.
+fn highlight(patch: &mut Patch, map: &PixelMap, clip: PixelRect, h: &HighlightOp) {
+    let pts: Vec<(f32, f32)> = h
+        .points
+        .iter()
+        .map(|&p| {
+            let (x, y) = map.to_device(p);
+            (x as f32, y as f32)
+        })
+        .collect();
+    let Some(&(x0, y0)) = pts.first() else { return };
+    let mut paint = ink(h.rgb);
+    paint.shader = tiny_skia::Shader::SolidColor(
+        Color::from_rgba(
+            h.rgb[0] as f32,
+            h.rgb[1] as f32,
+            h.rgb[2] as f32,
+            h.alpha as f32,
+        )
+        .unwrap_or(Color::BLACK),
+    );
+    paint.blend_mode = tiny_skia::BlendMode::Multiply;
+    let width = (h.width * map.scale()) as f32;
+    with_pixmap(patch, clip, |pm, t, mask| {
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        for &(x, y) in &pts[1..] {
+            pb.line_to(x, y);
+        }
+        if pts.len() == 1 {
+            pb.line_to(x0 + 0.01, y0);
+        }
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, &paint, &round_stroke(width), t, mask);
+        }
+    });
+}
+
+/// A straight line, with arrowheads (filled triangles, scaling with the
+/// width) at the ends that have them. The line stops at a head's base.
+fn line(patch: &mut Patch, map: &PixelMap, clip: PixelRect, l: &LineOp) {
+    let (ax, ay) = map.to_device(l.a);
+    let (bx, by) = map.to_device(l.b);
+    let (dx, dy) = (bx - ax, by - ay);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-6 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let k = map.scale();
+    let head = l.head_len() * k;
+    let half = head * 0.45;
+    let width = (l.width * k) as f32;
+    let at_a = l.heads == Heads::Both;
+    let at_b = l.heads != Heads::None;
+    // Keep the shaft out of the heads; a head longer than the line shrinks.
+    let head = head.min(len / if at_a && at_b { 2.0 } else { 1.0 });
+    let (sa, sb) = (if at_a { head } else { 0.0 }, if at_b { head } else { 0.0 });
+    let paint = ink(l.rgb);
+    with_pixmap(patch, clip, |pm, t, mask| {
+        let mut pb = PathBuilder::new();
+        pb.move_to((ax + ux * sa) as f32, (ay + uy * sa) as f32);
+        pb.line_to((bx - ux * sb) as f32, (by - uy * sb) as f32);
+        if let Some(path) = pb.finish() {
+            pm.stroke_path(&path, &paint, &round_stroke(width), t, mask);
+        }
+        let mut heads = PathBuilder::new();
+        let mut tri = |tx: f64, ty: f64, ux: f64, uy: f64| {
+            let (bx, by) = (tx - ux * head, ty - uy * head);
+            heads.move_to(tx as f32, ty as f32);
+            heads.line_to((bx - uy * half) as f32, (by + ux * half) as f32);
+            heads.line_to((bx + uy * half) as f32, (by - ux * half) as f32);
+            heads.close();
+        };
+        if at_b {
+            tri(bx, by, ux, uy);
+        }
+        if at_a {
+            tri(ax, ay, -ux, -uy);
+        }
+        if let Some(path) = heads.finish() {
+            pm.fill_path(&path, &paint, FillRule::Winding, t, mask);
         }
     });
 }
@@ -628,6 +856,59 @@ mod tests {
         });
         apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
         assert_eq!(img.rgb(PixelPoint::new(5, 5)), Some(Rgb3(10, 20, 30)));
+    }
+
+    #[test]
+    fn an_arrow_has_a_head_at_its_end_only() {
+        use screenie_core::geometry::LogicalPoint;
+        let mut img = Image::filled(100, 100, Rgb3(0, 0, 0));
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Line(LineOp {
+            a: LogicalPoint::new(10.0, 50.0),
+            b: LogicalPoint::new(90.0, 50.0),
+            rgb: red(),
+            width: 2.0,
+            heads: Heads::End,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        let v = |x, y| img.rgb(PixelPoint::new(x, y)).unwrap().0;
+        assert_eq!(v(50, 50), 255); // the shaft
+        assert_eq!(v(50, 54), 0); // thin
+        assert_eq!(v(81, 52), 255); // the head is wide near its base
+        assert_eq!(v(14, 53), 0); // no head at the tail
+        assert_eq!(v(95, 50), 0); // nothing past the tip
+    }
+
+    #[test]
+    fn a_highlight_tints_light_and_keeps_dark_dark() {
+        use screenie_core::geometry::LogicalPoint;
+        let mut img = Image::filled(100, 100, Rgb3(255, 255, 255));
+        for x in 0..100 {
+            let i = (50 * 100 + x) * 4;
+            img.data_mut()[i..i + 3].copy_from_slice(&[0, 0, 0]); // a dark line of "text"
+        }
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = OpData::Highlight(HighlightOp {
+            points: vec![LogicalPoint::new(10.0, 50.0), LogicalPoint::new(90.0, 50.0)],
+            rgb: [1.0, 1.0, 0.0],
+            width: 10.0,
+            alpha: 0.4,
+        });
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        let px = |x, y| img.rgb(PixelPoint::new(x, y)).unwrap();
+        let tinted = px(50, 48);
+        assert!(
+            tinted.0 == 255 && tinted.2 < 200 && tinted.2 > 100,
+            "{tinted:?}"
+        ); // yellowish, not opaque
+        assert_eq!(px(50, 50), Rgb3(0, 0, 0)); // the text stays black
+        assert_eq!(px(50, 40), Rgb3(255, 255, 255)); // outside the trace
     }
 
     #[test]

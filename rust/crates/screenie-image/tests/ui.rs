@@ -391,3 +391,45 @@ fn insert_draws_an_inverted_pixel_cursor() {
     assert_eq!(at(&into, 373, 215), Rgb(38, 38, 38)); // the hollow square's edge
     assert_eq!(at(&into, 375, 215), Rgb(217, 217, 217)); // inside it: untouched
 }
+
+#[test]
+fn text_and_callouts_are_drawn_in_the_ink() {
+    let Some(font) = font() else { return };
+    screenie_image::render::set_font(&font).unwrap();
+    let mut ui = Ui::new(&font).unwrap();
+    let mut pic = frame(1);
+    let mut s = session(START);
+    s.play("a", 0.0).unwrap();
+    s.handle(
+        screenie_core::session::RawEvent::Motion {
+            at: LogicalPoint::new(130.0, 178.0),
+        },
+        0.0,
+    );
+    s.play("i H e l l o Return 3", 0.0).unwrap(); // white chip, red text
+    s.handle(
+        screenie_core::session::RawEvent::Motion {
+            at: LogicalPoint::new(620.0, 215.0),
+        },
+        0.0,
+    );
+    s.play("n n Return", 0.0).unwrap(); // two callouts at the same spot: 1 under 2
+    let into = render(&s, &mut pic, &mut ui, "text.png");
+    // The chip: white behind the red text, over the dark desktop.
+    assert!(at(&into, 125, 176).0 > 210, "{:?}", at(&into, 125, 176)); // 85% white
+    let red = (130..190)
+        .flat_map(|x| (178..198).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let p = at(&into, x, y);
+            p.0 > 180 && p.1 < 90
+        })
+        .count();
+    assert!(red > 40, "{red}");
+    // The callout disc is red, with a white number.
+    assert_eq!(at(&into, 620, 205), Rgb(230, 31, 31));
+    let white = (612..628)
+        .flat_map(|x| (207..223).map(move |y| (x, y)))
+        .filter(|&(x, y)| at(&into, x, y).2 > 200)
+        .count();
+    assert!(white > 10, "{white}");
+}

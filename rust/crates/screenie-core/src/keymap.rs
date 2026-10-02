@@ -6,10 +6,10 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use crate::annotate::ShapeTool;
 use crate::geometry::Dir;
 use crate::intent::{Intent, Scale, Tool};
 use crate::keys::{Chord, Key, Mods};
-use crate::model::ShapeKind;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Binding {
@@ -251,12 +251,22 @@ fn ink_keys() -> Keymap {
 
 /// The pen: no box, so hjkl mean nothing here.
 pub static ANNOTATE: LazyLock<Keymap> = LazyLock::new(|| {
-    let mut m = Keymap::default();
+    // The keyboard pen: hjkl and Shift+hjkl move the pen point.
+    let mut m = direction_grammar();
+    m.bindings
+        .retain(|b| matches!(b.intent, Intent::Steer(_) | Intent::Translate(_)));
     m.extend(&adjust_keys())
         .extend(&ink_keys())
         .extend(&build_tool_keys())
-        .bind(Chord::ch('r'), Intent::Shape(ShapeKind::Rect))
-        .bind(Chord::ch('c'), Intent::Shape(ShapeKind::Circle))
+        .bind(Chord::ch('r'), Intent::Shape(ShapeTool::Rect))
+        .bind(Chord::ch('c'), Intent::Shape(ShapeTool::Circle))
+        .bind(Chord::ch('s'), Intent::Shape(ShapeTool::Line))
+        .bind(Chord::ch('v'), Intent::Shape(ShapeTool::Arrow))
+        .bind(Chord::ch('m'), Intent::ToggleHighlighter)
+        .bind(Chord::plain(Key::Space), Intent::PenToggle)
+        .bind(Chord::ch('i'), Intent::Insert)
+        .bind(Chord::ch('n'), Intent::Callout)
+        .bind(Chord::ch('N'), Intent::CalloutNumber)
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
@@ -272,6 +282,7 @@ pub static SHAPE: LazyLock<Keymap> = LazyLock::new(|| {
         .extend(&ink_keys())
         .extend(&build_tool_keys())
         .bind(Chord::ch('t'), Intent::CycleKind)
+        .bind(Chord::ch('V'), Intent::ToggleHeads)
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
@@ -378,6 +389,34 @@ pub static ENHANCE: LazyLock<Keymap> = LazyLock::new(|| {
     m
 });
 
+/// Text input: plain keys are typed (the session routes them before this
+/// table); these are the rest. Ctrl+hjkl nudge, Ctrl+Shift+hjkl nudge
+/// further, Ctrl+`+`/`-` size, Ctrl+1-5 ink, Ctrl+b chip.
+pub static TEXT: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = Keymap::default();
+    m.bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back)
+        .bind(Chord::with(Key::Char('b'), Mods::CTRL), Intent::ToggleChip)
+        .bind(Chord::with(Key::Char('+'), Mods::CTRL), Intent::Adjust(1))
+        .alias(Chord::with(Key::Char('='), Mods::CTRL), Intent::Adjust(1))
+        .bind(Chord::with(Key::Char('-'), Mods::CTRL), Intent::Adjust(-1));
+    for (c, arrow, d) in DIR_KEYS {
+        m.bind(Chord::with(Key::Char(c), Mods::CTRL), Intent::Jump(d))
+            .alias(Chord::with(arrow, Mods::CTRL), Intent::Jump(d))
+            .bind(
+                Chord::with(Key::Char(c), Mods::CTRL.with_shift()),
+                Intent::Slide(d),
+            );
+    }
+    for n in 1..=5u8 {
+        m.bind(
+            Chord::with(Key::Char(char::from(b'0' + n)), Mods::CTRL),
+            Intent::Choose(n),
+        );
+    }
+    m
+});
+
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
     vec![
@@ -390,6 +429,7 @@ pub fn all() -> Vec<(&'static str, &'static Keymap)> {
         ("insert", &*INSERT),
         ("loupe", &*LOUPE),
         ("enhance", &*ENHANCE),
+        ("text", &*TEXT),
     ]
 }
 

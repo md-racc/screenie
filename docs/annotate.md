@@ -1,8 +1,11 @@
 # Annotate: text, arrows, callouts, the highlighter
 
-**Status:** a design scaffold. Today's Annotate has only the pen and
-rectangle / circle shapes. `README.md` (Annotation extensions) and
-`docs/architecture-rust.md` (§59–60) take precedence over this page.
+**Status:** implemented in the Rust port (milestone 10). `README.md`
+(Annotate, Annotation extensions) is the reference now; this page is the
+design history. Where they differ, the README wins: line is `s` and the
+highlighter is `m` (a pen mode), because Shift+hjkl move the keyboard pen;
+the highlight is a trace, not a box; clicking text to re-edit it isn't
+built.
 
 > **Superseded: the highlighter.** The README and the architecture define
 > the highlighter as a translucent **trace**, drawn like the pen

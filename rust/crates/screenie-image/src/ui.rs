@@ -72,6 +72,7 @@ impl View {
             monitors: s.layout().monitor_rects(),
         };
         let mut v = v;
+        v.pixel_cursor = s.pen_point(); // the keyboard pen's point
         for (m, top) in s.lenses() {
             match m {
                 Mode::Insert(i) if top => v.pixel_cursor = Some(i.cursor.at),

@@ -1,10 +1,10 @@
 //! The `?` key legend, spelled from the keymaps so it can't drift from
 //! what the keys do.
 
+use crate::annotate::ShapeTool;
 use crate::geometry::Dir;
 use crate::intent::{Intent, Tool};
 use crate::keymap::{Keymap, SESSION};
-use crate::model::ShapeKind;
 
 /// One legend entry: a label and the intents whose keys it lists.
 pub type Item = (&'static str, &'static [Intent]);
@@ -90,15 +90,33 @@ pub const ANNOTATE_PALETTE: &[&[Item]] = &[&[
     INKS[2],
     INKS[3],
     INKS[4],
-    ("rectangle", &[Intent::Shape(ShapeKind::Rect)]),
-    ("circle", &[Intent::Shape(ShapeKind::Circle)]),
+    ("rectangle", &[Intent::Shape(ShapeTool::Rect)]),
+    ("circle", &[Intent::Shape(ShapeTool::Circle)]),
+    ("straight", &[Intent::Shape(ShapeTool::Line)]),
+    ("arrow", &[Intent::Shape(ShapeTool::Arrow)]),
 ]];
 
 pub const ANNOTATE: &[&[Item]] = &[
     &[
         ("width", &[Intent::Adjust(1), Intent::Adjust(-1)]),
         ("pick colour", &[Intent::Eyedropper]),
+        ("highlighter", &[Intent::ToggleHighlighter]),
+        ("text", &[Intent::Insert]),
+        ("callout", &[Intent::Callout]),
+        ("callout number", &[Intent::CalloutNumber]),
         ("drag draw", &[]),
+    ],
+    &[
+        (
+            "move pen  Shift ×4",
+            &[
+                Intent::Steer(Dir::Left),
+                Intent::Steer(Dir::Down),
+                Intent::Steer(Dir::Up),
+                Intent::Steer(Dir::Right),
+            ],
+        ),
+        ("pen down/up", &[Intent::PenToggle]),
     ],
     &[
         ("undo", &[Intent::Undo]),
@@ -115,13 +133,14 @@ pub const SHAPE_PALETTE: &[&[Item]] = &[&[
     INKS[2],
     INKS[3],
     INKS[4],
-    ("rectangle/circle", &[Intent::CycleKind]),
+    ("rect/circle/line/arrow", &[Intent::CycleKind]),
 ]];
 
 pub const SHAPE: &[&[Item]] = &[
     &[
         ("width", &[Intent::Adjust(1), Intent::Adjust(-1)]),
         ("pick colour", &[Intent::Eyedropper]),
+        ("arrow both ends", &[Intent::ToggleHeads]),
     ],
     &[
         ("next shape", &[Intent::Tool(Tool::Annotate)]),
@@ -264,6 +283,28 @@ pub const ENHANCE: &[&[Item]] = &[
     ],
 ];
 
+pub const TEXT: &[&[Item]] = &[
+    &[
+        ("type text  S-Enter new line", &[]),
+        ("done", &[Intent::Confirm]),
+        ("drop", &[Intent::Back]),
+    ],
+    &[
+        (
+            "move",
+            &[
+                Intent::Jump(Dir::Left),
+                Intent::Jump(Dir::Down),
+                Intent::Jump(Dir::Up),
+                Intent::Jump(Dir::Right),
+            ],
+        ),
+        ("size", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("C-1-5 colour", &[]),
+        ("chip", &[Intent::ToggleChip]),
+    ],
+];
+
 /// The lines of a legend, with each item's keys looked up in `map` (then
 /// the session keys). An item listing intents none of which is bound is
 /// left out; one listing none is a plain note.
@@ -315,7 +356,9 @@ mod tests {
         assert_eq!(names, shown);
         assert_eq!(
             render(&keymap::ANNOTATE, ANNOTATE_PALETTE),
-            ["1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle"]
+            [
+                "1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle  s straight  v arrow"
+            ]
         );
     }
 
@@ -332,6 +375,7 @@ mod tests {
                 "insert" => INSERT,
                 "loupe" => LOUPE,
                 "enhance" => ENHANCE,
+                "text" => TEXT,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {

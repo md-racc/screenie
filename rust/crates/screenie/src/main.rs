@@ -206,6 +206,11 @@ fn run_picker(
     mut session: Session,
     args: &cli::Pick,
 ) -> Result<Report, Failure> {
+    let font = screenie_platform::fonts::monospace();
+    if let Some(f) = &font {
+        // Text and callouts are drawn in it, in the picker and the output.
+        let _ = screenie_image::render::set_font(f);
+    }
     session.set_sampler(Box::new(screenie_image::picture::PictureSampler::new(
         frame.clone(),
     )));
@@ -219,8 +224,7 @@ fn run_picker(
         if args.no_ui {
             return Err(Failure::usage("--no-ui: the keys didn't finish the picker"));
         }
-        let font = screenie_platform::fonts::monospace()
-            .ok_or_else(|| Failure::capture("no monospace font found"))?;
+        let font = font.ok_or_else(|| Failure::capture("no monospace font found"))?;
         let ui = Ui::new(&font).map_err(Failure::capture)?;
         let mut app = picker::Picker::new(session, Picture::new(frame), ui);
         wl.run_overlay(&layout, &mut app, deadline())

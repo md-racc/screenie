@@ -113,27 +113,44 @@ impl Wayland {
 
     /// Wait for the connection to have events, at most `timeout`.
     fn wait(&mut self, timeout: Option<Duration>) -> Result<()> {
+        use smithay_client_toolkit::reexports::client::backend::WaylandError;
         let proto = |e: &dyn std::fmt::Display| Error::Protocol(e.to_string());
-        self.queue.flush().map_err(|e| proto(&e))?;
+        // On the non-blocking socket, "would block" means "not yet": a
+        // flush that couldn't send everything waits for the socket to
+        // drain, and a read with nothing there is nothing to do.
+        let would_block = |e: &WaylandError| matches!(e, WaylandError::Io(io) if io.kind() == std::io::ErrorKind::WouldBlock);
+        let unsent = match self.queue.flush() {
+            Ok(()) => false,
+            Err(e) if would_block(&e) => true,
+            Err(e) => return Err(proto(&e)),
+        };
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(|e| proto(&e))?;
         if let Some(guard) = self.queue.prepare_read() {
             let ready = {
                 let fd = guard.connection_fd();
-                let mut fds = [PollFd::new(&fd, PollFlags::IN | PollFlags::ERR)];
+                let mut flags = PollFlags::IN | PollFlags::ERR;
+                if unsent {
+                    flags |= PollFlags::OUT;
+                }
+                let mut fds = [PollFd::new(&fd, flags)];
                 let ts = timeout.map(|d| Timespec {
                     tv_sec: d.as_secs() as _,
                     tv_nsec: d.subsec_nanos() as _,
                 });
                 match poll(&mut fds, ts.as_ref()) {
-                    Ok(n) => n > 0,
+                    Ok(n) => n > 0 && fds[0].revents().intersects(PollFlags::IN | PollFlags::ERR),
                     Err(rustix::io::Errno::INTR) => false,
                     Err(e) => return Err(Error::Io(e.into())),
                 }
             };
             if ready {
-                guard.read().map_err(|e| proto(&e))?;
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(e) if would_block(&e) => {}
+                    Err(e) => return Err(proto(&e)),
+                }
             }
         }
         self.queue

@@ -122,7 +122,27 @@ pub enum Intent {
     /// ink.
     Eyedropper,
     /// `r` / `c` in Annotate: a shape, as a box of its own.
-    Shape(crate::model::ShapeKind),
+    Shape(crate::annotate::ShapeTool),
+    /// `V` in an arrow: a head at both ends, or just the cursor's.
+    ToggleHeads,
+    /// `H` in Annotate: the pen draws ink, or highlights.
+    ToggleHighlighter,
+    /// `Space` in Annotate: the keyboard pen down (drawing) or up (the line
+    /// is locked).
+    PenToggle,
+    /// `n` in Annotate: a numbered callout at the pen.
+    Callout,
+    /// `N` in Annotate: set the next callout's number (typed).
+    CalloutNumber,
+
+    // Text input.
+    /// A typed character, taken literally.
+    Type(char),
+    /// Shift+Enter: a new line.
+    Newline,
+    Backspace,
+    /// Ctrl+b: the chip behind a text annotation.
+    ToggleChip,
 
     // Lenses and points.
     /// `z`: the loupe.

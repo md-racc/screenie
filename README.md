@@ -510,18 +510,26 @@ Current palette:
 
 The default is red.
 
-| Input          | Action                   |
-| -------------- | ------------------------ |
-| drag           | Draw freehand pen stroke |
-| `1`–`5`        | Choose colour            |
-| `p`            | Eyedropper               |
-| `+` / `-`      | Adjust line width        |
-| `r`            | Rectangle                |
-| `c`            | Circle                   |
-| `z` / `e`      | Open a lens              |
-| layer controls | Undo / commit / discard  |
+| Input          | Action                                       |
+| -------------- | -------------------------------------------- |
+| drag           | Draw a freehand pen stroke                   |
+| `h j k l`      | Move the pen point (`Shift`: a larger step)  |
+| `Space`        | Pen down / up (up locks the stroke)          |
+| `1`–`5`        | Choose colour                                |
+| `p`            | Eyedropper                                   |
+| `+` / `-`      | Adjust line width                            |
+| `m`            | Highlighter on / off                         |
+| `r`            | Rectangle                                    |
+| `c`            | Circle                                       |
+| `s`            | Straight line                                |
+| `v`            | Arrow                                        |
+| `i`            | Text                                         |
+| `n`            | Numbered callout at the pen                  |
+| `N`            | Set the next callout number                  |
+| `z` / `e`      | Open a lens                                  |
+| layer controls | Undo / commit / discard                      |
 
-The pen is currently mouse-driven in the Python prototype. The Rust implementation is intended to support keyboard-driven pen movement as well.
+The pen works with the mouse or the keyboard: the keyboard moves a pen point, drawn as the pixel cursor, and `Space` puts the pen down and lifts it.
 
 ## Shapes
 
@@ -529,65 +537,69 @@ Shape is a temporary child of Annotate.
 
 Its geometry uses the same anchor/cursor model as Select.
 
-Current shapes:
+Shapes:
 
 - rectangle;
-- circle.
+- circle;
+- straight line;
+- arrow.
 
-| Input        | Action                            |
-| ------------ | --------------------------------- |
-| `t`          | Rectangle / circle                |
-| `1`–`5`      | Colour                            |
-| `+` / `-`    | Width                             |
-| `p`          | Eyedropper                        |
-| `a`          | Lock shape and return to Annotate |
-| `Esc`        | Drop shape and return             |
-| box controls | Manipulate shape                  |
+| Input        | Action                                    |
+| ------------ | ----------------------------------------- |
+| `t`          | Rectangle → circle → line → arrow         |
+| `V`          | Arrow: a head at both ends, or at one     |
+| `1`–`5`      | Colour                                    |
+| `+` / `-`    | Width                                     |
+| `p`          | Eyedropper                                |
+| `a`          | Lock shape and return to Annotate         |
+| `Esc`        | Drop shape and return                     |
+| box controls | Manipulate shape                          |
 
 A circle fills its bounding box, so a square box produces a circle.
+
+A line or arrow runs from the anchor to the cursor, so `o` (the opposite corner) flips an arrow. Arrowheads scale with the width.
 
 ---
 
 # Annotation extensions
 
-The Rust implementation is designed to extend Annotate without creating new interaction grammars.
-
-These operations reuse existing point, anchor/cursor, trace, colour and adjustment behavior.
+Annotate is extended without new interaction grammars: each extension reuses the point, anchor/cursor, trace, colour and adjustment behavior above.
 
 ## Text
 
-Text annotation is planned as a first-class annotation operation.
-
-Expected properties:
-
-- position or box;
-- text;
-- size;
-- colour;
-- optional background chip;
-- alignment where useful.
-
-`i` enters text annotation.
+`i` opens a text entry at the pen point.
 
 Text entry temporarily suspends normal letter commands: typed characters become literal text until confirmed or cancelled.
 
-The initial implementation should remain intentionally small rather than becoming a rich-text editor.
+| Input                   | Action                                   |
+| ----------------------- | ---------------------------------------- |
+| characters              | Type                                     |
+| `Shift+Enter`           | New line                                 |
+| `Backspace`             | Delete the last character                |
+| `Enter`                 | Lock the text                            |
+| `Esc`                   | Drop it                                  |
+| `Ctrl+hjkl`             | Move it 1px (`Ctrl+Shift`: 10px)         |
+| `Ctrl+` `+` / `-`       | Size                                     |
+| `Ctrl+1`–`5`            | Colour                                   |
+| `Ctrl+b`                | Background chip on / off (on by default) |
+
+The chip is black behind light ink and white behind dark ink.
+
+The implementation stays intentionally small rather than becoming a rich-text editor.
 
 ## Lines and arrows
 
-Straight lines and arrows use anchor-to-cursor geometry.
-
-Flipping endpoints reverses an arrow.
+Straight lines and arrows use anchor-to-cursor geometry: see Shapes.
 
 ## Highlighter
 
-Highlighter is a translucent stroke using the same trace interaction as the pen.
+Highlighter is a translucent stroke using the same trace interaction as the pen: the ink at 40%, multiplied, five times the line width, so text under it stays readable.
 
 ## Numbered callouts
 
-Callouts place numbered markers suitable for technical screenshots and documentation.
+`n` places a numbered disc at the pen point, in the ink with the number in black or white.
 
-The next number is chosen automatically unless explicitly overridden.
+The next number is the open layer's highest plus one, so undoing a callout frees its number. `N` types a number to continue from instead.
 
 ---
 

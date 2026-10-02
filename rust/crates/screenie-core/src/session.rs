@@ -27,6 +27,7 @@ use crate::lens::{EnhanceMode, LoupeMode, View};
 use crate::model::{Layer, Op, OpData, OpId, Project};
 use crate::select::SelectState;
 use crate::targets::SnapEnv;
+use crate::text::TextMode;
 
 pub use crate::boxes::STEP;
 
@@ -134,13 +135,17 @@ pub enum Mode {
     Insert(InsertMode),
     Loupe(LoupeMode),
     Enhance(EnhanceMode),
+    /// Text input: letters are literal until Enter or Esc.
+    Text(TextMode),
 }
 
 /// What a temporary child hands back to the mode below when it closes.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum ChildResult {
     /// A pixel position (the loupe's): Insert adopts it.
     Position(PixelPoint),
+    /// Typed text, and the entry it was typed in (where, how big).
+    Text(String, TextMode),
 }
 
 /// Where a build tool opens.
@@ -165,6 +170,7 @@ impl Mode {
             Mode::Insert(_) => "insert",
             Mode::Loupe(_) => "loupe",
             Mode::Enhance(_) => "enhance",
+            Mode::Text(_) => "text",
         }
     }
 
@@ -178,7 +184,8 @@ impl Mode {
             | Mode::Layers(_)
             | Mode::Insert(_)
             | Mode::Loupe(_)
-            | Mode::Enhance(_) => None,
+            | Mode::Enhance(_)
+            | Mode::Text(_) => None,
         }
     }
 
@@ -427,6 +434,7 @@ impl Session {
     pub fn editing(&self) -> Option<OpData> {
         match self.stack.last()? {
             Mode::Censor(c) => c.current(),
+            Mode::Text(t) => self.text_preview(t),
             m => self.annotate_editing(m),
         }
     }
@@ -515,6 +523,14 @@ impl Session {
         if self.stack.last().is_some_and(Mode::shows_ink) {
             s.push_str(&format!("  {} {}px", self.ink.name, self.ink_width));
         }
+        if let Some(Mode::Annotate(a)) = self.stack.last() {
+            if a.highlighter {
+                s.push_str("  highlighter");
+            }
+            if a.keyboard && a.drawing() {
+                s.push_str("  pen down");
+            }
+        }
         let locked = self.open.as_ref().map_or(0, |o| o.layer.ops.len());
         if self.open.is_some() {
             if locked > 0 {
@@ -532,6 +548,7 @@ impl Session {
             Some(Mode::Filter(f)) => s.push_str(&format!("  {}", self.filter_status(f))),
             Some(Mode::Layers(m)) => s.push_str(&format!("  {}", self.layers_status(m))),
             Some(Mode::Insert(m)) => s.push_str(&format!("  step {}px", m.step)),
+            Some(Mode::Text(t)) => s.push_str(&format!("  {}", self.text_status(t))),
             Some(Mode::Loupe(_)) => {
                 s.push_str(&format!("  {}px{}", self.loupe_px, self.view_tag()))
             }
@@ -569,6 +586,7 @@ impl Session {
             Some(Mode::Filter(_)) => &keymap::FILTER,
             Some(Mode::Layers(_)) => &keymap::LAYERS,
             Some(Mode::Insert(_)) => &keymap::INSERT,
+            Some(Mode::Text(_)) => &keymap::TEXT,
             Some(Mode::Loupe(_)) => &keymap::LOUPE,
             Some(Mode::Enhance(_)) => &keymap::ENHANCE,
         }
@@ -584,6 +602,7 @@ impl Session {
             Some(Mode::Filter(_)) => crate::legend::FILTER,
             Some(Mode::Layers(_)) => crate::legend::LAYERS,
             Some(Mode::Insert(_)) => crate::legend::INSERT,
+            Some(Mode::Text(_)) => crate::legend::TEXT,
             Some(Mode::Loupe(_)) => crate::legend::LOUPE,
             Some(Mode::Enhance(_)) => crate::legend::ENHANCE,
         };
@@ -627,6 +646,26 @@ impl Session {
                     return;
                 }
                 let chord = Chord::new(key, mods);
+                if let Some(Mode::Text(_)) = self.stack.last() {
+                    // Text input: plain keys are literal, even q and ?.
+                    let typed = match key {
+                        _ if mods.ctrl || mods.alt => None,
+                        Key::Char(c) => Some(Intent::Type(c)),
+                        Key::Space => Some(Intent::Type(' ')),
+                        Key::BackSpace => Some(Intent::Backspace),
+                        Key::Return if mods.shift => Some(Intent::Newline),
+                        _ => None,
+                    };
+                    let intent = typed.or_else(|| keymap::TEXT.lookup(chord));
+                    self.user_acted(intent);
+                    if let Some(i) = intent {
+                        self.dispatch(i);
+                        if matches!(i, Intent::Type(_) | Intent::Backspace) {
+                            self.input.repeat_key(code, i, now);
+                        }
+                    }
+                    return;
+                }
                 let session = keymap::SESSION.lookup(chord);
                 let intent = session.or_else(|| self.keymap().lookup(chord));
                 self.user_acted(intent);
@@ -717,7 +756,7 @@ impl Session {
             None // jumps and scaling are one-shot
         } else {
             match self.stack.last() {
-                Some(Mode::Annotate(_) | Mode::Layers(_)) => None,
+                Some(Mode::Layers(_)) => None,
                 Some(Mode::Insert(m)) => Some(m.rates(self.input.held_dirs(), mods.shift)),
                 Some(Mode::Loupe(_)) => Some(self.loupe_rates()),
                 _ => Some(crate::boxes::RATES),
@@ -781,6 +820,7 @@ impl Session {
                     Mode::Insert(m) => self.insert_intent(m, intent),
                     Mode::Loupe(m) => self.loupe_intent(m, intent),
                     Mode::Enhance(m) => self.enhance_intent(m, intent),
+                    Mode::Text(t) => self.text_intent(t, intent),
                 };
                 self.stack.push(mode);
                 t
@@ -823,11 +863,18 @@ impl Session {
             Transition::PopWith(result) => {
                 self.stack.pop();
                 self.input.transition();
-                // Insert adopts the loupe's position; other parents don't.
-                if let (Some(Mode::Insert(m)), ChildResult::Position(p)) =
-                    (self.stack.last_mut(), result)
-                {
-                    m.cursor.put(p.x, p.y, true);
+                // Insert adopts the loupe's position; Annotate takes text.
+                match (self.stack.pop(), result) {
+                    (Some(Mode::Insert(mut m)), ChildResult::Position(p)) => {
+                        m.cursor.put(p.x, p.y, true);
+                        self.stack.push(Mode::Insert(m));
+                    }
+                    (Some(Mode::Annotate(mut a)), ChildResult::Text(text, entry)) => {
+                        self.annotate_text(&mut a, text, &entry);
+                        self.stack.push(Mode::Annotate(a));
+                    }
+                    (Some(other), _) => self.stack.push(other),
+                    (None, _) => {}
                 }
             }
             Transition::PopTo(depth) => {
@@ -842,6 +889,15 @@ impl Session {
     fn leave_top(&mut self) {
         if self.stack.is_empty() {
             self.select.drag = None;
+        }
+    }
+
+    /// The keyboard pen's point, when the pen is on top and was moved by
+    /// keys (the mouse pointer shows itself).
+    pub fn pen_point(&self) -> Option<PixelPoint> {
+        match self.stack.last()? {
+            Mode::Annotate(a) if a.keyboard => Some(self.pixels.pixel_under(a.pointer())),
+            _ => None,
         }
     }
 

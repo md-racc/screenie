@@ -103,6 +103,87 @@ pub struct FilterOp {
     pub muted: bool,
 }
 
+/// A highlighter trace: the pen's path, drawn translucent and multiplied,
+/// so it marks without hiding what's under it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HighlightOp {
+    pub points: Vec<LogicalPoint>,
+    pub rgb: Rgb,
+    pub width: f64,
+    /// 0..1.
+    pub alpha: f64,
+}
+
+/// Text, its top-left at `origin`; lines split on `\n`. With `chip`, a
+/// black or white backing (whichever contrasts with the ink) behind it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextOp {
+    pub origin: LogicalPoint,
+    pub text: String,
+    pub rgb: Rgb,
+    /// Font size, logical px.
+    pub size: f64,
+    pub chip: bool,
+}
+
+impl TextOp {
+    /// Line height, logical px.
+    pub fn line_height(&self) -> f64 {
+        self.size * 1.25
+    }
+
+    /// The chip's padding, logical px.
+    pub fn pad(&self) -> f64 {
+        self.size * 0.3
+    }
+}
+
+/// A numbered marker: a disc of the ink, the number in black or white.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CalloutOp {
+    pub centre: LogicalPoint,
+    pub n: u32,
+    pub rgb: Rgb,
+    /// Diameter, logical px.
+    pub size: f64,
+}
+
+/// Which ends of a line carry an arrowhead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Heads {
+    None,
+    /// At `b`.
+    End,
+    Both,
+}
+
+/// A straight line from `a` to `b`, maybe an arrow.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LineOp {
+    pub a: LogicalPoint,
+    pub b: LogicalPoint,
+    pub rgb: Rgb,
+    pub width: f64,
+    pub heads: Heads,
+}
+
+impl LineOp {
+    /// "line" or "arrow".
+    pub fn heads_name(&self) -> &'static str {
+        if self.heads == Heads::None {
+            "line"
+        } else {
+            "arrow"
+        }
+    }
+
+    /// An arrowhead's length, logical px: it scales with the width.
+    pub fn head_len(&self) -> f64 {
+        (self.width * 4.0).max(10.0)
+    }
+}
+
 fn grown(r: LogicalRect, m: f64) -> LogicalRect {
     LogicalRect::new(r.x - m, r.y - m, r.w + 2.0 * m, r.h + 2.0 * m)
 }
@@ -114,6 +195,10 @@ pub enum OpData {
     Censor(CensorOp),
     Stroke(StrokeOp),
     Shape(ShapeOp),
+    Line(LineOp),
+    Highlight(HighlightOp),
+    Text(TextOp),
+    Callout(CalloutOp),
     Filter(FilterOp),
 }
 
@@ -139,6 +224,42 @@ impl OpData {
                 grown(LogicalRect::from_edges(x0, y0, x1, y1), s.width)
             }
             OpData::Shape(s) => grown(s.rect, s.width),
+            OpData::Text(t) => {
+                // Monospace, generously: no font is needed to bound it.
+                let lines = t.text.split('\n');
+                let cols = lines.clone().map(|l| l.chars().count()).max().unwrap_or(0);
+                let rows = lines.count().max(1);
+                let w = cols as f64 * t.size * 0.7;
+                let h = rows as f64 * t.line_height();
+                grown(
+                    LogicalRect::new(t.origin.x, t.origin.y, w, h),
+                    t.pad() + 2.0,
+                )
+            }
+            OpData::Callout(c) => {
+                let r = c.size / 2.0;
+                LogicalRect::new(
+                    c.centre.x - r - 1.0,
+                    c.centre.y - r - 1.0,
+                    c.size + 2.0,
+                    c.size + 2.0,
+                )
+            }
+            OpData::Highlight(h) => OpData::Stroke(StrokeOp {
+                points: h.points.clone(),
+                rgb: h.rgb,
+                width: h.width,
+            })
+            .bbox(),
+            OpData::Line(l) => grown(
+                LogicalRect::from_edges(
+                    l.a.x.min(l.b.x),
+                    l.a.y.min(l.b.y),
+                    l.a.x.max(l.b.x),
+                    l.a.y.max(l.b.y),
+                ),
+                l.width.max(l.head_len()),
+            ),
             OpData::Filter(f) => f.rect,
         }
     }
@@ -149,6 +270,11 @@ impl OpData {
             OpData::Censor(_) => "censor",
             OpData::Stroke(_) => "line",
             OpData::Shape(_) => "shape",
+            OpData::Line(l) if l.heads == Heads::None => "line",
+            OpData::Line(_) => "arrow",
+            OpData::Highlight(_) => "highlight",
+            OpData::Text(_) => "text",
+            OpData::Callout(_) => "callout",
             OpData::Filter(_) => "filter",
         }
     }
