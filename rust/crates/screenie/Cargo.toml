@@ -1,0 +1,15 @@
+[package]
+name = "screenie"
+description = "Keyboard-driven screenshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+screenie-core.workspace = true
+screenie-image.workspace = true
+screenie-platform.workspace = true
+
+[lints]
+workspace = true

@@ -2290,3 +2290,65 @@ Project-format changes require:
 - serialization round-trip tests.
 
 The Rust port succeeds when screenie's interaction model remains familiar while the implementation becomes easier to reason about, test, serialize, extend and port.
+
+---
+
+# 72. Decisions
+
+Choices made during the port that the sections above leave open. Each
+says what was chosen and why. Smaller judgement calls live in
+`rust/PROGRESS.md`.
+
+## Workspace
+
+- **Edition 2024, resolver 3, `unsafe_code = "deny"`** across the
+  workspace. Nothing in core needs unsafe; platform code that does will
+  opt out per module, visibly.
+- **`screenie-core` depends only on `serde` and `serde_json`.** The
+  durable model and the recall ring need serialization. Nothing else is
+  needed for interaction logic.
+
+## Coordinates
+
+- **`PixelMap` lives in `screenie-core::geometry`**, not in
+  `screenie-image` as §3.2 lists it. Select needs it headlessly: the
+  empty-box check (a box under one output pixel doesn't capture), the
+  status line's size in output pixels, and the cursor pixel. It is pure
+  arithmetic with no pixel buffers. `screenie-image` uses the same type,
+  so there is still exactly one conversion (§8).
+- Logical coordinates are `f64`; pixel coordinates are `i32`.
+
+## Interaction
+
+- **`AnchorCursor` stores the rectangle plus which corner the cursor is
+  on**, not two points. The two are equivalent, but this form makes the
+  prototype's crossing rule exact, including its tie-break when the
+  cursor lands on the anchor. The anchor and cursor points are derived.
+- **Chords match exactly.** A chord is a normalised key plus Shift, Ctrl
+  and Alt. An upper-case letter is Shift plus its lower-case letter; a
+  symbol (`$`, `{`, `?`, `+`) has its Shift consumed; a named key
+  (`Space`, `Return`, arrows) keeps it. Any chord not in the mode's table
+  does nothing, so a meaningless modifier never falls through (README,
+  Directions).
+- **Keymaps are tables** (`keymap.rs`), built from shared grammars
+  (directions, box keys, `+`/`-`) plus each mode's keys. The same tables
+  drive dispatch, the `?` legend and collision tests.
+- **Time is passed in** as `f64` seconds on a monotonic clock, with each
+  event and tick. Core never reads a clock, so repeat is deterministic
+  in tests.
+- **Repeat steps are the exact integral of the ramp** (start rate to top
+  rate over `RAMP`, after `DELAY`), counted from the last tick. The
+  prototype summed rate × frame time, so its count depended slightly on
+  the frame rate; this doesn't.
+- **Selection undo restores the rectangle only.** The cursor corner and
+  centre mode are transient, as in the prototype. One entry is recorded
+  per tap, per held-key repeat (with its tap), per drag, per click, per
+  scope step and per recall. `u` skips entries that would change
+  nothing, so every `u` visibly does something.
+
+## Files
+
+- **The recall ring keeps the prototype's `regions.json` format** in the
+  same place (`$XDG_STATE_HOME/screenie/regions.json`), so the Python and
+  Rust pickers share one ring until the cutover. Core holds the data and
+  its JSON; the front end does the file I/O.
