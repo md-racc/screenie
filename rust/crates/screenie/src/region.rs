@@ -62,9 +62,39 @@ fn geometry(s: &str) -> Option<LogicalRect> {
     (w >= 0.0 && h >= 0.0).then_some(LogicalRect::new(n(x)?, n(y)?, w, h))
 }
 
+/// A box as `--select-only` prints it. The integer formats round outward,
+/// so pasting one back never loses a pixel.
+pub fn format(r: LogicalRect, f: crate::cli::RegionFormat) -> String {
+    use crate::cli::RegionFormat;
+    let (x0, y0) = (r.x.floor(), r.y.floor());
+    let (x1, y1) = (r.right().ceil(), r.bottom().ceil());
+    let (w, h) = (x1 - x0, y1 - y0);
+    match f {
+        RegionFormat::Slurp => format!("{x0},{y0} {w}x{h}"),
+        RegionFormat::Hypr => format!("{x0} {y0} {w} {h}"),
+        RegionFormat::Json => {
+            serde_json::json!({"x": r.x, "y": r.y, "w": r.w, "h": r.h}).to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn select_only_formats_round_outward_but_json_is_exact() {
+        use crate::cli::RegionFormat;
+        let r = LogicalRect::new(10.5, 20.0, 100.25, 50.0);
+        assert_eq!(format(r, RegionFormat::Slurp), "10,20 101x50");
+        assert_eq!(format(r, RegionFormat::Hypr), "10 20 101 50");
+        assert_eq!(
+            format(r, RegionFormat::Json),
+            r#"{"h":50.0,"w":100.25,"x":10.5,"y":20.0}"#
+        );
+        // Pasted back, it covers the box.
+        assert!(geometry("10,20 101x50").is_some_and(|b| b.x <= r.x && b.right() >= r.right()));
+    }
     use screenie_core::layout::{Monitor, MonitorId};
 
     fn layout() -> Layout {

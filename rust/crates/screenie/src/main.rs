@@ -277,6 +277,15 @@ fn run_picker(
     if let Some(scale) = args.measure_scale {
         session.set_measure_scale(scale);
     }
+    if let Some(r) = args.result {
+        session.set_result(r);
+    }
+    if args.lock_box {
+        session.lock_box();
+    }
+    if let Some(mode) = args.mode {
+        session.start_in(mode);
+    }
     let lang = args.output.ocr_lang();
     // Scripted keys wait for each scan; the overlay doesn't.
     session.set_analyzer(Box::new(analysis::Ocr::inline(
@@ -306,19 +315,27 @@ fn run_picker(
         wl.run_overlay(&layout, &mut app, deadline())
             .map_err(Failure::capture)?;
         drop(wl);
+        if let Some(r) = select_only(app.session.outcome(), &layout, args) {
+            return r;
+        }
         let project = app.session.project();
+        let outcome = app.session.outcome().cloned();
+        let redacted = app.session.redacted();
         return finish(
-            app.session.outcome().cloned(),
+            outcome,
             &layout,
-            &app.picture,
+            app.picture(),
             &args.output,
             &project,
-            &app.session.redacted(),
+            &redacted,
         );
     }
     drop(wl);
     let mut picture = Picture::new(frame);
     picture.sync(session.layers(), None, None);
+    if let Some(r) = select_only(session.outcome(), &layout, args) {
+        return r;
+    }
     let project = session.project();
     finish(
         session.outcome().cloned(),
@@ -327,6 +344,38 @@ fn run_picker(
         &args.output,
         &project,
         &session.redacted(),
+    )
+}
+
+/// `--select-only`: a box the picker finished with, as its geometry.
+fn select_only(
+    outcome: Option<&Outcome>,
+    layout: &Layout,
+    args: &cli::Pick,
+) -> Option<Result<Report, Failure>> {
+    if !args.select_only {
+        return None;
+    }
+    let rect = match outcome? {
+        Outcome::Done(
+            FinishedAction::Image { rect }
+            | FinishedAction::Ocr { rect }
+            | FinishedAction::Pin { rect }
+            | FinishedAction::Code { rect, .. },
+        ) => *rect,
+        _ => return None,
+    };
+    files::remember(&layout.monitors, rect);
+    let text = region::format(rect, args.region_format);
+    Some(
+        deliver::text(&text, &args.output, "Region")
+            .map_err(Failure::delivery)
+            .map(|()| {
+                Report::done("region")
+                    .rect(rect, layout)
+                    .set("text", text)
+                    .set("copied", args.output.copies())
+            }),
     )
 }
 

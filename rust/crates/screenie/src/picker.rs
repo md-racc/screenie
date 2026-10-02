@@ -10,9 +10,14 @@ use screenie_platform::wayland::OverlayApp;
 
 pub struct Picker {
     pub session: Session,
-    pub picture: Picture,
+    picture: Picture,
     pub ui: Ui,
     monitors: Vec<LogicalRect>,
+    /// The session changed since the picture was last brought up to date.
+    /// Input only marks this and drawing syncs, so a fast mouse costs one
+    /// sync a frame rather than one an event: a pen trace in progress is
+    /// re-rendered whole on each sync.
+    stale: bool,
     /// Finished analysis jobs, from the analyzer's threads.
     jobs: Option<Receiver<(u64, JobResult)>>,
 }
@@ -26,6 +31,7 @@ impl Picker {
             ui,
             monitors,
             jobs: None,
+            stale: true,
         };
         p.sync();
         p
@@ -36,8 +42,17 @@ impl Picker {
         self.jobs = Some(jobs);
     }
 
-    /// Bring the picture up to date with the session.
+    /// The picture, up to date with the session.
+    pub fn picture(&mut self) -> &Picture {
+        self.sync();
+        &self.picture
+    }
+
+    /// Bring the picture up to date with the session, if it changed.
     fn sync(&mut self) {
+        if !std::mem::take(&mut self.stale) {
+            return;
+        }
         let s = &self.session;
         self.picture
             .sync(s.layers(), s.open_layer(), s.editing().as_ref());
@@ -60,7 +75,7 @@ impl screenie_core::session::CodeReader for Codes {
 impl OverlayApp for Picker {
     fn input(&mut self, ev: RawEvent, now: f64) {
         self.session.handle(ev, now);
-        self.sync();
+        self.stale = true;
     }
 
     fn tick(&mut self, now: f64) -> bool {
@@ -72,7 +87,7 @@ impl OverlayApp for Picker {
             }
         }
         if moved {
-            self.sync();
+            self.stale = true;
         }
         moved
     }
@@ -86,6 +101,7 @@ impl OverlayApp for Picker {
     }
 
     fn draw(&mut self, index: usize, into: &mut Image) {
+        self.sync();
         let view = View::of(&self.session);
         let monitor = self.monitors[index];
         self.ui.draw(&self.picture, index, monitor, &view, into);
@@ -122,6 +138,40 @@ mod tests {
             Picture::new(frame),
             Ui::new(&font).ok()?,
         ))
+    }
+
+    #[test]
+    fn a_fast_pen_syncs_the_picture_once_a_frame_not_once_an_event() {
+        let Some(mut p) = picker() else { return };
+        let mut img = Image::new(1920, 1080);
+        let key = |p: &mut Picker, pressed: bool| {
+            let (code, key, mods) = (1, Key::Char('a'), Mods::default());
+            let ev = if pressed {
+                RawEvent::KeyPress { code, key, mods }
+            } else {
+                RawEvent::KeyRelease { code, key, mods }
+            };
+            p.input(ev, 0.0);
+        };
+        key(&mut p, true);
+        key(&mut p, false);
+        let at = LogicalPoint::new(150.0, 150.0);
+        let left = screenie_core::session::Button::Left;
+        p.input(RawEvent::ButtonPress { button: left, at }, 0.0);
+        p.draw(0, &mut img);
+        let before = p.picture.generation();
+        for i in 0..500 {
+            let at = LogicalPoint::new(110.0 + f64::from(i % 180), 150.0);
+            p.input(RawEvent::Motion { at }, 0.0);
+        }
+        assert_eq!(p.picture.generation(), before, "input doesn't render");
+        p.draw(0, &mut img);
+        p.draw(1, &mut img);
+        assert_eq!(p.picture.generation(), before + 1, "one sync for the frame");
+        assert!(
+            p.session.editing().is_some(),
+            "the trace is still in progress"
+        );
     }
 
     #[test]

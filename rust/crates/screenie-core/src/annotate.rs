@@ -89,6 +89,9 @@ impl Ink {
     }
 }
 
+/// A pen trace keeps a point only this far (logical px) from the last.
+pub const TRACE_STEP: f64 = 0.5;
+
 #[derive(Clone, Debug)]
 pub struct AnnotateMode {
     main: LogicalRect,
@@ -307,7 +310,14 @@ impl Session {
                 a.pointer = p;
                 a.keyboard = false;
                 if let Some(t) = &mut a.trace {
-                    t.push(p);
+                    // A fast mouse reports far more often than the trace
+                    // moves a pixel: those points only cost rendering.
+                    let near = t
+                        .last()
+                        .is_some_and(|q| (q.x - p.x).hypot(q.y - p.y) < TRACE_STEP);
+                    if !near {
+                        t.push(p);
+                    }
                 }
             }
             Intent::Release(p) => {

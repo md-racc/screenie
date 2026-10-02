@@ -33,6 +33,8 @@ pub struct Picture {
     isolated: Option<(Layer, PixelRect, Image)>,
     /// Bumps whenever what's shown changes (for caches of it).
     generation: u64,
+    /// A highlighter trace in progress, so its frames add only its tail.
+    highlight: Option<crate::render::HighlightTrace>,
 }
 
 fn clip_to(r: PixelRect, ext: PixelRect) -> PixelRect {
@@ -65,6 +67,7 @@ impl Picture {
             applied: 0,
             isolated: None,
             generation: 0,
+            highlight: None,
         }
     }
 
@@ -224,19 +227,58 @@ impl Picture {
             return;
         }
         let (_, _, r, locked) = self.locked.as_ref().expect("just made");
+        // A pen trace that only grew since the last frame: draw just its new
+        // tail over what's shown, rather than the whole trace over a fresh
+        // copy (that grows with the line). Opaque ink looks the same either
+        // way; the full trace is rendered once, exactly, when it locks.
+        if let (Some(OpData::Stroke(new)), Some((Some(OpData::Stroke(old)), shown))) =
+            (&editing, self.shown.as_mut())
+        {
+            let grew = old.rgb == new.rgb
+                && old.width == new.width
+                && old.points.len() >= 2
+                && new.points.len() > old.points.len()
+                && new.points[..old.points.len()] == old.points[..];
+            if grew {
+                let map = *self.committed.map();
+                let clip = map.to_pixels(open.clip);
+                let tail = OpData::Stroke(screenie_core::model::StrokeOp {
+                    points: new.points[old.points.len() - 1..].to_vec(),
+                    ..old.clone()
+                });
+                apply_op(
+                    &mut Patch {
+                        img: shown,
+                        origin: PixelPoint::new(r.x, r.y),
+                    },
+                    &map,
+                    clip,
+                    &tail,
+                );
+                if let Some((e, _)) = self.shown.as_mut() {
+                    *e = editing;
+                }
+                self.generation += 1;
+                return;
+            }
+        }
         let mut img = locked.clone();
-        if let Some(op) = &editing {
-            let map = *self.committed.map();
-            let clip = map.to_pixels(open.clip);
-            apply_op(
-                &mut Patch {
-                    img: &mut img,
-                    origin: PixelPoint::new(r.x, r.y),
-                },
-                &map,
-                clip,
-                op,
-            );
+        let map = *self.committed.map();
+        let mut patch = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(r.x, r.y),
+        };
+        match &editing {
+            // Its coverage is kept, and grows by the tail (ink, above,
+            // simply draws over the last frame).
+            Some(OpData::Highlight(h)) => {
+                crate::render::highlight_cached(&mut self.highlight, &mut patch, &map, h);
+            }
+            Some(op) => {
+                self.highlight = None;
+                apply_op(&mut patch, &map, map.to_pixels(open.clip), op);
+            }
+            None => self.highlight = None,
         }
         self.shown = Some((editing, img));
         self.generation += 1;
@@ -384,6 +426,111 @@ mod tests {
     use screenie_core::model::{CensorKind, CensorOp, LayerId, OpId};
 
     const ALL: LogicalRect = LogicalRect::new(0.0, 0.0, 100.0, 50.0);
+
+    #[test]
+    fn a_growing_trace_draws_its_tail_and_looks_like_the_whole() {
+        use screenie_core::geometry::LogicalPoint;
+        use screenie_core::model::StrokeOp;
+        let open = layer(1, vec![]);
+        let pts: Vec<LogicalPoint> = (0..60)
+            .map(|i| {
+                let t = f64::from(i) * 0.1;
+                LogicalPoint::new(50.0 + 30.0 * t.cos(), 25.0 + 15.0 * (2.0 * t).sin())
+            })
+            .collect();
+        let op = |n: usize| {
+            OpData::Stroke(StrokeOp {
+                points: pts[..n].to_vec(),
+                rgb: [0.9, 0.2, 0.1],
+                width: 3.0,
+            })
+        };
+        let mut live = picture();
+        for n in 2..=60 {
+            live.sync(&[], Some(&open), Some(&op(n)));
+        }
+        let mut whole = picture();
+        whole.sync(&[], Some(&open), Some(&op(60)));
+        let (a, b) = (live.open_patch().unwrap().1, whole.open_patch().unwrap().1);
+        let worst = a
+            .data()
+            .iter()
+            .zip(b.data())
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap();
+        // Only anti-aliased edge pixels differ, none by a quarter.
+        assert!(worst < 64, "worst channel difference {worst}");
+        let off = |k: u8| {
+            a.data()
+                .iter()
+                .zip(b.data())
+                .filter(|(x, y)| x.abs_diff(**y) > k)
+                .count()
+        };
+        // The rest of the line's edges are a little heavier in places.
+        assert!(
+            off(8) * 50 < a.data().len(),
+            "{} bytes off by more than 8",
+            off(8)
+        );
+        // A change other than growth (a new ink) draws it whole again.
+        live.sync(&[], Some(&open), None);
+        assert_eq!(live.open_patch().unwrap().1.data(), picture_patch(&open));
+    }
+
+    #[test]
+    fn a_growing_highlight_adds_its_tail_and_looks_like_the_whole() {
+        use screenie_core::geometry::LogicalPoint;
+        use screenie_core::model::HighlightOp;
+        let open = layer(1, vec![]);
+        // Over a light block, where multiplying shows.
+        let mut light = Image::filled(100, 50, Rgb(230, 230, 230));
+        light.data_mut()[..4].copy_from_slice(&[10, 10, 10, 255]);
+        let pic = || Picture::new(Frame::new(light.clone(), ALL));
+        let pts: Vec<LogicalPoint> = (0..80)
+            .map(|i| {
+                let t = f64::from(i) * 0.08;
+                LogicalPoint::new(25.0 + 18.0 * t.cos(), 25.0 + 15.0 * (2.0 * t).sin())
+            })
+            .collect();
+        let op = |n: usize| {
+            OpData::Highlight(HighlightOp {
+                points: pts[..n].to_vec(),
+                rgb: [1.0, 0.85, 0.1],
+                width: 10.0,
+                alpha: 0.4,
+            })
+        };
+        let mut live = pic();
+        for n in 1..=80 {
+            live.sync(&[], Some(&open), Some(&op(n)));
+        }
+        let mut whole = pic();
+        whole.sync(&[], Some(&open), Some(&op(80)));
+        let (a, b) = (live.open_patch().unwrap().1, whole.open_patch().unwrap().1);
+        let diff = |k: u8| {
+            a.data()
+                .iter()
+                .zip(b.data())
+                .filter(|(x, y)| x.abs_diff(**y) > k)
+                .count()
+        };
+        // It overlaps itself, and still doesn't double up where it does:
+        // only anti-aliased edges differ, and a little.
+        assert_eq!(diff(32), 0, "{} bytes off by more than 32", diff(32));
+        assert!(
+            diff(4) * 50 < a.data().len(),
+            "{} bytes off by more than 4",
+            diff(4)
+        );
+    }
+
+    fn picture_patch(open: &Layer) -> Vec<u8> {
+        let mut p = picture();
+        p.sync(&[], Some(open), None);
+        p.open_patch().unwrap().1.data().to_vec()
+    }
 
     #[test]
     fn edges_along_a_ray() {

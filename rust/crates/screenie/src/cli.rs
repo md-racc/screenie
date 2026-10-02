@@ -61,7 +61,27 @@ pub struct Pick {
     pub no_ui: bool,
     /// `--measure-scale '84.2px=1m'`: Measure starts calibrated.
     pub measure_scale: Option<screenie_core::units::Scale>,
+    /// `--select-only`: print the box's geometry, deliver nothing else.
+    pub select_only: bool,
+    pub region_format: RegionFormat,
+    /// `--result`: what Enter produces.
+    pub result: Option<screenie_core::select::EnterResult>,
+    /// `--mode`: the mode the picker opens in.
+    pub mode: Option<screenie_core::select::StartMode>,
+    pub lock_box: bool,
     pub output: Output,
+}
+
+/// How `--select-only` prints the box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegionFormat {
+    /// `X,Y WxH`, rounded outward.
+    #[default]
+    Slurp,
+    /// `{"x":…,"y":…,"w":…,"h":…}`, exact.
+    Json,
+    /// `X Y W H`, rounded outward.
+    Hypr,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -91,11 +111,16 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: screenie [pick] [--region REGION] [--keys KEYS] [--no-ui]
-                [--measure-scale PX=LENGTH] [OUTPUT OPTIONS]
+usage: screenie [pick] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie shot [REGION] [OUTPUT OPTIONS]
        screenie edit last[:N] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
+
+pick options:   --keys KEYS  --no-ui  --mode MODE  --result RESULT  --lock-box
+                --select-only  --region-format slurp|json|hypr
+                --measure-scale PX=LENGTH
+MODE: select | insert | censor | annotate | filter | measure
+RESULT: image | text | colour | code | pin | measure
 
 output options: --save [DIR]  --stdout  --copy | --no-copy  --png-level 0-9
                 --notify | --no-notify  --quiet  --no-history  --ocr-lang LANG  --json
@@ -143,6 +168,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     };
     let mut positional: Vec<String> = Vec::new();
     let mut history_n: usize = 20;
+    let mut region_format = false;
     let err = |e: lexopt::Error| e.to_string();
     while let Some(arg) = p.next().map_err(err)? {
         let o = &mut pick.output;
@@ -154,6 +180,29 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             Arg::Long("keys") => pick.keys = Some(p.value().map_err(err)?.string().map_err(err)?),
             Arg::Long("no-ui") => pick.no_ui = true,
+            Arg::Long("select-only") => pick.select_only = true,
+            Arg::Long("lock-box") => pick.lock_box = true,
+            Arg::Long("region-format") => {
+                pick.region_format = match p.value().map_err(err)?.string().map_err(err)?.as_str() {
+                    "slurp" => RegionFormat::Slurp,
+                    "json" => RegionFormat::Json,
+                    "hypr" => RegionFormat::Hypr,
+                    other => return Err(format!("--region-format {other:?}: slurp, json or hypr")),
+                };
+                region_format = true;
+            }
+            Arg::Long("result") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                pick.result = Some(screenie_core::select::EnterResult::parse(&v).ok_or_else(
+                    || format!("--result {v:?}: image, text, colour, code, pin or measure"),
+                )?);
+            }
+            Arg::Long("mode") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                pick.mode = Some(screenie_core::select::StartMode::parse(&v).ok_or_else(|| {
+                    format!("--mode {v:?}: select, insert, censor, annotate, filter or measure")
+                })?);
+            }
             Arg::Long("measure-scale") => {
                 let v = p.value().map_err(err)?.string().map_err(err)?;
                 pick.measure_scale = Some(screenie_core::units::Scale::parse(&v)?);
@@ -224,6 +273,18 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if pick.output.stdout && pick.output.json {
         return Err("--stdout and --json both claim stdout: pick one".into());
     }
+    if region_format && !pick.select_only {
+        return Err("--region-format is for --select-only".into());
+    }
+    if pick.output.redact.is_some() && pick.mode.is_some() {
+        return Err("--redact opens Censor itself: drop --mode".into());
+    }
+    if pick.select_only && pick.result.is_some() {
+        return Err("--select-only already says what Enter gives".into());
+    }
+    if pick.select_only && !pick.output.json {
+        pick.output.stdout = true; // the geometry is the output
+    }
     if pick.output.redact == Some(Redact::Suggest)
         && (pick.no_ui || verb.as_deref() == Some("shot"))
     {
@@ -248,10 +309,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Ok(Command::Edit { which, pick })
         }
         Some("shot") => {
-            if pick.keys.is_some() || pick.no_ui || pick.measure_scale.is_some() {
-                return Err(
-                    "shot has no picker: --keys, --no-ui and --measure-scale are for pick".into(),
-                );
+            let picker_only = pick.keys.is_some()
+                || pick.no_ui
+                || pick.measure_scale.is_some()
+                || pick.select_only
+                || pick.result.is_some()
+                || pick.mode.is_some()
+                || pick.lock_box;
+            if picker_only {
+                return Err("shot has no picker: that option is for pick".into());
             }
             if pick.region.is_some() && !positional.is_empty() {
                 return Err("give the region once".into());
@@ -334,6 +400,37 @@ mod tests {
         assert!(cmd("--redact maybe").is_err());
         assert!(cmd("shot --redact suggest").is_err());
         assert!(cmd("--no-ui --redact suggest").is_err());
+    }
+
+    #[test]
+    fn picker_options() {
+        let Command::Pick(p) = cmd("--select-only --region-format hypr").unwrap() else {
+            panic!()
+        };
+        assert!(p.select_only && p.output.stdout && !p.output.copies());
+        assert_eq!(p.region_format, RegionFormat::Hypr);
+        let Command::Pick(p) = cmd("--select-only --json").unwrap() else {
+            panic!()
+        };
+        assert!(!p.output.stdout && p.output.copies() == !p.output.stdout);
+        let Command::Pick(p) = cmd("--result colour --mode insert --lock-box").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.result, Some(screenie_core::select::EnterResult::Colour));
+        assert_eq!(p.mode, Some(screenie_core::select::StartMode::Insert));
+        assert!(p.lock_box);
+        for bad in [
+            "--region-format json",
+            "--select-only --region-format xml",
+            "--result sound",
+            "--mode draw",
+            "--mode censor --redact suggest",
+            "--select-only --result text",
+            "shot --select-only",
+            "shot --mode censor",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

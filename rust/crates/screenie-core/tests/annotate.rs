@@ -414,3 +414,21 @@ fn the_keyboard_pen_moves_with_hjkl_and_space_draws() {
         Some(screenie_core::geometry::PixelPoint::new(400, 170))
     );
 }
+
+#[test]
+fn a_trace_keeps_one_point_a_half_pixel_however_fast_the_mouse() {
+    let mut s = session();
+    s.keys("a");
+    s.button(Button::Left, p(200.0, 200.0), true);
+    // A 1000 Hz mouse moving slowly: 0.1 px apart.
+    for i in 1..=100 {
+        s.motion(p(200.0 + f64::from(i) * 0.1, 200.0));
+    }
+    s.button(Button::Left, p(210.05, 200.0), false);
+    let OpData::Stroke(st) = &s.open_layer().unwrap().ops[0].data else {
+        panic!()
+    };
+    // 10 px: about a point a half pixel, and the end exactly where let go.
+    assert!((20..=22).contains(&st.points.len()), "{}", st.points.len());
+    assert_eq!(st.points.last(), Some(&p(210.05, 200.0)));
+}

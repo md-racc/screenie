@@ -309,6 +309,8 @@ pub struct Session {
     code_reader: Option<Box<dyn CodeReader>>,
     analyzer: Option<Box<dyn Analyzer>>,
     pub(crate) edge_finder: Option<Box<dyn EdgeFinder>>,
+    pub(crate) enter: crate::select::EnterResult,
+    pub(crate) box_locked: bool,
     /// Measure's scale: kept between visits, and from `--measure-scale`.
     pub(crate) measure_scale: Option<crate::units::Scale>,
     next_job: u64,
@@ -364,6 +366,8 @@ impl Session {
             code_reader: None,
             analyzer: None,
             edge_finder: None,
+            enter: Default::default(),
+            box_locked: false,
             measure_scale: None,
             next_job: 1,
             redact_env: crate::redact::Env::default(),

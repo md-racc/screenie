@@ -438,16 +438,8 @@ fn stroke(patch: &mut Patch, map: &PixelMap, clip: PixelRect, st: &StrokeOp) {
 
 /// A highlighter trace: one path, so overlaps don't double up, multiplied
 /// at its opacity so dark text under it stays dark.
-fn highlight(patch: &mut Patch, map: &PixelMap, clip: PixelRect, h: &HighlightOp) {
-    let pts: Vec<(f32, f32)> = h
-        .points
-        .iter()
-        .map(|&p| {
-            let (x, y) = map.to_device(p);
-            (x as f32, y as f32)
-        })
-        .collect();
-    let Some(&(x0, y0)) = pts.first() else { return };
+/// The highlighter's paint: its ink at its opacity, multiplied.
+fn highlight_paint(h: &HighlightOp) -> Paint<'static> {
     let mut paint = ink(h.rgb);
     paint.shader = tiny_skia::Shader::SolidColor(
         Color::from_rgba(
@@ -459,6 +451,129 @@ fn highlight(patch: &mut Patch, map: &PixelMap, clip: PixelRect, h: &HighlightOp
         .unwrap_or(Color::BLACK),
     );
     paint.blend_mode = tiny_skia::BlendMode::Multiply;
+    paint
+}
+
+/// A highlighter trace in progress, kept between frames: its coverage
+/// over one patch, so a trace that grew adds only its new tail. Drawing
+/// it whole each frame gets dearer the longer the line.
+pub struct HighlightTrace {
+    op: HighlightOp,
+    origin: PixelPoint,
+    coverage: Mask,
+    /// What the coverage reaches, in patch pixels: only that is multiplied.
+    reach: Option<Rect>,
+}
+
+impl HighlightTrace {
+    /// Cover `points[from..]` (and the segment into them) of `h`.
+    fn cover(&mut self, map: &PixelMap, h: &HighlightOp, from: usize) {
+        let pts: Vec<(f32, f32)> = h.points[from.saturating_sub(1)..]
+            .iter()
+            .map(|&p| {
+                let (x, y) = map.to_device(p);
+                (x as f32, y as f32)
+            })
+            .collect();
+        let Some(&(x0, y0)) = pts.first() else { return };
+        let mut pb = PathBuilder::new();
+        pb.move_to(x0, y0);
+        for &(x, y) in &pts[1..] {
+            pb.line_to(x, y);
+        }
+        if pts.len() == 1 {
+            pb.line_to(x0 + 0.01, y0);
+        }
+        let width = (h.width * map.scale()) as f32;
+        let outline = pb
+            .finish()
+            .and_then(|p| p.stroke(&round_stroke(width), 1.0));
+        if let Some(outline) = outline {
+            let t = Transform::from_translate(-self.origin.x as f32, -self.origin.y as f32);
+            self.coverage
+                .fill_path(&outline, FillRule::Winding, true, t);
+            let b = outline.bounds();
+            let (ox, oy) = (self.origin.x as f32, self.origin.y as f32);
+            let mut e = [
+                b.left() - ox - 1.0,
+                b.top() - oy - 1.0,
+                b.right() - ox + 1.0,
+                b.bottom() - oy + 1.0,
+            ];
+            if let Some(o) = self.reach {
+                e = [
+                    e[0].min(o.left()),
+                    e[1].min(o.top()),
+                    e[2].max(o.right()),
+                    e[3].max(o.bottom()),
+                ];
+            }
+            self.reach = Rect::from_ltrb(e[0], e[1], e[2], e[3]);
+        }
+    }
+}
+
+/// Highlight `h` over `patch`, through `cache`: when `h` only grew since
+/// the cached trace, just its tail is added. Anti-aliased edges can come
+/// out a little heavier than drawing it whole; `apply_op` draws it exactly.
+pub fn highlight_cached(
+    cache: &mut Option<HighlightTrace>,
+    patch: &mut Patch,
+    map: &PixelMap,
+    h: &HighlightOp,
+) {
+    let (w, h_px) = (patch.img.width(), patch.img.height());
+    let grew = cache.as_ref().is_some_and(|c| {
+        c.origin == patch.origin
+            && (c.coverage.width(), c.coverage.height()) == (w, h_px)
+            && (c.op.rgb, c.op.width, c.op.alpha) == (h.rgb, h.width, h.alpha)
+            && h.points.len() >= c.op.points.len()
+            && h.points[..c.op.points.len()] == c.op.points[..]
+    });
+    let from = if grew {
+        cache.as_ref().map_or(0, |c| c.op.points.len())
+    } else {
+        let Some(coverage) = Mask::new(w, h_px) else {
+            return;
+        };
+        *cache = Some(HighlightTrace {
+            op: h.clone(),
+            origin: patch.origin,
+            coverage,
+            reach: None,
+        });
+        0
+    };
+    let Some(c) = cache.as_mut() else { return };
+    if from < h.points.len() || from == 0 {
+        c.cover(map, h, from);
+    }
+    c.op = h.clone();
+    let whole = Rect::from_xywh(0.0, 0.0, w as f32, h_px as f32);
+    let Some(r) = c.reach.zip(whole).and_then(|(r, w)| r.intersect(&w)) else {
+        return;
+    };
+    if let Some(mut pm) = PixmapMut::from_bytes(patch.img.data_mut(), w, h_px) {
+        pm.fill_rect(
+            r,
+            &highlight_paint(h),
+            Transform::identity(),
+            Some(&c.coverage),
+        );
+    }
+}
+
+fn highlight(patch: &mut Patch, map: &PixelMap, clip: PixelRect, h: &HighlightOp) {
+    let pts: Vec<(f32, f32)> = h
+        .points
+        .iter()
+        .map(|&p| {
+            let (x, y) = map.to_device(p);
+            (x as f32, y as f32)
+        })
+        .collect();
+    let Some(&(x0, y0)) = pts.first() else { return };
+    let paint = highlight_paint(h);
     let width = (h.width * map.scale()) as f32;
     with_pixmap(patch, clip, |pm, t, mask| {
         let mut pb = PathBuilder::new();

@@ -7,6 +7,71 @@ use crate::session::{FinishedAction, Outcome, Session, Transition};
 
 pub use crate::boxes::RATES;
 
+/// What Enter produces in Select (`--result`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnterResult {
+    #[default]
+    Image,
+    Text,
+    Colour,
+    Code,
+    Pin,
+    /// Enter opens Measure, where Enter delivers the measurements.
+    Measure,
+}
+
+impl EnterResult {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "image" => Self::Image,
+            "text" => Self::Text,
+            "colour" | "color" => Self::Colour,
+            "code" => Self::Code,
+            "pin" => Self::Pin,
+            "measure" => Self::Measure,
+            _ => return None,
+        })
+    }
+}
+
+/// The mode the picker opens in (`--mode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartMode {
+    Select,
+    Insert,
+    Censor,
+    Annotate,
+    Filter,
+    Measure,
+}
+
+impl StartMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "select" => Self::Select,
+            "insert" => Self::Insert,
+            "censor" => Self::Censor,
+            "annotate" => Self::Annotate,
+            "filter" => Self::Filter,
+            "measure" => Self::Measure,
+            _ => return None,
+        })
+    }
+}
+
+/// Intents that would change the box (`--lock-box` refuses them).
+fn changes_box(intent: Intent) -> bool {
+    boxes::starts_change(intent)
+        || matches!(
+            intent,
+            Intent::HeldSteer(..)
+                | Intent::HeldTranslate(..)
+                | Intent::Adjust(_)
+                | Intent::Recall
+                | Intent::ToggleCentre
+        )
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SelectState {
     pub(crate) drag: Option<Drag>,
@@ -22,6 +87,19 @@ impl Session {
     }
 
     pub(crate) fn select_intent(&mut self, intent: Intent) -> Transition {
+        // `--result`: what Enter produces.
+        let intent = match (intent, self.enter) {
+            (Intent::Confirm, EnterResult::Text) => Intent::Ocr,
+            (Intent::Confirm, EnterResult::Colour) => Intent::CopyColour,
+            (Intent::Confirm, EnterResult::Code) => Intent::DecodeCode,
+            (Intent::Confirm, EnterResult::Pin) => Intent::Pin,
+            (Intent::Confirm, EnterResult::Measure) => Intent::Measure(crate::measure::Prim::Line),
+            (i, _) => i,
+        };
+        if self.box_locked && changes_box(intent) {
+            self.note = Some("the box is locked".into());
+            return Transition::Stay;
+        }
         if boxes::starts_change(intent) {
             self.remember();
         }
@@ -104,6 +182,30 @@ impl Session {
             _ => {}
         }
         Transition::Stay
+    }
+
+    /// `--mode`: open in that mode, as if its key had been pressed.
+    pub fn start_in(&mut self, mode: StartMode) {
+        use crate::intent::Tool;
+        let intent = match mode {
+            StartMode::Select => return,
+            StartMode::Insert => Intent::Insert,
+            StartMode::Censor => Intent::Tool(Tool::Censor),
+            StartMode::Annotate => Intent::Tool(Tool::Annotate),
+            StartMode::Filter => Intent::Tool(Tool::Filter),
+            StartMode::Measure => Intent::Measure(crate::measure::Prim::Line),
+        };
+        self.dispatch(intent);
+    }
+
+    /// `--result`: what Enter produces in Select.
+    pub fn set_result(&mut self, r: EnterResult) {
+        self.enter = r;
+    }
+
+    /// `--lock-box`: the box can't be changed, only worked inside.
+    pub fn lock_box(&mut self) {
+        self.box_locked = true;
     }
 
     /// `.`: the last accepted box; `.` again, while the box is still the
