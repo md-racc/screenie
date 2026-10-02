@@ -1,10 +1,18 @@
 # Measure: lengths, angles and areas, with a scale
 
-**Status:** a design scaffold. It is not in the prototype. `README.md`
-(Measure) and `docs/architecture-rust.md` (§58) take precedence over this
-page. The architecture models a measure path as a `Trace`; the "keep
-adding points" polyline below is the older wording, and which one is
-meant is still open.
+**Status:** in the Rust port (milestone 11). `README.md` (Measure) and
+`docs/architecture-rust.md` (§58) take precedence over this page, and the
+README has the keys as built. Built differently from this page:
+
+- **Line is `s`** (as Annotate's line), not `l`, which is hjkl's.
+- **Enter ends at the cursor**: a line is Space, move, Enter.
+- **`x` leaves one out of the total**, not Space, which drops points.
+- **A path is a polyline** of dropped points, not a `Trace`.
+- The cursor stays on the box's monitor, and Esc with measurements warns
+  first.
+- Not yet: snapping to edges (points snap to points), `--mode measure`
+  and `--result measure`, the scale in the project, and auto-calibrating
+  from a scale bar.
 
 The box is already a measurement (its tag shows its size), and the loupe
 and enhance are made for precise placement. Measure turns that into a
@@ -155,12 +163,11 @@ as exact as a line's.
 - **Counting:** click things to count them (doors, outlets), with the
   totals in the list.
 
-## Open questions
+## Answered (2026-10-02, in the port)
 
-- Should `m` open Measure with the line tool, or with a picker for the
-  primitive?
-- Should measurements survive going back to Select (a measure layer in the
-  stack, off by default in output), or be dropped?
-- Should Ctrl+hjkl edge detection be a threshold on luminance change along
-  the ray, or use the frame's already-computed grey image with a small
-  gradient kernel? The second is more robust on anti-aliased plans.
+- `m` opens Measure with the line tool; the primitive keys switch.
+- Measurements are dropped on going back to Select (after a warning),
+  unless baked. The scale is kept for the session.
+- Ctrl+hjkl's edge is a change in grey along the ray, averaged over three
+  pixels across it: 32 levels from the last pixel, or 48 from two back
+  for anti-aliased edges. It lands on the first pixel that differs.

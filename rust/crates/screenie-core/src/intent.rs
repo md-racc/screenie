@@ -140,6 +140,22 @@ pub enum Intent {
     /// `a` in Redact: accept the ticked suggestions.
     Accept,
 
+    // Measure.
+    /// `m` in Select: Measure; in Measure, the primitive's key.
+    Measure(crate::measure::Prim),
+    /// `Space` in Measure: drop a point (Alt: without snapping).
+    DropPoint,
+    /// `y` in Measure: deliver the measurements as text.
+    CopyMeasurements,
+    /// `C`: calibrate against the selected measurement.
+    Calibrate,
+    /// `t` in Measure: the other unit system.
+    UnitSystem,
+    /// `T` in Measure: pixels, or back to real units.
+    ShowPixels,
+    /// `a` in Measure: bake the measurements into an annotation layer.
+    Bake,
+
     // Text input.
     /// A typed character, taken literally.
     Type(char),

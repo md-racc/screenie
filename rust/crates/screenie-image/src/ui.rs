@@ -46,6 +46,8 @@ pub struct View {
     pub monitors: Vec<LogicalRect>,
     /// Auto-redact's suggestions under review.
     pub suggestions: Vec<SuggestionView>,
+    /// Measure's measurements, while it's open.
+    pub measure: Option<screenie_core::measure::MeasureView>,
 }
 
 /// A suggestion as drawn: dashed, filled when ticked, with its category.
@@ -95,12 +97,14 @@ impl View {
                         .collect()
                 })
                 .unwrap_or_default(),
+            measure: s.measurements(),
         };
         let mut v = v;
         v.pixel_cursor = s.pen_point(); // the keyboard pen's point
         for (m, top) in s.lenses() {
             match m {
                 Mode::Insert(i) if top => v.pixel_cursor = Some(i.cursor.at),
+                Mode::Measure(m) if top => v.pixel_cursor = Some(m.cursor.at),
                 Mode::Loupe(l) if top => {
                     v.pixel_cursor = Some(l.cursor.at);
                     v.loupe = Some(LoupeView {
@@ -397,6 +401,11 @@ impl Ui {
             }
         }
 
+        let mut chips: Vec<LogicalRect> = Vec::new();
+        if let Some(m) = &view.measure {
+            chips = self.measures(m, monitor, s, into);
+        }
+
         if view.enhance.is_some() || view.loupe.is_some() {
             self.lenses(pic, monitor, s, view, into);
         }
@@ -407,6 +416,7 @@ impl Ui {
         // Tags, status first so the others keep clear of it.
         let status = vec![view.status.clone()];
         let mut placed: Vec<LogicalRect> = view.occupied();
+        placed.extend(chips);
         let blocks = [(&status, tags::STATUS), (&view.top, tags::LEGEND)]
             .into_iter()
             .chain(view.lists.iter().map(|l| (l, tags::LIST)));
@@ -438,6 +448,128 @@ impl Ui {
                 swatch(into, s, x, y, rgb);
             }
         }
+    }
+
+    /// Measure's drawings: lines with their points, area fills, the one in
+    /// progress to the cursor, and a chip each. Returns the chips' rects,
+    /// for the tags to keep clear of.
+    fn measures(
+        &mut self,
+        m: &screenie_core::measure::MeasureView,
+        monitor: LogicalRect,
+        s: f64,
+        into: &mut Image,
+    ) -> Vec<LogicalRect> {
+        use tiny_skia::{
+            Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, PixmapMut, Stroke,
+            StrokeDash, Transform,
+        };
+        let dev = |q: LogicalPoint| {
+            (
+                ((q.x - monitor.x) * s) as f32,
+                ((q.y - monitor.y) * s) as f32,
+            )
+        };
+        let paint = |r: f32, g: f32, b: f32, a: f32| {
+            let mut p = SkPaint::default();
+            p.set_color(Color::from_rgba(r, g, b, a).unwrap_or(Color::BLACK));
+            p.anti_alias = true;
+            p
+        };
+        let stroke = |w: f64, dash: bool| Stroke {
+            width: (w * s) as f32,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            dash: dash
+                .then(|| StrokeDash::new(vec![(6.0 * s) as f32, (4.0 * s) as f32], 0.0))
+                .flatten(),
+            ..Stroke::default()
+        };
+        let path = |pts: &[LogicalPoint], closed: bool| {
+            let mut pb = PathBuilder::new();
+            let (x0, y0) = dev(*pts.first()?);
+            pb.move_to(x0, y0);
+            for &q in &pts[1..] {
+                let (x, y) = dev(q);
+                pb.line_to(x, y);
+            }
+            if closed {
+                pb.close();
+            }
+            pb.finish()
+        };
+        let dots = |pts: &[LogicalPoint], r: f64| {
+            let mut pb = PathBuilder::new();
+            for &q in pts {
+                let (x, y) = dev(q);
+                pb.push_circle(x, y, (r * s) as f32);
+            }
+            pb.finish()
+        };
+        let (w, h) = (into.width(), into.height());
+        {
+            let Some(mut pm) = PixmapMut::from_bytes(into.data_mut(), w, h) else {
+                return Vec::new();
+            };
+            let id = Transform::identity();
+            let ink = |sel: bool| {
+                if sel {
+                    paint(1.0, 0.85, 0.2, 1.0)
+                } else {
+                    paint(0.3, 0.85, 1.0, 1.0)
+                }
+            };
+            let dark = paint(0.0, 0.0, 0.0, 0.7);
+            for it in &m.items {
+                let Some(p) = path(&it.line, it.closed) else {
+                    continue;
+                };
+                if it.filled {
+                    pm.fill_path(
+                        &p,
+                        &paint(0.3, 0.85, 1.0, 0.15),
+                        FillRule::Winding,
+                        id,
+                        None,
+                    );
+                }
+                pm.stroke_path(&p, &dark, &stroke(3.5, false), id, None);
+                pm.stroke_path(&p, &ink(it.selected), &stroke(1.5, it.reference), id, None);
+                if let Some(d) = dots(&it.points, 2.5) {
+                    pm.fill_path(&d, &dark, FillRule::Winding, id, None);
+                }
+                if let Some(d) = dots(&it.points, 1.5) {
+                    pm.fill_path(&d, &ink(it.selected), FillRule::Winding, id, None);
+                }
+            }
+            if let Some(p) = path(&m.progress, false) {
+                pm.stroke_path(&p, &dark, &stroke(3.0, false), id, None);
+                pm.stroke_path(&p, &paint(1.0, 1.0, 1.0, 0.9), &stroke(1.0, true), id, None);
+                let n = m.progress.len() - 1; // the last is the cursor
+                if let Some(d) = dots(&m.progress[..n], 2.0) {
+                    pm.fill_path(&d, &paint(1.0, 1.0, 1.0, 1.0), FillRule::Winding, id, None);
+                }
+            }
+        }
+        // Chips, down a row while one would cover another.
+        let mut placed: Vec<LogicalRect> = Vec::new();
+        for it in &m.items {
+            let cw = self.chip_width(&it.label);
+            let mut r = LogicalRect::new(it.anchor.x + 6.0, it.anchor.y - ROW - 4.0, cw, ROW - 2.0);
+            for _ in 0..6 {
+                if !placed.iter().any(|o| o.intersects(&r)) {
+                    break;
+                }
+                r = LogicalRect::new(r.x, r.y + ROW, r.w, r.h);
+            }
+            r.x = r.x.min(monitor.right() - cw).max(monitor.x);
+            r.y = r.y.min(monitor.bottom() - ROW).max(monitor.y);
+            placed.push(r);
+            if r.intersects(&monitor) {
+                self.chip(into, monitor, s, r.x, r.y + ROW - 2.0, &it.label);
+            }
+        }
+        placed
     }
 
     /// The main box as shown, through the view filter, and where it sits.

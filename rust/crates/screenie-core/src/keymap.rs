@@ -190,6 +190,7 @@ pub static SELECT: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('Q'), Intent::DecodeCode)
         .bind(Chord::ch('P'), Intent::Pin)
         .bind(Chord::ch('i'), Intent::Insert)
+        .bind(Chord::ch('m'), Intent::Measure(crate::measure::Prim::Line))
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
@@ -431,6 +432,42 @@ pub static REDACT: LazyLock<Keymap> = LazyLock::new(|| {
     m
 });
 
+/// Measure: Insert's pixel cursor (Ctrl+hjkl: the next edge in the
+/// picture), the primitives, points, the list, units and output.
+pub static MEASURE: LazyLock<Keymap> = LazyLock::new(|| {
+    use crate::measure::Prim;
+    let mut m = direction_grammar();
+    m.bindings
+        .retain(|b| !matches!(b.intent, Intent::Slide(_) | Intent::Scale(_, Scale::Double)));
+    m.extend(&adjust_keys())
+        .extend(&lens_keys())
+        .bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
+        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
+        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
+        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
+        .bind(Chord::ch('s'), Intent::Measure(Prim::Line))
+        .bind(Chord::ch('('), Intent::Measure(Prim::Arc))
+        .bind(Chord::ch('c'), Intent::Measure(Prim::Circle))
+        .bind(Chord::ch('A'), Intent::Measure(Prim::Area))
+        .bind(Chord::ch('r'), Intent::Measure(Prim::Rect))
+        .bind(Chord::ch('^'), Intent::Measure(Prim::Angle))
+        .bind(Chord::plain(Key::Space), Intent::DropPoint)
+        .bind(Chord::with(Key::Space, Mods::ALT), Intent::DropPoint)
+        .bind(Chord::ch('u'), Intent::Undo)
+        .bind(Chord::ch('C'), Intent::Calibrate)
+        .bind(Chord::ch('t'), Intent::UnitSystem)
+        .bind(Chord::ch('T'), Intent::ShowPixels)
+        .bind(Chord::ch('['), Intent::ListStep(-1))
+        .bind(Chord::ch(']'), Intent::ListStep(1))
+        .bind(Chord::ch('d'), Intent::ListDelete)
+        .bind(Chord::ch('x'), Intent::ListToggle)
+        .bind(Chord::ch('y'), Intent::CopyMeasurements)
+        .bind(Chord::ch('a'), Intent::Bake)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
     vec![
@@ -445,6 +482,7 @@ pub fn all() -> Vec<(&'static str, &'static Keymap)> {
         ("enhance", &*ENHANCE),
         ("text", &*TEXT),
         ("redact", &*REDACT),
+        ("measure", &*MEASURE),
     ]
 }
 

@@ -23,6 +23,8 @@ pub enum TextPurpose {
     Annotation,
     /// The next callout's number (Annotate's `N`).
     CalloutNumber,
+    /// A measurement's real length (Measure's calibration).
+    Calibration,
 }
 
 #[derive(Clone, Debug)]
@@ -43,6 +45,14 @@ impl TextMode {
             at,
             size: SIZE,
             chip: true,
+        }
+    }
+
+    /// Typed at a measurement's chip.
+    pub fn calibration(at: LogicalPoint) -> Self {
+        Self {
+            purpose: TextPurpose::Calibration,
+            ..Self::annotation(at)
         }
     }
 
@@ -111,6 +121,9 @@ impl Session {
                 format!("{} {}px{chip}", self.ink.name, t.size)
             }
             TextPurpose::CalloutNumber => format!("next callout number: {}|", t.text),
+            TextPurpose::Calibration => {
+                format!("= {}|  (Enter sets the scale, Esc stays in pixels)", t.text)
+            }
         }
     }
 }

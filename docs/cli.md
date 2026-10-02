@@ -180,6 +180,10 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
   suggestion was accepted, with rects in the shot's logical coordinates
   (a window's own pixels for `shot active`).
 
+`--measure-scale PX=LENGTH`
+: Start Measure calibrated: `--measure-scale '84.2px=1m'`, for a plan
+  opened at the same zoom every time.
+
 `--select-only`
 : Pick a box and print its geometry, without capturing or delivering
   anything: screenie as a slurp. Layers are ignored.

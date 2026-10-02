@@ -289,6 +289,7 @@ The cursor may cross the anchor naturally.
 | click               | Snap to the window under the pointer, or its monitor |
 | drag                | Draw a region                                        |
 | `i`                 | Insert                                               |
+| `m`                 | Measure                                              |
 | `z`                 | Loupe                                                |
 | `e`                 | Enhance                                              |
 | `x`                 | Censor                                               |
@@ -757,8 +758,8 @@ Ticked ones preview the black bar they become. The side list shows them
 top to bottom, labels elided (`adi@…`), never whole:
 
 ```text
-> ✓ email      adi@…
-  ✓ token      ghp_…
+> ● email      adi@…
+  ● token      ghp_…
   · entropy    k9Xq…
 ```
 
@@ -791,31 +792,64 @@ See `docs/auto-redact.md`.
 
 # Measure
 
-Measure is designed but not yet implemented.
+Measure (`m` in Select) measures lengths, angles and areas over the frozen
+picture: in capture pixels, or in real units once calibrated. It opens no
+layer; its drawings are overlay only until baked.
 
-It uses the same point and anchor/cursor interaction model as the rest of the picker.
+Points are placed with Insert's pixel cursor, starting at the box's cursor
+corner and kept on that corner's monitor. The mouse moves it too, once it
+moves.
 
-Designed measurements include:
+| Input                | Action                                                 |
+| -------------------- | ------------------------------------------------------ |
+| `h j k l`            | Move the cursor a step (Shift: ×4; Alt: halfway to the edge) |
+| `Ctrl+h j k l`       | Jump to the next edge in the picture that way          |
+| `0 $ g G`            | The monitor's far edge                                 |
+| `+` / `-`            | Step size                                              |
+| `s`                  | Line, or a path as points are added (Enter finishes)   |
+| `(`                  | Arc: start, a point on it, end                         |
+| `c`                  | Circle: three points on it                             |
+| `A`                  | Area: a polygon (Enter finishes)                       |
+| `r`                  | Rectangle: two corners; Enter with none measures the box |
+| `^`                  | Angle: arm, vertex, arm                                |
+| `Space` / click      | Drop a point (snaps to points within 4px; Alt: no snap) |
+| Shift+click          | Drop a point locked to 45° from the last               |
+| `Enter`              | Finish, ending at the cursor; with nothing in progress, deliver |
+| `u`                  | Take back the last point, else the last measurement    |
+| `C`                  | Calibrate against the selected line or arc             |
+| `t` / `T`            | Metric ↔ imperial / pixels                             |
+| `[` / `]` `d` `x`    | Select, delete, leave out of the total                 |
+| `z` / `e`            | Loupe / Enhance at the cursor                          |
+| `y`                  | Deliver the measurements as text                       |
+| `a`                  | Bake them into an annotation layer, back to Select     |
+| `Esc`                | Abandon the one in progress; else back (warns first)   |
 
-- line;
-- path;
-- arc;
-- circle;
-- rectangle;
-- area;
-- angle.
+Arcs, circles and angles finish at three points, rectangles at two.
 
-A measurement may be calibrated by assigning a real-world value to the first suitable line or arc:
+The first line or arc asks for its real length (`= 5 m`; units `mm cm m
+km in ft yd mi`, `12'6"`, `12ft 6in`, and arithmetic such as `2*2.5 m`).
+Esc stays in pixels. That measurement becomes the reference, drawn dashed
+and labelled `ref`. Everything reads in its unit from then on, with an
+error estimate: `4.20 m ±0.08`. The status shows the scale
+(`1 m = 84.2 px ±1.7%`) and warns when the reference is short. The scale is
+kept for the rest of the session, and `--measure-scale 84.2px=1m` starts
+calibrated.
+
+The side list shows every measurement and the total of the lengths and of
+the areas it counts. `y` (or Enter) delivers:
 
 ```text
-= 5 m
+ref   5.00 m  (411.0 px)
+L2    4.20 m ±0.08     at 37.5°
+A1    12.6 m² ±0.5     perimeter 14.3 m
+∠1    37.5°
 ```
 
-Subsequent measurements then report real units with an estimated error.
+With `--json`, `kind` is `measure`, with `scale` and `measurements`
+(points in capture pixels).
 
-Image-edge detection may allow directional jumps directly to visible boundaries.
-
-Measurements can later be baked into an annotation layer.
+Baking (`a`) turns them into an annotation layer: dimension lines with
+arrowheads, outlines, and their labels as text. Enter then captures them.
 
 See `docs/measure.md`.
 

@@ -271,6 +271,12 @@ fn run_picker(
     )));
     session.set_code_reader(Box::new(picker::Codes(Picture::new(frame.clone()))));
     session.set_redact_env(screenie_core::redact::Env::from_system());
+    session.set_edge_finder(Box::new(screenie_image::picture::PictureEdges::new(
+        frame.clone(),
+    )));
+    if let Some(scale) = args.measure_scale {
+        session.set_measure_scale(scale);
+    }
     let lang = args.output.ocr_lang();
     // Scripted keys wait for each scan; the overlay doesn't.
     session.set_analyzer(Box::new(analysis::Ocr::inline(
@@ -428,6 +434,14 @@ fn finish(
                 .rect(rect, layout)
                 .set("text", text)
                 .set("copied", copied)
+        }
+        FinishedAction::Measure { text, json } => {
+            deliver::text(&text, out, "Measurements copied").map_err(Failure::delivery)?;
+            Report::done("measure")
+                .set("text", text)
+                .set("scale", json["scale"].clone())
+                .set("measurements", json["measurements"].clone())
+                .set("copied", out.copies())
         }
         FinishedAction::Code { text, rect } => {
             deliver::text(&text, out, "Code copied").map_err(Failure::delivery)?;

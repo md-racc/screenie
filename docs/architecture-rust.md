@@ -2361,6 +2361,12 @@ says what was chosen and why. Smaller judgement calls live in
   review. Jobs carry a pixel rect of the committed picture; there's no
   frame version yet, because the frame never changes within a session.
   No analysis cache yet (§55): scans are on request.
+- **Measure is a mode, not a tool** (§58): it opens no layer and its
+  measurements are mode state, dropped on leaving unless baked (`a`) into
+  an ordinary annotation layer, as one project step. Its edges come from
+  a host `EdgeFinder` (the committed picture's grey along a ray), like the
+  `Sampler`, so core still never sees pixels. The scale lives on the
+  session for now, not in the project.
 - **Auto-redact's suggestions live in a `Redact` mode**, a child of
   Censor, never in the project (§57). Accepting adds black-bar censors to
   the open layer as one undo step (`LayerUndo::RemoveMany`). The session

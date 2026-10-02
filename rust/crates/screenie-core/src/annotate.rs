@@ -398,6 +398,7 @@ impl Session {
                 Ok(n) => a.next_callout = Some(n),
                 Err(_) => self.note = Some(format!("not a number: {text:?}")),
             },
+            crate::text::TextPurpose::Calibration => {} // Measure's
         }
     }
 

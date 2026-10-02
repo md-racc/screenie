@@ -59,6 +59,8 @@ pub struct Pick {
     pub region: Option<String>,
     pub keys: Option<String>,
     pub no_ui: bool,
+    /// `--measure-scale '84.2px=1m'`: Measure starts calibrated.
+    pub measure_scale: Option<screenie_core::units::Scale>,
     pub output: Output,
 }
 
@@ -89,7 +91,8 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: screenie [pick] [--region REGION] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
+usage: screenie [pick] [--region REGION] [--keys KEYS] [--no-ui]
+                [--measure-scale PX=LENGTH] [OUTPUT OPTIONS]
        screenie shot [REGION] [OUTPUT OPTIONS]
        screenie edit last[:N] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
@@ -151,6 +154,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             Arg::Long("keys") => pick.keys = Some(p.value().map_err(err)?.string().map_err(err)?),
             Arg::Long("no-ui") => pick.no_ui = true,
+            Arg::Long("measure-scale") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                pick.measure_scale = Some(screenie_core::units::Scale::parse(&v)?);
+            }
             Arg::Long("save") => {
                 // `--save DIR` takes the next argument when it is a path,
                 // so `shot --save monitor` still means a region.
@@ -241,8 +248,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Ok(Command::Edit { which, pick })
         }
         Some("shot") => {
-            if pick.keys.is_some() || pick.no_ui {
-                return Err("shot has no picker: --keys and --no-ui are for pick".into());
+            if pick.keys.is_some() || pick.no_ui || pick.measure_scale.is_some() {
+                return Err(
+                    "shot has no picker: --keys, --no-ui and --measure-scale are for pick".into(),
+                );
             }
             if pick.region.is_some() && !positional.is_empty() {
                 return Err("give the region once".into());
@@ -325,6 +334,16 @@ mod tests {
         assert!(cmd("--redact maybe").is_err());
         assert!(cmd("shot --redact suggest").is_err());
         assert!(cmd("--no-ui --redact suggest").is_err());
+    }
+
+    #[test]
+    fn measure_scale() {
+        let Command::Pick(p) = cmd("--measure-scale 84.2px=1m").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.measure_scale.map(|s| s.px), Some(84.2));
+        assert!(cmd("--measure-scale 84.2=1m").is_err());
+        assert!(cmd("shot --measure-scale 1px=1m").is_err());
     }
 
     #[test]

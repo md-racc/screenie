@@ -51,6 +51,7 @@ fn view(top: Vec<String>) -> View {
         top,
         monitors: MONS.to_vec(),
         suggestions: vec![],
+        measure: None,
     }
 }
 
@@ -468,4 +469,75 @@ fn suggestions_are_dashed_ticked_ones_filled_with_a_chip_each() {
     assert!(lit > 30 && lit < 120, "{lit} of 150 lit");
     // A chip above each: chip black over the light block.
     assert!(at(&into, 131, 210).0 < 30 && at(&into, 401, 210).0 < 30);
+}
+
+#[test]
+fn measurements_draw_with_their_points_and_a_chip() {
+    use screenie_core::measure::{ItemView, MeasureView};
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    v.measure = Some(MeasureView {
+        items: vec![
+            ItemView {
+                line: vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+                closed: false,
+                filled: false,
+                label: "4.20 m".into(),
+                anchor: pt(800.5, 400.5),
+                reference: false,
+                selected: false,
+                points: vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+            },
+            ItemView {
+                line: vec![pt(700.5, 500.5), pt(800.5, 500.5), pt(800.5, 600.5)],
+                closed: true,
+                filled: true,
+                label: "50 px²".into(),
+                anchor: pt(766.0, 533.0),
+                reference: false,
+                selected: true,
+                points: vec![],
+            },
+        ],
+        progress: vec![pt(1000.5, 400.5), pt(1100.5, 450.5)],
+        closed: false,
+    });
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    save("measure.png", &into);
+    let line = at(&into, 750, 400);
+    assert!(line.2 > 200 && line.0 < 120, "the line is cyan: {line:?}");
+    let sel = at(&into, 750, 500);
+    assert!(
+        sel.0 > 200 && sel.2 < 100,
+        "the selected one is amber: {sel:?}"
+    );
+    let fill = at(&into, 780, 530);
+    assert!(
+        fill.2 > at(&into, 650, 530).2,
+        "the area is tinted: {fill:?}"
+    );
+    // The chip: black, beside the line's middle, above it.
+    assert!(at(&into, 808, 385).0 < 30);
+    // The one in progress, dashed white.
+    let lit = (1001..1099)
+        .filter(|&x| {
+            let y = 400 + (x - 1000) / 2;
+            (y - 1..=y + 1).any(|y| at(&into, x, y).0 > 200)
+        })
+        .count();
+    assert!(lit > 20 && lit < 95, "dashed: {lit}");
+}
+
+#[test]
+fn the_tag_font_has_every_symbol_the_ui_shows() {
+    let Some(font) = font() else { return };
+    let font = fontdue::Font::from_bytes(font, fontdue::FontSettings::default()).unwrap();
+    // Status, lists and chips: redact's ticks, measure's prefixes and units,
+    // the legend's keys and the box's size.
+    for c in "●·○Ø∩∠→±²°×…".chars() {
+        assert_ne!(font.lookup_glyph_index(c), 0, "no glyph for {c:?}");
+    }
 }

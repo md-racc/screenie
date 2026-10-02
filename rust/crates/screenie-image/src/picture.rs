@@ -311,12 +311,107 @@ impl screenie_core::session::Sampler for PictureSampler {
     }
 }
 
+/// A change in grey (0-255) this big from one pixel to the next, or from
+/// two before (anti-aliased edges), is an edge.
+pub const EDGE_STEP: f64 = 32.0;
+pub const EDGE_STEP_SOFT: f64 = 48.0;
+
+/// The first pixel past `from`, going `d` within `bounds`, where the grey
+/// (averaged over three pixels across the ray) changes by an edge's worth.
+pub fn find_edge(
+    rgb: impl Fn(PixelPoint) -> Option<Rgb>,
+    from: PixelPoint,
+    d: screenie_core::geometry::Dir,
+    bounds: PixelRect,
+) -> Option<PixelPoint> {
+    let (dx, dy) = d.vec();
+    let (dx, dy) = (dx as i32, dy as i32);
+    let inside = |q: PixelPoint| {
+        q.x >= bounds.x && q.y >= bounds.y && q.x < bounds.x + bounds.w && q.y < bounds.y + bounds.h
+    };
+    let grey = |t: i32| -> Option<f64> {
+        let c = PixelPoint::new(from.x + dx * t, from.y + dy * t);
+        if !inside(c) {
+            return None;
+        }
+        let (n, sum) = (-1..=1)
+            .map(|k| PixelPoint::new(c.x + dy.abs() * k, c.y + dx.abs() * k))
+            .filter(|&q| inside(q))
+            .filter_map(&rgb)
+            .fold((0.0, 0.0), |(n, s), c| {
+                let l = 0.299 * f64::from(c.0) + 0.587 * f64::from(c.1) + 0.114 * f64::from(c.2);
+                (n + 1.0, s + l)
+            });
+        (n > 0.0).then(|| sum / n)
+    };
+    let mut back = [grey(0)?, grey(0)?];
+    for t in 1.. {
+        let g = grey(t)?;
+        if (g - back[1]).abs() >= EDGE_STEP || (t > 1 && (g - back[0]).abs() >= EDGE_STEP_SOFT) {
+            return Some(PixelPoint::new(from.x + dx * t, from.y + dy * t));
+        }
+        back = [back[1], g];
+    }
+    None
+}
+
+/// Measure's edges, over the committed picture.
+pub struct PictureEdges(Picture);
+
+impl PictureEdges {
+    pub fn new(base: Frame) -> Self {
+        Self(Picture::new(base))
+    }
+}
+
+impl screenie_core::measure::EdgeFinder for PictureEdges {
+    fn edge(
+        &mut self,
+        s: &screenie_core::session::Session,
+        from: PixelPoint,
+        d: screenie_core::geometry::Dir,
+        bounds: PixelRect,
+    ) -> Option<PixelPoint> {
+        self.0.sync(s.layers(), None, None);
+        let pic = &self.0;
+        find_edge(|q| pic.rgb(q), from, d, bounds)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use screenie_core::model::{CensorKind, CensorOp, LayerId, OpId};
 
     const ALL: LogicalRect = LogicalRect::new(0.0, 0.0, 100.0, 50.0);
+
+    #[test]
+    fn edges_along_a_ray() {
+        use screenie_core::geometry::Dir;
+        // White, a 1px dark wall at x = 40, a soft edge at 70-72, then grey.
+        let mut img = Image::filled(100, 50, Rgb(250, 250, 250));
+        for y in 0..50 {
+            for (x, v) in [(40, 20), (70, 225), (71, 200), (72, 175)] {
+                let i = (y * 100 + x) * 4;
+                img.data_mut()[i..i + 3].copy_from_slice(&[v, v, v]);
+            }
+            for x in 73..100 {
+                let i = (y * 100 + x) * 4;
+                img.data_mut()[i..i + 3].copy_from_slice(&[175, 175, 175]);
+            }
+        }
+        let rgb = |q: PixelPoint| img.rgb(q);
+        let all = PixelRect::new(0, 0, 100, 50);
+        let at = |x| PixelPoint::new(x, 25);
+        assert_eq!(find_edge(rgb, at(10), Dir::Right, all), Some(at(40))); // onto the wall
+        assert_eq!(find_edge(rgb, at(40), Dir::Right, all), Some(at(41))); // off it
+        assert_eq!(find_edge(rgb, at(41), Dir::Right, all), Some(at(71))); // the soft edge
+        assert_eq!(find_edge(rgb, at(80), Dir::Right, all), None); // nothing more
+        assert_eq!(find_edge(rgb, at(60), Dir::Left, all), Some(at(40))); // onto it, from either side
+        let short = PixelRect::new(0, 0, 30, 50);
+        assert_eq!(find_edge(rgb, at(10), Dir::Right, short), None); // bounded
+        assert_eq!(find_edge(rgb, at(10), Dir::Up, all), None);
+    }
 
     fn picture() -> Picture {
         Picture::new(Frame::new(Image::filled(100, 50, Rgb(10, 10, 10)), ALL))

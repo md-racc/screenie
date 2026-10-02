@@ -60,6 +60,7 @@ impl Session {
                 self.snap.scope(&mut self.sel, step);
             }
             Intent::Recall => self.recall(),
+            Intent::Measure(_) => return self.open_measure(),
             Intent::Insert => {
                 let m = crate::insert::InsertMode::new(&self.pixels, self.sel.rect());
                 return Transition::Push(crate::session::Mode::Insert(m));

@@ -189,7 +189,7 @@ impl Session {
             .enumerate()
             .map(|(i, s)| {
                 let mark = if i == m.selected { ">" } else { " " };
-                let tick = if s.ticked { "✓" } else { "·" };
+                let tick = if s.ticked { "●" } else { "·" };
                 format!("{mark} {tick} {:<10} {}", s.category.name(), s.label)
             })
             .collect()

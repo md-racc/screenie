@@ -25,6 +25,7 @@ use crate::keys::{Chord, Key, Mods};
 use crate::layers::LayersMode;
 use crate::layout::Layout;
 use crate::lens::{EnhanceMode, LoupeMode, View};
+use crate::measure::{EdgeFinder, MeasureMode};
 use crate::model::{Layer, Op, OpData, OpId, Project};
 use crate::review::RedactMode;
 use crate::select::SelectState;
@@ -105,6 +106,11 @@ pub enum FinishedAction {
     Pin {
         rect: LogicalRect,
     },
+    /// Measure's `y`: the measurements, as text and as `--json` data.
+    Measure {
+        text: String,
+        json: serde_json::Value,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -141,6 +147,8 @@ pub enum Mode {
     Text(TextMode),
     /// Reviewing auto-redact's suggestions (a child of Censor).
     Redact(RedactMode),
+    /// Measuring (`m` in Select).
+    Measure(Box<MeasureMode>),
 }
 
 /// An analysis to run off the input path (OCR, later edge detection).
@@ -194,6 +202,7 @@ impl Mode {
             Mode::Enhance(_) => "enhance",
             Mode::Text(_) => "text",
             Mode::Redact(_) => "redact",
+            Mode::Measure(_) => "measure",
         }
     }
 
@@ -209,7 +218,8 @@ impl Mode {
             | Mode::Loupe(_)
             | Mode::Enhance(_)
             | Mode::Text(_)
-            | Mode::Redact(_) => None,
+            | Mode::Redact(_)
+            | Mode::Measure(_) => None,
         }
     }
 
@@ -298,6 +308,9 @@ pub struct Session {
     sampler: Option<Box<dyn Sampler>>,
     code_reader: Option<Box<dyn CodeReader>>,
     analyzer: Option<Box<dyn Analyzer>>,
+    pub(crate) edge_finder: Option<Box<dyn EdgeFinder>>,
+    /// Measure's scale: kept between visits, and from `--measure-scale`.
+    pub(crate) measure_scale: Option<crate::units::Scale>,
     next_job: u64,
     pub(crate) redact_env: crate::redact::Env,
     /// Suggestions accepted as censors: category and where (for --json).
@@ -310,7 +323,7 @@ pub struct Session {
     pointer: LogicalPoint,
 }
 
-fn corner_pixel(pixels: &PixelMap, s: &AnchorCursor) -> PixelPoint {
+pub(crate) fn corner_pixel(pixels: &PixelMap, s: &AnchorCursor) -> PixelPoint {
     if s.is_centred() {
         return pixels.pixel_under(s.rect().centre());
     }
@@ -350,6 +363,8 @@ impl Session {
             sampler: None,
             code_reader: None,
             analyzer: None,
+            edge_finder: None,
+            measure_scale: None,
             next_job: 1,
             redact_env: crate::redact::Env::default(),
             redacted: Vec::new(),
@@ -376,6 +391,21 @@ impl Session {
     /// Give the session a way to run analysis (auto-redact's OCR).
     pub fn set_analyzer(&mut self, analyzer: Box<dyn Analyzer>) {
         self.analyzer = Some(analyzer);
+    }
+
+    /// Give the session a way to find edges in the picture (Measure).
+    pub fn set_edge_finder(&mut self, f: Box<dyn EdgeFinder>) {
+        self.edge_finder = Some(f);
+    }
+
+    /// Measure's scale to start with (`--measure-scale`).
+    pub fn set_measure_scale(&mut self, s: crate::units::Scale) {
+        self.measure_scale = Some(s);
+    }
+
+    /// What Measure draws, while it's open.
+    pub fn measurements(&self) -> Option<crate::measure::MeasureView> {
+        self.measure_view()
     }
 
     /// What auto-redact knows of this machine (user, home, hostname).
@@ -595,6 +625,7 @@ impl Session {
         match self.stack.last() {
             None => Some(corner_pixel(&self.pixels, &self.sel)),
             Some(Mode::Insert(m)) => Some(m.cursor.at),
+            Some(Mode::Measure(m)) => Some(m.cursor.at),
             Some(Mode::Loupe(m)) => Some(m.cursor.at),
             Some(m) => m.box_sel().map(|s| corner_pixel(&self.pixels, s)),
         }
@@ -641,6 +672,7 @@ impl Session {
             Some(Mode::Insert(m)) => s.push_str(&format!("  step {}px", m.step)),
             Some(Mode::Text(t)) => s.push_str(&format!("  {}", self.text_status(t))),
             Some(Mode::Redact(r)) => s.push_str(&format!("  {}", self.redact_status(r))),
+            Some(Mode::Measure(m)) => s.push_str(&format!("  {}", self.measure_status(m))),
             Some(Mode::Loupe(_)) => {
                 s.push_str(&format!("  {}px{}", self.loupe_px, self.view_tag()))
             }
@@ -680,6 +712,7 @@ impl Session {
             Some(Mode::Insert(_)) => &keymap::INSERT,
             Some(Mode::Text(_)) => &keymap::TEXT,
             Some(Mode::Redact(_)) => &keymap::REDACT,
+            Some(Mode::Measure(_)) => &keymap::MEASURE,
             Some(Mode::Loupe(_)) => &keymap::LOUPE,
             Some(Mode::Enhance(_)) => &keymap::ENHANCE,
         }
@@ -697,6 +730,7 @@ impl Session {
             Some(Mode::Insert(_)) => crate::legend::INSERT,
             Some(Mode::Text(_)) => crate::legend::TEXT,
             Some(Mode::Redact(_)) => crate::legend::REDACT,
+            Some(Mode::Measure(_)) => crate::legend::MEASURE,
             Some(Mode::Loupe(_)) => crate::legend::LOUPE,
             Some(Mode::Enhance(_)) => crate::legend::ENHANCE,
         };
@@ -712,6 +746,7 @@ impl Session {
                 Mode::Filter(f) => Some(self.filter_list(f)),
                 Mode::Layers(m) => Some(self.layers_list(m)),
                 Mode::Redact(r) => Some(self.redact_list(r)),
+                Mode::Measure(m) => Some(m.list()),
                 _ => None,
             })
             .collect()
@@ -827,6 +862,7 @@ impl Session {
                         | Mode::Filter(_)
                         | Mode::Layers(_)
                         | Mode::Insert(_)
+                        | Mode::Measure(_)
                         | Mode::Loupe(_)
                         | Mode::Enhance(_)
                 ),
@@ -853,6 +889,7 @@ impl Session {
             match self.stack.last() {
                 Some(Mode::Layers(_)) => None,
                 Some(Mode::Insert(m)) => Some(m.rates(self.input.held_dirs(), mods.shift)),
+                Some(Mode::Measure(m)) => Some(m.rates(self.input.held_dirs(), mods.shift)),
                 Some(Mode::Loupe(_)) => Some(self.loupe_rates()),
                 _ => Some(crate::boxes::RATES),
             }
@@ -917,6 +954,7 @@ impl Session {
                     Mode::Enhance(m) => self.enhance_intent(m, intent),
                     Mode::Text(t) => self.text_intent(t, intent),
                     Mode::Redact(r) => self.redact_intent(r, intent),
+                    Mode::Measure(m) => self.measure_intent(m, intent),
                 };
                 self.stack.push(mode);
                 t
@@ -965,6 +1003,14 @@ impl Session {
                         m.cursor.put(p.x, p.y, true);
                         self.stack.push(Mode::Insert(m));
                     }
+                    (Some(Mode::Measure(mut m)), ChildResult::Position(p)) => {
+                        m.cursor.put(p.x, p.y, true);
+                        self.stack.push(Mode::Measure(m));
+                    }
+                    (Some(Mode::Measure(mut m)), ChildResult::Text(text, _)) => {
+                        self.measure_calibrated(&mut m, &text);
+                        self.stack.push(Mode::Measure(m));
+                    }
                     (Some(Mode::Annotate(mut a)), ChildResult::Text(text, entry)) => {
                         self.annotate_text(&mut a, text, &entry);
                         self.stack.push(Mode::Annotate(a));
@@ -1003,7 +1049,12 @@ impl Session {
         self.stack
             .iter()
             .enumerate()
-            .filter(|(_, m)| matches!(m, Mode::Loupe(_) | Mode::Enhance(_) | Mode::Insert(_)))
+            .filter(|(_, m)| {
+                matches!(
+                    m,
+                    Mode::Loupe(_) | Mode::Enhance(_) | Mode::Insert(_) | Mode::Measure(_)
+                )
+            })
             .map(move |(i, m)| (m, i + 1 == n))
     }
 
@@ -1062,6 +1113,21 @@ impl Session {
             open.log.push(entry);
         }
         self.pending = None;
+    }
+
+    /// A committed layer of `ops` over the box, as one project step
+    /// (Measure's bake).
+    pub(crate) fn add_layer(&mut self, ops: Vec<OpData>) {
+        let id = self.project.new_layer_id();
+        self.open = Some(OpenLayer {
+            layer: Layer::new(id, self.sel.rect()),
+            depth: 0,
+            log: Vec::new(),
+        });
+        for op in ops {
+            self.insert_op(op, None);
+        }
+        let _ = self.close_layer(true);
     }
 
     /// Fold the last `n` log entries into one.

@@ -315,6 +315,37 @@ pub const REDACT: &[&[Item]] = &[&[
     ("back", &[Intent::Back]),
 ]];
 
+pub const MEASURE: &[&[Item]] = &[
+    &[
+        ("line/path", &[Intent::Measure(crate::measure::Prim::Line)]),
+        ("arc", &[Intent::Measure(crate::measure::Prim::Arc)]),
+        ("circle", &[Intent::Measure(crate::measure::Prim::Circle)]),
+        ("area", &[Intent::Measure(crate::measure::Prim::Area)]),
+        ("rect", &[Intent::Measure(crate::measure::Prim::Rect)]),
+        ("angle", &[Intent::Measure(crate::measure::Prim::Angle)]),
+        ("point", &[Intent::DropPoint]),
+        ("finish", &[Intent::Confirm]),
+        ("undo", &[Intent::Undo]),
+    ],
+    &[
+        ("edge", &[Intent::Jump(crate::geometry::Dir::Right)]),
+        ("step", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        ("loupe", &[Intent::Loupe]),
+        ("enhance", &[Intent::Enhance]),
+        ("calibrate", &[Intent::Calibrate]),
+        ("m/ft", &[Intent::UnitSystem]),
+        ("px", &[Intent::ShowPixels]),
+    ],
+    &[
+        ("select", &[Intent::ListStep(-1), Intent::ListStep(1)]),
+        ("delete", &[Intent::ListDelete]),
+        ("total", &[Intent::ListToggle]),
+        ("copy", &[Intent::CopyMeasurements]),
+        ("bake", &[Intent::Bake]),
+        ("back", &[Intent::Back]),
+    ],
+];
+
 /// The lines of a legend, with each item's keys looked up in `map` (then
 /// the session keys). An item listing intents none of which is bound is
 /// left out; one listing none is a plain note.
@@ -387,6 +418,7 @@ mod tests {
                 "enhance" => ENHANCE,
                 "text" => TEXT,
                 "redact" => REDACT,
+                "measure" => MEASURE,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {
