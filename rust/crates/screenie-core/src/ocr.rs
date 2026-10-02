@@ -12,6 +12,8 @@ pub struct OcrWord {
     pub bbox: PixelRect,
     /// 0-100, as the engine reports it; `None` if it doesn't.
     pub confidence: Option<f32>,
+    /// Which line of the text it's on (0 first), so lines can be rebuilt.
+    pub line: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

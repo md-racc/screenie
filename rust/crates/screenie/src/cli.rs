@@ -25,6 +25,16 @@ pub struct Output {
     pub json: bool,
     /// `--save-project`: the project beside the `--save` image too.
     pub save_project: bool,
+    /// `--redact suggest|auto`.
+    pub redact: Option<Redact>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Redact {
+    /// Open Censor with the suggestions to review.
+    Suggest,
+    /// Apply the ticked suggestions without asking.
+    Auto,
 }
 
 impl Output {
@@ -86,9 +96,11 @@ usage: screenie [pick] [--region REGION] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS
 
 output options: --save [DIR]  --stdout  --copy | --no-copy  --png-level 0-9
                 --notify | --no-notify  --quiet  --no-history  --ocr-lang LANG  --json
-                --save-project
+                --save-project  --redact suggest|auto
 
 REGION: all | monitor | monitor:NAME | X,Y WxH | last-region[:N] | -
+--redact auto is best effort: OCR misses small, stylised, low-contrast and
+rotated text, and text in images. --json lists what it redacted.
 See README.md for the picker's keys, and docs/cli.md for the rest.";
 
 /// `last` (1) or `last:N`. Plain image files aren't editable yet.
@@ -160,6 +172,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Arg::Long("stdout") => o.stdout = true,
             Arg::Long("json") => o.json = true,
             Arg::Long("save-project") => o.save_project = true,
+            Arg::Long("redact") => {
+                o.redact = Some(
+                    match p.value().map_err(err)?.string().map_err(err)?.as_str() {
+                        "suggest" => Redact::Suggest,
+                        "auto" => Redact::Auto,
+                        other => return Err(format!("--redact {other:?}: suggest or auto")),
+                    },
+                )
+            }
             Arg::Short('n') if verb.as_deref() == Some("history") => {
                 history_n = p.value().map_err(err)?.parse().map_err(err)?;
             }
@@ -195,6 +216,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     }
     if pick.output.stdout && pick.output.json {
         return Err("--stdout and --json both claim stdout: pick one".into());
+    }
+    if pick.output.redact == Some(Redact::Suggest)
+        && (pick.no_ui || verb.as_deref() == Some("shot"))
+    {
+        return Err("--redact suggest needs the picker: use --redact auto".into());
     }
     match verb.as_deref() {
         Some("history") => {
@@ -296,6 +322,21 @@ mod tests {
         assert!(cmd("--png-level 12").is_err());
         assert!(cmd("shot all --region all").is_err());
         assert!(cmd("--stdout --json").is_err());
+        assert!(cmd("--redact maybe").is_err());
+        assert!(cmd("shot --redact suggest").is_err());
+        assert!(cmd("--no-ui --redact suggest").is_err());
+    }
+
+    #[test]
+    fn redact() {
+        let Command::Shot(s) = cmd("shot --redact auto").unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.output.redact, Some(Redact::Auto));
+        let Command::Pick(p) = cmd("--redact suggest").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.redact, Some(Redact::Suggest));
     }
 
     #[test]

@@ -1,7 +1,9 @@
 # Auto-redact: censor suggestions from OCR
 
-**Status:** a design scaffold for the Rust port. It is not in the
-prototype. `README.md` (Auto-redact) and `docs/architecture-rust.md`
+**Status:** in the Rust port: `r` in Censor, `--redact suggest|auto`, and
+`"redacted"` in `--json`. Not yet: codes (zbar outlines), the
+OCR-tolerant email, `phone`/`uuid`, `literal`/`custom`, config, prescan
+and the cache. It is not in the prototype. `README.md` (Auto-redact) and `docs/architecture-rust.md`
 (§54–57) take precedence over this page.
 
 Screenshots leak things you didn't notice were in the box:

@@ -25,6 +25,8 @@ pub mod lists;
 pub mod model;
 pub mod ocr;
 pub mod recall;
+pub mod redact;
+pub mod review;
 pub mod script;
 pub mod select;
 pub mod session;

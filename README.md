@@ -440,6 +440,7 @@ Types:
 | `t`                   | Switch censor type                |
 | `+` / `-`             | Adjust the current censor amount  |
 | `x`                   | Lock the censor and begin another |
+| `r`                   | Find secrets (auto-redact)        |
 | common box controls   | Resize / move / scale             |
 | common layer controls | Undo / commit / discard           |
 
@@ -743,41 +744,46 @@ The current Python prototype uses Tesseract.
 
 # Auto-redact
 
-Auto-redact is designed but not yet implemented.
+Auto-redact finds likely secrets in the box and proposes censors over
+them. You review and accept them; it never decides silently, except with
+`--redact auto`.
 
-It performs:
+Press `r` in Censor to scan the box. OCR runs in the background, so the
+picker stays live; the status tag shows `scanning…`, then
+`N found (M ticked)`.
+
+Suggestions draw as dashed boxes, each with its category in a chip.
+Ticked ones preview the black bar they become. The side list shows them
+top to bottom, labels elided (`adi@…`), never whole:
 
 ```text
-OCR word boxes
-    ↓
-detectors
-    ↓
-redaction proposals
-    ↓
-user review / acceptance
-    ↓
-normal Censor operations
+> ✓ email      adi@…
+  ✓ token      ghp_…
+  · entropy    k9Xq…
 ```
 
-Potential detectors include:
+| Input            | Action                                              |
+| ---------------- | --------------------------------------------------- |
+| `[` / `]`        | Select a suggestion (`[` down the list)             |
+| `Space`          | Tick / untick it                                    |
+| `a` / `Enter`    | Accept the ticked ones as black bars, one undo step |
+| `d`              | Drop one                                            |
+| `r`              | Rescan (after moving the box)                       |
+| `Esc`            | Drop the suggestions, back to Censor                |
 
-- email addresses;
-- IP addresses;
-- secrets and tokens;
-- high-entropy strings;
-- URL secrets;
-- payment-card numbers;
-- IBANs;
-- home paths;
-- hostnames;
-- keys;
-- configured literals;
-- custom regular expressions;
-- QR codes.
+Accepted suggestions are ordinary censors from then on, and `u` in Censor
+undoes the acceptance. They need no special project representation.
 
-Proposals are not edits until accepted.
+Detectors: email addresses; IPv4 and IPv6 addresses; MAC addresses;
+known token prefixes (`sk-`, `ghp_`, `glpat-`, `AKIA`, `xox?-`, JWTs);
+long random-looking strings; secret URL parameters (only the value is
+censored); card numbers (Luhn-checked); IBANs (mod-97-checked); your home
+path; your hostname; and private-key blocks (proposed whole).
+Low-confidence matches, such as less random strings, are proposed
+unticked.
 
-Once accepted, they become ordinary censor operations and require no special project representation.
+It is best effort. OCR misses small, stylised, low-contrast and rotated
+text, and text in images.
 
 See `docs/auto-redact.md`.
 

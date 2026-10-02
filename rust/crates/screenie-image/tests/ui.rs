@@ -2,7 +2,7 @@
 //! write the pictures, to look at them.
 
 use screenie_core::geometry::{LogicalPoint, LogicalRect, PixelPoint};
-use screenie_image::ui::{Ui, View};
+use screenie_image::ui::{SuggestionView, Ui, View};
 use screenie_image::{Frame, Image, Picture, Rgb, encode};
 
 const MONS: [LogicalRect; 2] = [
@@ -50,6 +50,7 @@ fn view(top: Vec<String>) -> View {
         status: "SELECT  560×90  (659,259)".into(),
         top,
         monitors: MONS.to_vec(),
+        suggestions: vec![],
     }
 }
 
@@ -432,4 +433,39 @@ fn text_and_callouts_are_drawn_in_the_ink() {
         .filter(|&(x, y)| at(&into, x, y).2 > 200)
         .count();
     assert!(white > 10, "{white}");
+}
+
+#[test]
+fn suggestions_are_dashed_ticked_ones_filled_with_a_chip_each() {
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    v.active = false;
+    v.suggestions = vec![
+        SuggestionView {
+            rect: LogicalRect::new(130.0, 220.0, 150.0, 20.0),
+            category: "email",
+            ticked: true,
+            selected: true,
+        },
+        SuggestionView {
+            rect: LogicalRect::new(400.0, 220.0, 150.0, 20.0),
+            category: "entropy",
+            ticked: false,
+            selected: false,
+        },
+    ];
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    save("suggestions.png", &into);
+    // Ticked: the text shows faintly through the bar; unticked: clear.
+    let ticked = at(&into, 200, 230);
+    assert!(ticked.0 < 60, "{ticked:?}");
+    assert_eq!(at(&into, 470, 230), Rgb(217, 217, 217));
+    // The outline is dashed: along the bottom edge, both lit and unlit runs.
+    let edge: Vec<bool> = (400..550).map(|x| at(&into, x, 240).0 > 230).collect();
+    let lit = edge.iter().filter(|&&b| b).count();
+    assert!(lit > 30 && lit < 120, "{lit} of 150 lit");
+    // A chip above each: chip black over the light block.
+    assert!(at(&into, 131, 210).0 < 30 && at(&into, 401, 210).0 < 30);
 }

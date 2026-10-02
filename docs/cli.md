@@ -175,6 +175,10 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 : Run auto-redact on the box (see `docs/auto-redact.md`). `suggest` opens
   Censor with the suggestions ready to accept. `auto` applies them as they
   are, the only way to use it with `shot` or `--no-ui`, and is best effort.
+  It runs before `--keys`, so scripted keys can review what it found.
+  `--json` lists what was redacted whenever `--redact` is given or a
+  suggestion was accepted, with rects in the shot's logical coordinates
+  (a window's own pixels for `shot active`).
 
 `--select-only`
 : Pick a box and print its geometry, without capturing or delivering

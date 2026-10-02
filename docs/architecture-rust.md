@@ -2353,6 +2353,19 @@ says what was chosen and why. Smaller judgement calls live in
   the box in about a second, the loupe 15→200 px/s (Shift 4→12 widths/s);
   amounts that explicitly repeat (`+`/`-` in tools) follow the keyboard's
   own repeat rate, which the compositor reports.
+- **Analysis jobs go through an `Analyzer`** on the session (§54). The
+  session gives each job an id; the analyzer answers at once (`--keys`,
+  `--no-ui`, `--redact`) or later through `Session::job_done`, from a
+  thread whose results the overlay collects on ticks. A result whose id
+  no mode is waiting for is dropped, which covers rescans and leaving the
+  review. Jobs carry a pixel rect of the committed picture; there's no
+  frame version yet, because the frame never changes within a session.
+  No analysis cache yet (§55): scans are on request.
+- **Auto-redact's suggestions live in a `Redact` mode**, a child of
+  Censor, never in the project (§57). Accepting adds black-bar censors to
+  the open layer as one undo step (`LayerUndo::RemoveMany`). The session
+  remembers which ops were accepted, so `--json` reports only the ones
+  still shown.
 
 ## Platform
 

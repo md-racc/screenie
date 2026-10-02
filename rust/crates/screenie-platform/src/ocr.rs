@@ -55,6 +55,7 @@ pub fn parse_tsv(tsv: &str, map: impl Fn(PixelRect) -> PixelRect) -> OcrResult {
     let mut words = Vec::new();
     let mut text = String::new();
     let mut last: Option<(u32, u32, u32)> = None;
+    let mut line_no: u32 = 0;
     for row in tsv.lines().skip(1) {
         let f: Vec<&str> = row.split('\t').collect();
         if f.len() < 12 || f[0] != "5" {
@@ -68,8 +69,14 @@ pub fn parse_tsv(tsv: &str, map: impl Fn(PixelRect) -> PixelRect) -> OcrResult {
         let (block, par, line) = (n(2) as u32, n(3) as u32, n(4) as u32);
         match last {
             None => {}
-            Some((b, p, _)) if (b, p) != (block, par) => text.push_str("\n\n"),
-            Some((_, _, l)) if l != line => text.push('\n'),
+            Some((b, p, _)) if (b, p) != (block, par) => {
+                text.push_str("\n\n");
+                line_no += 1;
+            }
+            Some((_, _, l)) if l != line => {
+                text.push('\n');
+                line_no += 1;
+            }
             Some(_) => text.push(' '),
         }
         last = Some((block, par, line));
@@ -85,6 +92,7 @@ pub fn parse_tsv(tsv: &str, map: impl Fn(PixelRect) -> PixelRect) -> OcrResult {
             text: word.to_string(),
             bbox,
             confidence,
+            line: line_no,
         });
     }
     OcrResult { text, words }
@@ -111,6 +119,10 @@ mod tests {
         assert_eq!(r.words.len(), 4);
         assert_eq!(r.words[1].bbox, PixelRect::new(122, 60, 20, 6));
         assert_eq!(r.words[0].confidence, Some(96.5));
+        assert_eq!(
+            r.words.iter().map(|w| w.line).collect::<Vec<_>>(),
+            [0, 0, 1, 2]
+        );
     }
 
     #[test]

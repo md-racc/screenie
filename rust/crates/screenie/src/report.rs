@@ -68,6 +68,22 @@ impl Report {
         s
     }
 
+    /// What auto-redact censored: when asked for, or when it did.
+    pub fn redacted(
+        self,
+        out: &crate::cli::Output,
+        what: &[(impl AsRef<str>, LogicalRect)],
+    ) -> Self {
+        if out.redact.is_none() && what.is_empty() {
+            return self;
+        }
+        let list: Vec<Value> = what
+            .iter()
+            .map(|(w, r)| json!({"what": w.as_ref(), "rect": {"x": r.x, "y": r.y, "w": r.w, "h": r.h}}))
+            .collect();
+        self.set("redacted", list)
+    }
+
     pub fn line(&self) -> String {
         Value::Object(self.fields.clone()).to_string()
     }

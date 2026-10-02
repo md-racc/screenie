@@ -135,6 +135,11 @@ pub enum Intent {
     /// `N` in Annotate: set the next callout's number (typed).
     CalloutNumber,
 
+    /// `r` in Censor: scan for secrets (in Redact: rescan).
+    Redact,
+    /// `a` in Redact: accept the ticked suggestions.
+    Accept,
+
     // Text input.
     /// A typed character, taken literally.
     Type(char),

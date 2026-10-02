@@ -79,4 +79,6 @@ pub enum LayerUndo {
     Revert { id: OpId, data: OpData },
     /// Two ops swapped places: swap them back.
     Swap(OpId, OpId),
+    /// Several ops added as one action (accepted suggestions).
+    RemoveMany(Vec<OpId>),
 }

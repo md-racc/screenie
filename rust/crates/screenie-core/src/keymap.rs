@@ -233,6 +233,7 @@ pub static CENSOR: LazyLock<Keymap> = LazyLock::new(|| {
     m.extend(&adjust_keys())
         .extend(&build_tool_keys())
         .bind(Chord::ch('t'), Intent::CycleKind)
+        .bind(Chord::ch('r'), Intent::Redact)
         .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
         .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
         .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
@@ -417,6 +418,19 @@ pub static TEXT: LazyLock<Keymap> = LazyLock::new(|| {
     m
 });
 
+/// Reviewing suggestions: the list keys, `a` (or Enter) accepts the ticked
+/// ones, `r` rescans, Esc drops them.
+pub static REDACT: LazyLock<Keymap> = LazyLock::new(|| {
+    let mut m = list_keys();
+    m.unbind(Chord::ch('<'))
+        .unbind(Chord::ch('>'))
+        .bind(Chord::ch('a'), Intent::Accept)
+        .bind(Chord::ch('r'), Intent::Redact)
+        .bind(Chord::plain(Key::Return), Intent::Confirm)
+        .bind(Chord::plain(Key::Escape), Intent::Back);
+    m
+});
+
 /// Every mode's keymap, by mode name.
 pub fn all() -> Vec<(&'static str, &'static Keymap)> {
     vec![
@@ -430,6 +444,7 @@ pub fn all() -> Vec<(&'static str, &'static Keymap)> {
         ("loupe", &*LOUPE),
         ("enhance", &*ENHANCE),
         ("text", &*TEXT),
+        ("redact", &*REDACT),
     ]
 }
 

@@ -139,6 +139,16 @@ impl Session {
                 self.lock(c.current());
                 return Transition::SwitchTool(self.tool_mode(other));
             }
+            Intent::Redact => {
+                let mut m = crate::review::RedactMode {
+                    suggestions: Vec::new(),
+                    selected: 0,
+                    scanning: None,
+                    failed: None,
+                };
+                self.scan(&mut m);
+                return Transition::Push(crate::session::Mode::Redact(m));
+            }
             Intent::Undo => self.undo_layer(),
             Intent::Confirm => {
                 self.lock(c.current());

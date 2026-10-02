@@ -5,13 +5,13 @@ use screenie_core::geometry::{LogicalRect, PixelRect};
 use screenie_image::ui::{Paint, fill};
 use screenie_image::{Frame, Image, Picture, Rgb, encode};
 
-fn text_image(dark: bool) -> Option<Picture> {
+fn text_image(text: &str, dark: bool) -> Option<Picture> {
     let font = screenie_platform::fonts::monospace()?;
     let font = fontdue::Font::from_bytes(font, fontdue::FontSettings::default()).ok()?;
     let (bg, fg): (u8, u8) = if dark { (30, 220) } else { (240, 20) };
     let mut img = Image::filled(600, 60, Rgb(bg, bg, bg));
     let mut pen = 20.0f32;
-    for c in "The quick brown fox".chars() {
+    for c in text.chars() {
         let (m, cov) = font.rasterize(c, 22.0);
         for y in 0..m.height {
             for x in 0..m.width {
@@ -48,7 +48,9 @@ fn reads_text_and_its_word_boxes_light_or_dark() {
         return;
     }
     for dark in [false, true] {
-        let Some(pic) = text_image(dark) else { return };
+        let Some(pic) = text_image("The quick brown fox", dark) else {
+            return;
+        };
         let rect = LogicalRect::new(0.0, 0.0, 600.0, 60.0);
         let (img, origin, up) = pic.ocr_crop(rect);
         assert_eq!(up, 2);
@@ -67,4 +69,45 @@ fn reads_text_and_its_word_boxes_light_or_dark() {
         assert!(quick.bbox.x > 50 && quick.bbox.x < 150, "{:?}", quick.bbox); // in frame pixels
         assert!(quick.confidence.unwrap() > 50.0);
     }
+}
+
+fn read(pic: &Picture) -> screenie_core::ocr::OcrResult {
+    let (img, origin, up) = pic.ocr_crop(LogicalRect::new(0.0, 0.0, 600.0, 60.0));
+    let png = encode::png(&img, 1).unwrap();
+    let up = up as i32;
+    screenie_platform::ocr::recognize(&png, "eng", |b| {
+        PixelRect::new(origin.x + b.x / up, origin.y + b.y / up, b.w / up, b.h / up)
+    })
+    .unwrap()
+}
+
+#[test]
+fn auto_redact_finds_secrets_in_real_ocr() {
+    if !have_tesseract() {
+        eprintln!("no tesseract: skipped");
+        return;
+    }
+    let Some(pic) = text_image("mail adi@example.org from 10.0.0.12", false) else {
+        return;
+    };
+    let env = screenie_core::redact::Env {
+        user: "adi".into(),
+        home: "/home/adi".into(),
+        hostname: "myhost".into(),
+    };
+    let found = screenie_core::redact::propose(&read(&pic), &env, 0.2);
+    let names: Vec<&str> = found.iter().map(|p| p.category.name()).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(
+        names.contains(&"email") && names.contains(&"ip"),
+        "{names:?}"
+    );
+    // The email's box covers its text and not "mail" before it.
+    let email = found.iter().find(|p| p.category.name() == "email").unwrap();
+    assert!(email.rect.x > 60 && email.rect.x < 100, "{:?}", email.rect);
+    assert!(
+        email.rect.w > 150 && email.rect.y < 25 && email.rect.y + email.rect.h > 40,
+        "{:?}",
+        email.rect
+    );
 }

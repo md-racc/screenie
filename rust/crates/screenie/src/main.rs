@@ -1,5 +1,6 @@
 //! screenie: keyboard-driven screenshots.
 
+mod analysis;
 mod cli;
 mod deliver;
 mod files;
@@ -97,8 +98,23 @@ fn shot_active(out: &cli::Output) -> Result<Report, Failure> {
         .map_err(Failure::capture)?;
     drop(wl);
     let what = format!("{} window", active.class);
+    // The window on its own: one monitor its size, for auto-redact.
+    let rect = LogicalRect::new(0.0, 0.0, f64::from(img.width()), f64::from(img.height()));
+    let layout = Layout::new(
+        vec![screenie_core::layout::Monitor {
+            id: screenie_core::layout::MonitorId(0),
+            name: what.clone(),
+            rect,
+            scale: 1.0,
+        }],
+        vec![],
+        screenie_core::layout::MonitorId(0),
+    );
+    let (picture, _, redacted) = redact_shot(&Frame::new(img, rect), &layout, rect, out)?;
+    let img = picture.crop(rect);
     let d = deliver::image(&img, out, &what, None).map_err(Failure::delivery)?;
     Ok(Report::done("image")
+        .redacted(out, &redacted)
         .set("px", json!({"w": img.width(), "h": img.height()}))
         .set(
             "window",
@@ -106,6 +122,44 @@ fn shot_active(out: &cli::Output) -> Result<Report, Failure> {
         )
         .delivered(&d))
 }
+
+/// `shot --redact auto`: the shot with the ticked suggestions censored,
+/// its project, and what was censored. Without it, the shot as captured.
+fn redact_shot(
+    frame: &Frame,
+    layout: &Layout,
+    rect: LogicalRect,
+    out: &cli::Output,
+) -> Result<RedactedShot, Failure> {
+    let mut picture = Picture::new(frame.clone());
+    if out.redact != Some(cli::Redact::Auto) {
+        return Ok((picture, Project::new(rect), Vec::new()));
+    }
+    let mut s = Session::new(Setup {
+        layout: layout.clone(),
+        pixels: *frame.map(),
+        start: Some(rect),
+        recall: vec![],
+    });
+    s.set_redact_env(screenie_core::redact::Env::from_system());
+    s.set_analyzer(Box::new(analysis::Ocr::inline(
+        Picture::new(frame.clone()),
+        out.ocr_lang(),
+    )));
+    s.start_redact(true)
+        .map_err(|e| Failure::capture(format!("auto-redact: {e}")))?;
+    picture.sync(s.layers(), None, None);
+    let mut project = s.project();
+    project.selection = rect;
+    let redacted = s
+        .redacted()
+        .into_iter()
+        .map(|(w, r)| (w.to_string(), r))
+        .collect();
+    Ok((picture, project, redacted))
+}
+
+type RedactedShot = (Picture, Project, Vec<(String, LogicalRect)>);
 
 fn shot(args: cli::Shot) -> Result<Report, Failure> {
     let spec = args.region.as_deref().unwrap_or("active");
@@ -117,13 +171,14 @@ fn shot(args: cli::Shot) -> Result<Report, Failure> {
     if frame.map().to_pixels(rect).is_empty() {
         return Err(Failure::capture("the region is empty"));
     }
-    let project = Project::new(rect);
+    let (picture, project, redacted) = redact_shot(&frame, &layout, rect, &args.output)?;
     let keep = || project_png(frame.image(), &project, &layout);
-    let d = deliver::image(&frame.crop(rect), &args.output, "Area", Some(&keep))
+    let d = deliver::image(&picture.crop(rect), &args.output, "Area", Some(&keep))
         .map_err(Failure::delivery)?;
     Ok(Report::done("image")
         .rect(rect, &layout)
         .px(frame.map().to_pixels(rect))
+        .redacted(&args.output, &redacted)
         .delivered(&d))
 }
 
@@ -215,6 +270,18 @@ fn run_picker(
         frame.clone(),
     )));
     session.set_code_reader(Box::new(picker::Codes(Picture::new(frame.clone()))));
+    session.set_redact_env(screenie_core::redact::Env::from_system());
+    let lang = args.output.ocr_lang();
+    // Scripted keys wait for each scan; the overlay doesn't.
+    session.set_analyzer(Box::new(analysis::Ocr::inline(
+        Picture::new(frame.clone()),
+        lang.clone(),
+    )));
+    if let Some(how) = args.output.redact {
+        session
+            .start_redact(how == cli::Redact::Auto)
+            .map_err(|e| Failure::capture(format!("auto-redact: {e}")))?;
+    }
     if let Some(keys) = &args.keys {
         session
             .play(keys, 0.0)
@@ -226,7 +293,10 @@ fn run_picker(
         }
         let font = font.ok_or_else(|| Failure::capture("no monospace font found"))?;
         let ui = Ui::new(&font).map_err(Failure::capture)?;
+        let (ocr, jobs) = analysis::Ocr::threaded(Picture::new(frame.clone()), lang);
+        session.set_analyzer(Box::new(ocr));
         let mut app = picker::Picker::new(session, Picture::new(frame), ui);
+        app.take_jobs(jobs);
         wl.run_overlay(&layout, &mut app, deadline())
             .map_err(Failure::capture)?;
         drop(wl);
@@ -237,6 +307,7 @@ fn run_picker(
             &app.picture,
             &args.output,
             &project,
+            &app.session.redacted(),
         );
     }
     drop(wl);
@@ -249,6 +320,7 @@ fn run_picker(
         &picture,
         &args.output,
         &project,
+        &session.redacted(),
     )
 }
 
@@ -304,6 +376,7 @@ fn finish(
     picture: &Picture,
     out: &cli::Output,
     project: &Project,
+    redacted: &[(&str, LogicalRect)],
 ) -> Result<Report, Failure> {
     let layers = &project.layers;
     let Some(Outcome::Done(action)) = outcome else {
@@ -327,6 +400,7 @@ fn finish(
                 .rect(rect, layout)
                 .px(picture.committed().map().to_pixels(rect))
                 .set("layers", described)
+                .redacted(out, redacted)
                 .delivered(&d)
         }
         FinishedAction::Colour { pixel } => {
@@ -382,18 +456,9 @@ fn finish(
 
 /// OCR a box: the text, empty if none was found.
 fn ocr(picture: &Picture, rect: LogicalRect, out: &cli::Output) -> Result<String, Failure> {
-    let (img, origin, up) = picture.ocr_crop(rect);
-    let png = screenie_image::encode::png(&img, 1).map_err(|e| Failure::delivery(e.to_string()))?;
-    let up = up as i32;
-    let result = screenie_platform::ocr::recognize(&png, &out.ocr_lang(), |b| {
-        screenie_core::geometry::PixelRect::new(
-            origin.x + b.x / up,
-            origin.y + b.y / up,
-            b.w / up,
-            b.h / up,
-        )
-    })
-    .map_err(|e| {
+    let r = picture.committed().map().to_pixels(rect);
+    let crop = analysis::Crop::of(picture, r).map_err(Failure::delivery)?;
+    let result = crop.recognize(&out.ocr_lang()).map_err(|e| {
         if deliver::notifies(out) {
             notify("OCR failed", &e);
         }

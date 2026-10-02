@@ -62,6 +62,7 @@ pub const SELECT: &[&[Item]] = &[
 pub const CENSOR: &[&[Item]] = &[
     &[
         ("pixelate/bar", &[Intent::CycleKind]),
+        ("find secrets", &[Intent::Redact]),
         ("amount", &[Intent::Adjust(1), Intent::Adjust(-1)]),
         ("next", &[Intent::Tool(Tool::Censor)]),
         ("annotate", &[Intent::Tool(Tool::Annotate)]),
@@ -305,6 +306,15 @@ pub const TEXT: &[&[Item]] = &[
     ],
 ];
 
+pub const REDACT: &[&[Item]] = &[&[
+    ("select", &[Intent::ListStep(-1), Intent::ListStep(1)]),
+    ("tick", &[Intent::ListToggle]),
+    ("drop", &[Intent::ListDelete]),
+    ("accept ticked", &[Intent::Accept, Intent::Confirm]),
+    ("rescan", &[Intent::Redact]),
+    ("back", &[Intent::Back]),
+]];
+
 /// The lines of a legend, with each item's keys looked up in `map` (then
 /// the session keys). An item listing intents none of which is bound is
 /// left out; one listing none is a plain note.
@@ -376,6 +386,7 @@ mod tests {
                 "loupe" => LOUPE,
                 "enhance" => ENHANCE,
                 "text" => TEXT,
+                "redact" => REDACT,
                 _ => continue,
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {

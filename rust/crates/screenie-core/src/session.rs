@@ -14,6 +14,7 @@ use crate::anchor_cursor::AnchorCursor;
 use crate::annotate::{AnnotateMode, DEFAULT_INK, Ink, ShapeMode, WIDTH};
 use crate::censor::CensorMode;
 use crate::filter::FilterMode;
+use crate::geometry::PixelRect;
 use crate::geometry::{Axis, End, LogicalPoint, LogicalRect, PixelMap, PixelPoint};
 use crate::history::{LayerUndo, ProjectEntry, ProjectHistory};
 use crate::input::{InputState, Press};
@@ -25,6 +26,7 @@ use crate::layers::LayersMode;
 use crate::layout::Layout;
 use crate::lens::{EnhanceMode, LoupeMode, View};
 use crate::model::{Layer, Op, OpData, OpId, Project};
+use crate::review::RedactMode;
 use crate::select::SelectState;
 use crate::targets::SnapEnv;
 use crate::text::TextMode;
@@ -137,6 +139,26 @@ pub enum Mode {
     Enhance(EnhanceMode),
     /// Text input: letters are literal until Enter or Esc.
     Text(TextMode),
+    /// Reviewing auto-redact's suggestions (a child of Censor).
+    Redact(RedactMode),
+}
+
+/// An analysis to run off the input path (OCR, later edge detection).
+#[derive(Clone, Debug, PartialEq)]
+pub enum JobKind {
+    /// OCR with word boxes over a rect of the committed picture.
+    Ocr { rect: PixelRect },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum JobResult {
+    Ocr(Result<crate::ocr::OcrResult, String>),
+}
+
+/// Runs analysis jobs for the session. It may answer at once (`Some`), or
+/// later, through `Session::job_done` with the same id.
+pub trait Analyzer {
+    fn start(&mut self, session: &Session, id: u64, job: JobKind) -> Option<JobResult>;
 }
 
 /// What a temporary child hands back to the mode below when it closes.
@@ -171,6 +193,7 @@ impl Mode {
             Mode::Loupe(_) => "loupe",
             Mode::Enhance(_) => "enhance",
             Mode::Text(_) => "text",
+            Mode::Redact(_) => "redact",
         }
     }
 
@@ -185,7 +208,8 @@ impl Mode {
             | Mode::Insert(_)
             | Mode::Loupe(_)
             | Mode::Enhance(_)
-            | Mode::Text(_) => None,
+            | Mode::Text(_)
+            | Mode::Redact(_) => None,
         }
     }
 
@@ -273,6 +297,11 @@ pub struct Session {
     pub(crate) loupe_px: i32,
     sampler: Option<Box<dyn Sampler>>,
     code_reader: Option<Box<dyn CodeReader>>,
+    analyzer: Option<Box<dyn Analyzer>>,
+    next_job: u64,
+    pub(crate) redact_env: crate::redact::Env,
+    /// Suggestions accepted as censors: category and where (for --json).
+    pub(crate) redacted: Vec<(crate::model::OpId, &'static str, LogicalRect)>,
     stack: Vec<Mode>,
     pending: Option<Pending>,
     input: InputState,
@@ -320,6 +349,10 @@ impl Session {
             loupe_px: crate::lens::SIZE,
             sampler: None,
             code_reader: None,
+            analyzer: None,
+            next_job: 1,
+            redact_env: crate::redact::Env::default(),
+            redacted: Vec::new(),
             stack: Vec::new(),
             pending: None,
             show_help: false,
@@ -338,6 +371,64 @@ impl Session {
     /// Give the session a way to read the picture (the eyedropper).
     pub fn set_sampler(&mut self, sampler: Box<dyn Sampler>) {
         self.sampler = Some(sampler);
+    }
+
+    /// Give the session a way to run analysis (auto-redact's OCR).
+    pub fn set_analyzer(&mut self, analyzer: Box<dyn Analyzer>) {
+        self.analyzer = Some(analyzer);
+    }
+
+    /// What auto-redact knows of this machine (user, home, hostname).
+    pub fn set_redact_env(&mut self, env: crate::redact::Env) {
+        self.redact_env = env;
+    }
+
+    /// Suggestions accepted as censors and still shown: category and rect.
+    pub fn redacted(&self) -> Vec<(&'static str, LogicalRect)> {
+        let shown = |id| {
+            self.project
+                .layers
+                .iter()
+                .filter(|l| !l.hidden)
+                .chain(self.open_layer())
+                .any(|l| l.ops.iter().any(|o| o.id == id))
+        };
+        self.redacted
+            .iter()
+            .filter(|(id, ..)| shown(*id))
+            .map(|&(_, what, rect)| (what, rect))
+            .collect()
+    }
+
+    /// The suggestions under review, if Redact is on the stack.
+    pub fn suggestions(&self) -> Option<(&[crate::review::Suggestion], usize)> {
+        self.stack.iter().rev().find_map(|m| match m {
+            Mode::Redact(r) => Some((r.suggestions.as_slice(), r.selected)),
+            _ => None,
+        })
+    }
+
+    /// Whether an analysis job is in flight (the host should keep polling).
+    pub fn jobs_pending(&self) -> bool {
+        self.stack
+            .iter()
+            .any(|m| matches!(m, Mode::Redact(r) if r.scanning.is_some()))
+    }
+
+    pub(crate) fn stack_mut(&mut self) -> &mut Vec<Mode> {
+        &mut self.stack
+    }
+
+    /// Start a job: its id, and its result if the analyzer answered at once.
+    pub(crate) fn start_job(&mut self, job: JobKind) -> (u64, Option<JobResult>) {
+        let id = self.next_job;
+        self.next_job += 1;
+        let Some(mut a) = self.analyzer.take() else {
+            return (id, Some(JobResult::Ocr(Err("no OCR available".into()))));
+        };
+        let r = a.start(self, id, job);
+        self.analyzer = Some(a);
+        (id, r)
     }
 
     /// Give the session a way to read codes (`Q`).
@@ -484,9 +575,9 @@ impl Session {
         self.show_help
     }
 
-    /// Whether held keys need `tick` calls.
+    /// Whether held keys (or a job in flight) need `tick` calls.
     pub fn wants_ticks(&self) -> bool {
-        self.input.repeating()
+        self.input.repeating() || self.jobs_pending()
     }
 
     /// The pointer's last position.
@@ -549,6 +640,7 @@ impl Session {
             Some(Mode::Layers(m)) => s.push_str(&format!("  {}", self.layers_status(m))),
             Some(Mode::Insert(m)) => s.push_str(&format!("  step {}px", m.step)),
             Some(Mode::Text(t)) => s.push_str(&format!("  {}", self.text_status(t))),
+            Some(Mode::Redact(r)) => s.push_str(&format!("  {}", self.redact_status(r))),
             Some(Mode::Loupe(_)) => {
                 s.push_str(&format!("  {}px{}", self.loupe_px, self.view_tag()))
             }
@@ -587,6 +679,7 @@ impl Session {
             Some(Mode::Layers(_)) => &keymap::LAYERS,
             Some(Mode::Insert(_)) => &keymap::INSERT,
             Some(Mode::Text(_)) => &keymap::TEXT,
+            Some(Mode::Redact(_)) => &keymap::REDACT,
             Some(Mode::Loupe(_)) => &keymap::LOUPE,
             Some(Mode::Enhance(_)) => &keymap::ENHANCE,
         }
@@ -603,6 +696,7 @@ impl Session {
             Some(Mode::Layers(_)) => crate::legend::LAYERS,
             Some(Mode::Insert(_)) => crate::legend::INSERT,
             Some(Mode::Text(_)) => crate::legend::TEXT,
+            Some(Mode::Redact(_)) => crate::legend::REDACT,
             Some(Mode::Loupe(_)) => crate::legend::LOUPE,
             Some(Mode::Enhance(_)) => crate::legend::ENHANCE,
         };
@@ -617,6 +711,7 @@ impl Session {
             .filter_map(|m| match m {
                 Mode::Filter(f) => Some(self.filter_list(f)),
                 Mode::Layers(m) => Some(self.layers_list(m)),
+                Mode::Redact(r) => Some(self.redact_list(r)),
                 _ => None,
             })
             .collect()
@@ -821,6 +916,7 @@ impl Session {
                     Mode::Loupe(m) => self.loupe_intent(m, intent),
                     Mode::Enhance(m) => self.enhance_intent(m, intent),
                     Mode::Text(t) => self.text_intent(t, intent),
+                    Mode::Redact(r) => self.redact_intent(r, intent),
                 };
                 self.stack.push(mode);
                 t
@@ -829,7 +925,7 @@ impl Session {
         self.apply(t);
     }
 
-    fn apply(&mut self, t: Transition) {
+    pub(crate) fn apply(&mut self, t: Transition) {
         match t {
             Transition::Stay => {}
             Transition::OpenTool(mode) => {
@@ -968,6 +1064,15 @@ impl Session {
         self.pending = None;
     }
 
+    /// Fold the last `n` log entries into one.
+    pub(crate) fn merge_layer_log(&mut self, n: usize, entry: LayerUndo) {
+        if let Some(open) = &mut self.open {
+            let keep = open.log.len().saturating_sub(n);
+            open.log.truncate(keep);
+            open.log.push(entry);
+        }
+    }
+
     pub(crate) fn layer_log_len(&self) -> usize {
         self.open.as_ref().map_or(0, |o| o.log.len())
     }
@@ -986,6 +1091,7 @@ impl Session {
                     o.data = data;
                 }
             }
+            Some(LayerUndo::RemoveMany(ids)) => ops.retain(|o| !ids.contains(&o.id)),
             Some(LayerUndo::Swap(a, b)) => {
                 let i = ops.iter().position(|o| o.id == a);
                 let j = ops.iter().position(|o| o.id == b);

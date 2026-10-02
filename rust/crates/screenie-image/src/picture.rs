@@ -266,7 +266,11 @@ impl Picture {
     /// doubled when the frame is under 1.5x (screen text is small). Also
     /// returns the crop's origin and its upscale, to map word boxes back.
     pub fn ocr_crop(&self, rect: LogicalRect) -> (Image, PixelPoint, u32) {
-        let r = self.committed.map().to_pixels(rect);
+        self.ocr_crop_pixels(self.committed.map().to_pixels(rect))
+    }
+
+    /// `ocr_crop` of a rect of the picture's pixels.
+    pub fn ocr_crop_pixels(&self, r: PixelRect) -> (Image, PixelPoint, u32) {
         let mut img = self.committed.image().crop(r);
         crate::view::apply(&mut img, screenie_core::lens::ViewFilter::Grey);
         if crate::view::is_dark(&img) {

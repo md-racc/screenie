@@ -44,6 +44,17 @@ pub struct View {
     pub filter: ViewFilter,
     /// Every monitor's rectangle (tags stay on one).
     pub monitors: Vec<LogicalRect>,
+    /// Auto-redact's suggestions under review.
+    pub suggestions: Vec<SuggestionView>,
+}
+
+/// A suggestion as drawn: dashed, filled when ticked, with its category.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestionView {
+    pub rect: LogicalRect,
+    pub category: &'static str,
+    pub ticked: bool,
+    pub selected: bool,
 }
 
 impl View {
@@ -70,6 +81,20 @@ impl View {
             enhance: None,
             filter: s.view().filter,
             monitors: s.layout().monitor_rects(),
+            suggestions: s
+                .suggestions()
+                .map(|(list, sel)| {
+                    list.iter()
+                        .enumerate()
+                        .map(|(i, x)| SuggestionView {
+                            rect: x.rect,
+                            category: x.category.name(),
+                            ticked: x.ticked,
+                            selected: i == sel,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         let mut v = v;
         v.pixel_cursor = s.pen_point(); // the keyboard pen's point
@@ -339,6 +364,36 @@ impl Ui {
             outline(into, dev(bx.rect), t, Paint::rgba(1.0, 1.0, 1.0, 0.9));
             if bx.active {
                 marker(into, bx.cursor);
+            }
+        }
+
+        for x in &view.suggestions {
+            let d = dev(x.rect);
+            if x.ticked {
+                // A preview of the black bar it becomes, the text faintly through.
+                fill(into, d, Paint::rgba(0.0, 0.0, 0.0, 0.8));
+            }
+            let (th, a) = if x.selected {
+                (t, 1.0)
+            } else {
+                (rnd(s).max(1), 0.7)
+            };
+            dashed(
+                into,
+                d,
+                th,
+                rnd(6.0 * s).max(2),
+                Paint::rgba(1.0, 1.0, 1.0, a),
+            );
+        }
+        for x in &view.suggestions {
+            let cw = self.chip_width(x.category);
+            let mut cx = x.rect.x.max(monitor.x);
+            if cx + cw > monitor.right() {
+                cx = monitor.right() - cw;
+            }
+            if x.rect.intersects(&monitor) {
+                self.chip(into, monitor, s, cx, x.rect.y - 2.0, x.category);
             }
         }
 
@@ -651,6 +706,25 @@ fn outline(into: &mut Image, b: PixelRect, t: i32, paint: Paint) {
         PixelRect::new(b.x + b.w, b.y, t, b.h),
     ] {
         fill(into, r, paint);
+    }
+}
+
+/// A dashed `t`-pixel outline just outside `b`, dashes `dash` long.
+fn dashed(into: &mut Image, b: PixelRect, t: i32, dash: i32, paint: Paint) {
+    let (x0, y0, x1, y1) = (b.x - t, b.y - t, b.x + b.w + t, b.y + b.h + t);
+    let mut x = x0;
+    while x < x1 {
+        let w = dash.min(x1 - x);
+        fill(into, PixelRect::new(x, y0, w, t), paint);
+        fill(into, PixelRect::new(x, y1 - t, w, t), paint);
+        x += 2 * dash;
+    }
+    let mut y = y0 + t;
+    while y < y1 - t {
+        let h = dash.min(y1 - t - y);
+        fill(into, PixelRect::new(x0, y, t, h), paint);
+        fill(into, PixelRect::new(x1 - t, y, t, h), paint);
+        y += 2 * dash;
     }
 }
 

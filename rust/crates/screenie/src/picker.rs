@@ -1,7 +1,9 @@
 //! The interactive picker: a session on the overlays.
 
 use screenie_core::geometry::LogicalRect;
-use screenie_core::session::{RawEvent, Session};
+use std::sync::mpsc::Receiver;
+
+use screenie_core::session::{JobResult, RawEvent, Session};
 use screenie_image::ui::{Ui, View};
 use screenie_image::{Image, Picture};
 use screenie_platform::wayland::OverlayApp;
@@ -11,6 +13,8 @@ pub struct Picker {
     pub picture: Picture,
     pub ui: Ui,
     monitors: Vec<LogicalRect>,
+    /// Finished analysis jobs, from the analyzer's threads.
+    jobs: Option<Receiver<(u64, JobResult)>>,
 }
 
 impl Picker {
@@ -21,9 +25,15 @@ impl Picker {
             picture,
             ui,
             monitors,
+            jobs: None,
         };
         p.sync();
         p
+    }
+
+    /// Collect analysis results from here (see `analysis::Ocr::threaded`).
+    pub fn take_jobs(&mut self, jobs: Receiver<(u64, JobResult)>) {
+        self.jobs = Some(jobs);
     }
 
     /// Bring the picture up to date with the session.
@@ -54,7 +64,13 @@ impl OverlayApp for Picker {
     }
 
     fn tick(&mut self, now: f64) -> bool {
-        let moved = self.session.tick(now);
+        let mut moved = self.session.tick(now);
+        if let Some(jobs) = &self.jobs {
+            for (id, result) in jobs.try_iter() {
+                self.session.job_done(id, result);
+                moved = true;
+            }
+        }
         if moved {
             self.sync();
         }
