@@ -397,6 +397,217 @@ pub fn find_edge(
     None
 }
 
+/// How far (grey levels) a pixel can be from where a flood started and
+/// still be part of its region.
+pub const FLOOD_TOLERANCE: f64 = 40.0;
+
+/// Measure's area by a click inside: flood out from `seed` over pixels
+/// whose grey is within `FLOOD_TOLERANCE` of its own, stopped by `walls`
+/// (drawn measurements, as segments) and kept to `bounds`. The region's
+/// outer outline, holes and all, simplified to within half a pixel; an error
+/// if it isn't closed in (it reaches `bounds`' edge).
+pub fn flood_region(
+    rgb: impl Fn(PixelPoint) -> Option<Rgb>,
+    seed: PixelPoint,
+    bounds: PixelRect,
+    walls: &[(PixelPoint, PixelPoint)],
+) -> Result<Vec<PixelPoint>, String> {
+    let (bx, by, bw, bh) = (bounds.x, bounds.y, bounds.w, bounds.h);
+    let inside = |q: PixelPoint| q.x >= bx && q.y >= by && q.x < bx + bw && q.y < by + bh;
+    if !inside(seed) {
+        return Err("outside the monitor".into());
+    }
+    let ix = |q: PixelPoint| ((q.y - by) * bw + (q.x - bx)) as usize;
+    const WALL: u8 = 1;
+    const IN: u8 = 2;
+    let mut mask = vec![0u8; (bw * bh) as usize];
+    // Walls: 8-connected lines, which a 4-connected flood can't cross.
+    for &(a, b) in walls {
+        let (mut x, mut y) = (a.x, a.y);
+        let (dx, dy) = ((b.x - a.x).abs(), -(b.y - a.y).abs());
+        let (sx, sy) = ((b.x - a.x).signum(), (b.y - a.y).signum());
+        let mut err = dx + dy;
+        loop {
+            let q = PixelPoint::new(x, y);
+            if inside(q) {
+                mask[ix(q)] = WALL;
+            }
+            if x == b.x && y == b.y {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+    let grey = |q: PixelPoint| {
+        rgb(q).map(|c| 0.299 * f64::from(c.0) + 0.587 * f64::from(c.1) + 0.114 * f64::from(c.2))
+    };
+    if mask[ix(seed)] == WALL {
+        return Err("that's on a line: click inside".into());
+    }
+    let g0 = grey(seed).ok_or("no picture there")?;
+    mask[ix(seed)] = IN;
+    let mut todo = vec![seed];
+    let mut first = seed; // the top-left-most, to trace from
+    while let Some(q) = todo.pop() {
+        if (q.y, q.x) < (first.y, first.x) {
+            first = q;
+        }
+        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+            let n = PixelPoint::new(q.x + dx, q.y + dy);
+            if !inside(n) {
+                return Err("not closed in: draw lines to close it".into());
+            }
+            let k = ix(n);
+            if mask[k] != 0 {
+                continue;
+            }
+            if grey(n).is_some_and(|g| (g - g0).abs() <= FLOOD_TOLERANCE) {
+                mask[k] = IN;
+                todo.push(n);
+            }
+        }
+    }
+    // Drawn walls the region touches are its edge, so it measures to the
+    // lines (not the pixels just inside them).
+    const EDGE: u8 = 3;
+    for y in by..by + bh {
+        for x in bx..bx + bw {
+            let q = PixelPoint::new(x, y);
+            // (diagonally too: a corner of the walls is on the edge)
+            let around = [
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (1, -1),
+                (-1, 1),
+                (-1, -1),
+            ];
+            let touches = around.iter().any(|&(dx, dy)| {
+                let n = PixelPoint::new(x + dx, y + dy);
+                inside(n) && mask[ix(n)] == IN
+            });
+            if mask[ix(q)] == WALL && touches {
+                mask[ix(q)] = EDGE;
+            }
+        }
+    }
+    let filled = |q: PixelPoint| inside(q) && matches!(mask[ix(q)], IN | EDGE);
+    let first = (by..by + bh)
+        .flat_map(|y| (bx..bx + bw).map(move |x| PixelPoint::new(x, y)))
+        .find(|&q| filled(q))
+        .unwrap_or(first);
+    // Within half a pixel: smooths a staircase, keeps a real edge.
+    Ok(simplify_ring(&trace_outline(first, filled), 0.5))
+}
+
+/// The outer boundary of an 8-connected region, clockwise on screen, by
+/// Moore-neighbour tracing from its top-left-most pixel.
+fn trace_outline(start: PixelPoint, filled: impl Fn(PixelPoint) -> bool) -> Vec<PixelPoint> {
+    const RING: [(i32, i32); 8] = [
+        (1, 0),
+        (1, 1),
+        (0, 1),
+        (-1, 1),
+        (-1, 0),
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+    ];
+    let at = |p: PixelPoint, i: usize| PixelPoint::new(p.x + RING[i].0, p.y + RING[i].1);
+    let index = |p: PixelPoint, q: PixelPoint| {
+        RING.iter()
+            .position(|&(dx, dy)| (q.x - p.x, q.y - p.y) == (dx, dy))
+            .expect("neighbours")
+    };
+    let mut out = vec![start];
+    let (mut p, mut b) = (start, at(start, 4)); // came from the west: never filled
+    let first_b = b;
+    // A safety net: no boundary is longer than four times the region.
+    for _ in 0..16_000_000 {
+        let ib = index(p, b);
+        let mut next = None;
+        for k in 1..=8 {
+            let c = at(p, (ib + k) % 8);
+            if filled(c) {
+                next = Some((c, at(p, (ib + k - 1) % 8)));
+                break;
+            }
+        }
+        let Some((c, prev)) = next else {
+            break; // a single pixel
+        };
+        // Jacob's stop: back at the start, entered the way it first left
+        // (a region through its start twice goes on round).
+        if c == start && prev == first_b {
+            break;
+        }
+        out.push(c);
+        p = c;
+        b = prev;
+    }
+    out
+}
+
+/// A closed ring with points dropped while it stays within `eps` of the
+/// original (Douglas-Peucker, split at the point farthest from the first).
+fn simplify_ring(ring: &[PixelPoint], eps: f64) -> Vec<PixelPoint> {
+    fn dp(pts: &[PixelPoint], eps: f64, out: &mut Vec<PixelPoint>) {
+        let (a, b) = (pts[0], pts[pts.len() - 1]);
+        let (ax, ay, bx, by) = (
+            f64::from(a.x),
+            f64::from(a.y),
+            f64::from(b.x),
+            f64::from(b.y),
+        );
+        let len = (bx - ax).hypot(by - ay);
+        let d = |q: &PixelPoint| {
+            let (qx, qy) = (f64::from(q.x), f64::from(q.y));
+            if len == 0.0 {
+                (qx - ax).hypot(qy - ay)
+            } else {
+                ((bx - ax) * (ay - qy) - (ax - qx) * (by - ay)).abs() / len
+            }
+        };
+        let (k, far) = pts
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(pts.len().saturating_sub(2))
+            .map(|(i, q)| (i, d(q)))
+            .fold((0, 0.0), |m, x| if x.1 > m.1 { x } else { m });
+        if far > eps {
+            dp(&pts[..=k], eps, out);
+            dp(&pts[k..], eps, out);
+        } else {
+            out.push(a);
+        }
+    }
+    if ring.len() < 4 {
+        return ring.to_vec();
+    }
+    // Split at the point farthest from the first, so both halves are open.
+    let f = ring[0];
+    let far = (1..ring.len())
+        .max_by_key(|&i| (ring[i].x - f.x).pow(2) + (ring[i].y - f.y).pow(2))
+        .expect("points");
+    let mut out = Vec::new();
+    dp(&ring[..=far], eps, &mut out);
+    let mut back: Vec<PixelPoint> = ring[far..].to_vec();
+    back.push(ring[0]);
+    dp(&back, eps, &mut out);
+    out
+}
+
 /// Measure's edges, over the committed picture.
 pub struct PictureEdges(Picture);
 
@@ -417,6 +628,18 @@ impl screenie_core::measure::EdgeFinder for PictureEdges {
         self.0.sync(s.layers(), None, None);
         let pic = &self.0;
         find_edge(|q| pic.rgb(q), from, d, bounds)
+    }
+
+    fn region(
+        &mut self,
+        s: &screenie_core::session::Session,
+        seed: PixelPoint,
+        bounds: PixelRect,
+        walls: &[(PixelPoint, PixelPoint)],
+    ) -> Result<Vec<PixelPoint>, String> {
+        self.0.sync(s.layers(), None, None);
+        let pic = &self.0;
+        flood_region(|q| pic.rgb(q), seed, bounds, walls)
     }
 }
 
@@ -530,6 +753,85 @@ mod tests {
         let mut p = picture();
         p.sync(&[], Some(open), None);
         p.open_patch().unwrap().1.data().to_vec()
+    }
+
+    fn shoelace(pts: &[PixelPoint]) -> f64 {
+        let n = pts.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (pts[i], pts[(i + 1) % n]);
+                f64::from(a.x * b.y - b.x * a.y)
+            })
+            .sum::<f64>()
+            .abs()
+            / 2.0
+    }
+
+    /// A dark 100x60 picture with light rectangles painted in.
+    fn plan(rects: &[(i32, i32, i32, i32, u8)]) -> Image {
+        let mut img = Image::filled(100, 60, Rgb(20, 20, 20));
+        for &(x0, y0, w, h, v) in rects {
+            for y in y0..y0 + h {
+                for x in x0..x0 + w {
+                    let i = ((y * 100 + x) * 4) as usize;
+                    img.data_mut()[i..i + 3].copy_from_slice(&[v, v, v]);
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn a_flood_finds_the_region_and_its_outline() {
+        let img = plan(&[(20, 10, 40, 30, 230)]);
+        let all = PixelRect::new(0, 0, 100, 60);
+        let out = flood_region(|q| img.rgb(q), PixelPoint::new(40, 25), all, &[]).unwrap();
+        // Pixel centres round a 40x30 block: 39 by 29, four corners.
+        assert_eq!(out.len(), 4, "{out:?}");
+        assert_eq!(shoelace(&out), 39.0 * 29.0);
+        // An L: six corners.
+        let img = plan(&[(20, 10, 40, 30, 230), (20, 40, 10, 10, 230)]);
+        let out = flood_region(|q| img.rgb(q), PixelPoint::new(40, 25), all, &[]).unwrap();
+        // Six corners, and a half-pixel step across the inside one (the
+        // outline runs through pixel centres).
+        assert_eq!(out.len(), 7, "{out:?}");
+        assert_eq!(shoelace(&out), 39.0 * 29.0 + 9.0 * 10.0 + 0.5);
+        // A hole (furniture in a room) is inside the outline, not cut out.
+        let img = plan(&[(20, 10, 40, 30, 230), (35, 20, 5, 5, 20)]);
+        let out = flood_region(|q| img.rgb(q), PixelPoint::new(25, 15), all, &[]).unwrap();
+        assert_eq!(shoelace(&out), 39.0 * 29.0);
+    }
+
+    #[test]
+    fn drawn_lines_close_a_region_and_open_ones_are_refused() {
+        let all = PixelRect::new(0, 0, 100, 60);
+        let img = plan(&[]);
+        let rgb = |q| img.rgb(q);
+        let p = PixelPoint::new;
+        // A closed path drawn on a flat picture: its inside.
+        let walls = [
+            (p(10, 10), p(50, 10)),
+            (p(50, 10), p(50, 40)),
+            (p(50, 40), p(10, 40)),
+            (p(10, 40), p(10, 10)),
+        ];
+        let out = flood_region(rgb, p(30, 25), all, &walls).unwrap();
+        assert_eq!(shoelace(&out), 40.0 * 30.0); // to the lines drawn
+        // Open: refused, and saying why.
+        let err = flood_region(rgb, p(30, 25), all, &walls[..3]).unwrap_err();
+        assert!(err.contains("not closed in"), "{err}");
+        // A room with a doorway, closed by a drawn line across it.
+        let room = plan(&[(20, 10, 40, 30, 230), (59, 20, 41, 6, 230)]);
+        let rgb = |q| room.rgb(q);
+        assert!(
+            flood_region(rgb, p(40, 25), all, &[]).is_err(),
+            "out the door"
+        );
+        let door = [(p(59, 18), p(59, 28))];
+        let out = flood_region(rgb, p(40, 25), all, &door).unwrap();
+        assert_eq!(shoelace(&out), 39.0 * 29.0); // the room's pixels, to the door's line
+        // On a line: refused.
+        assert!(flood_region(rgb, p(59, 22), all, &door).is_err());
     }
 
     #[test]

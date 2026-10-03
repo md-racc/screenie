@@ -204,6 +204,7 @@ Palettes are always visible when a mode has directly selectable kinds. The full 
 | **Lens**            | Loupe, Enhance                  | Change how the frozen image is viewed | Never             |
 | **Build**           | Censor, Annotate, Shape, Filter | Add operations to the open layer      | When committed    |
 | **Manage**          | Layers                          | Inspect and modify committed layers   | Yes               |
+| **Measure**         | Measure                         | Measure the frozen picture            | Never             |
 | **Temporary input** | Text entry and similar children | Collect a value or temporary geometry | Only if confirmed |
 | **Finish**          | image, OCR, colour, QR, pin     | Produce an output                     | —                 |
 
@@ -381,12 +382,15 @@ The magnifier is positioned like a tag and stays on the cursor's monitor.
 | `+` / `-`             | Change loupe size                       |
 | `v` / `V`             | Change view filter                      |
 | click / drag          | Place or move the cursor                |
+| `Space` / `Shift+Space` | Over Measure: drop a point (a path's) at the loupe's pixel, exactly, and stay |
 | `p`                   | Copy pixel colour                       |
 | `e`                   | Enhance at the loupe position           |
 | `x a f`               | Open a build tool at the loupe position |
 | `z` / `Enter` / `Esc` | Close Loupe                             |
 
 When Loupe closes, its parent may adopt the loupe position.
+
+The loupe remembers its last pixel for the rest of the run (it isn't saved). From Select, `z` reopens it there, clamped into the box if the box has changed, and Annotate's shapes start there.
 
 Loupe never modifies image pixels.
 
@@ -515,6 +519,9 @@ The default is red.
 | Input          | Action                                       |
 | -------------- | -------------------------------------------- |
 | drag           | Draw a freehand pen stroke                   |
+| `Shift`+drag   | Hold the line straight                       |
+| `Ctrl`+drag    | Hold the line as an arc                      |
+| `Ctrl`+`+`/`-`, `Ctrl`+wheel | Arc bulge, 2px a step (below 0: the other side) |
 | `h j k l`      | Move the pen point (`Shift`: a larger step)  |
 | `Space`        | Pen down / up (up locks the stroke)          |
 | `1`–`5`        | Choose colour                                |
@@ -523,7 +530,6 @@ The default is red.
 | `m`            | Highlighter on / off                         |
 | `r`            | Rectangle                                    |
 | `c`            | Circle                                       |
-| `s`            | Straight line                                |
 | `v`            | Arrow                                        |
 | `i`            | Text                                         |
 | `n`            | Numbered callout at the pen                  |
@@ -533,11 +539,15 @@ The default is red.
 
 The pen works with the mouse or the keyboard: the keyboard moves a pen point, drawn as the pixel cursor, and `Space` puts the pen down and lifts it.
 
+While drawing with the mouse, holding `Shift` holds the piece from where it was pressed straight to the pointer, and holding `Ctrl` holds it as an arc over that chord. The arc's bulge is its height off the chord: it starts at 24px, `Ctrl`+`+`/`-` or `Ctrl`+wheel change it by 2px, below zero it bulges to the other side, and it's kept for the rest of the run. Letting go of the modifier carries the line on freehand from the end of the piece, and pressing it again starts a new piece from there. The status tag says `straight` or `arc 24px` while one is held. The highlighter bends the same way.
+
 ## Shapes
 
 Shape is a temporary child of Annotate.
 
 Its geometry uses the same anchor/cursor model as Select.
+
+A shape starts as a point: at the loupe's last pixel if the loupe has been used this run, else at the pointer. That point is the anchor and stays put; the cursor corner grows the shape, with the box keys or by following the mouse. `o` makes the other corner the cursor. A drag draws a new shape instead.
 
 Shapes:
 
@@ -559,7 +569,7 @@ Shapes:
 
 A circle fills its bounding box, so a square box produces a circle.
 
-A line or arrow runs from the anchor to the cursor, so `o` (the opposite corner) flips an arrow. Arrowheads scale with the width.
+A line or arrow runs from the anchor to the cursor: the tail is pinned at the starting point, the tip follows the cursor, and `o` (the opposite corner) flips which end moves. Arrowheads scale with the width.
 
 ---
 
@@ -778,7 +788,9 @@ undoes the acceptance. They need no special project representation.
 Detectors: email addresses; IPv4 and IPv6 addresses; MAC addresses;
 known token prefixes (`sk-`, `ghp_`, `glpat-`, `AKIA`, `xox?-`, JWTs);
 long random-looking strings; secret URL parameters (only the value is
-censored); card numbers (Luhn-checked); IBANs (mod-97-checked); your home
+censored); card numbers (Luhn-checked) and their security codes (3-4 digits after
+CVV, CVC, CID or "security code", or on their own near a card number);
+IBANs (mod-97-checked); your home
 path; your hostname; and private-key blocks (proposed whole).
 Low-confidence matches, such as less random strings, are proposed
 unticked.
@@ -794,7 +806,7 @@ See `docs/auto-redact.md`.
 
 Measure (`m` in Select) measures lengths, angles and areas over the frozen
 picture: in capture pixels, or in real units once calibrated. It opens no
-layer; its drawings are overlay only until baked.
+layer, and its drawings are overlay only: they're never in the image.
 
 Points are placed with Insert's pixel cursor, starting at the box's cursor
 corner and kept on that corner's monitor. The mouse moves it too, once it
@@ -805,29 +817,63 @@ moves.
 | `h j k l`            | Move the cursor a step (Shift: ×4; Alt: halfway to the edge) |
 | `Ctrl+h j k l`       | Jump to the next edge in the picture that way          |
 | `0 $ g G`            | The monitor's far edge                                 |
-| `+` / `-`            | Step size                                              |
-| `s`                  | Line, or a path as points are added (Enter finishes)   |
-| `(`                  | Arc: start, a point on it, end                         |
+| `+` / `-`, wheel     | Step size; with a line open, bend it into an arc       |
+| `s`                  | Line: ends at its second point                         |
 | `c`                  | Circle: three points on it                             |
-| `A`                  | Area: a polygon (Enter finishes)                       |
+| `A`                  | Area: a point inside (click or `Space`) measures the region round it |
 | `r`                  | Rectangle: two corners; Enter with none measures the box |
-| `^`                  | Angle: arm, vertex, arm                                |
-| `Space` / click      | Drop a point (snaps to points within 4px; Alt: no snap) |
-| Shift+click          | Drop a point locked to 45° from the last               |
+| `^`                  | Angle: arm, vertex, arm; first on a vertex of lines, every angle round it at once |
+| `Space` / click      | Drop a point (snaps to points within 4px; `Alt+Space`: no snap) |
+| Alt+click            | Select the measurement under it                        |
+| Alt+drag             | On a measurement's point: move it                      |
+| `o`                  | Edit the selected measurement's points: `o` the next, the cursor keys move it, `Space`/`Enter` keep, `Esc` put back |
+| `Shift+Space` / Shift+click | Drop a point and keep the line going, as a path; a Shift+click within 12px of another measurement's point lands on it exactly, else within 12px of a line or path lands on the line (the loupe's points are never snapped) |
+| hold `Ctrl`          | The mouse cursor locks to 0°, 45° or 90° from the last point (a click lands there) |
 | `Enter`              | Finish, ending at the cursor; with nothing in progress, deliver |
-| `u`                  | Take back the last point, else the last measurement    |
-| `C`                  | Calibrate against the selected line or arc             |
+| `u`                  | Take back the last point, else the last action (a measurement, delete, calibration, `x`, move, edit) |
+| `C`                  | Calibrate against the selected line or arc (until then, pixels) |
 | `t` / `T`            | Metric ↔ imperial / pixels                             |
-| `[` / `]` `d` `x`    | Select, delete, leave out of the total                 |
+| `[` / `]` `<` / `>` `d` `x` | Select, move, delete, leave out of the total (Space drops points here, so `x`) |
 | `z` / `e`            | Loupe / Enhance at the cursor                          |
 | `y`                  | Deliver the measurements as text                       |
-| `a`                  | Bake them into an annotation layer, back to Select     |
 | `Esc`                | Abandon the one in progress; else back (warns first)   |
 
-Arcs, circles and angles finish at three points, rectangles at two.
+A line ends at its second point. With its first point down, `+`/`-` or the wheel bend it, 2px at a time, into an arc over the chord to the cursor (below zero, the other way); the status shows `arc 10px`, and the live length runs along the arc. Bent, it's measured as an arc: length, radius and angle swept. A Shift'd point keeps it open as a path, which Enter (or a plain point) finishes.
 
-The first line or arc asks for its real length (`= 5 m`; units `mm cm m
+With `A`, a point inside a region measures its area: it floods out from
+that pixel over similar colours, stopped by the picture's edges (a room's
+walls on a plan) and by anything you've drawn (a line across a doorway),
+and measures the outline, things inside it included. It measures to drawn
+lines, and to the last pixel inside a picture's edge. If the flood would
+reach the monitor's edge, it isn't closed in, and says so: draw lines to
+close it. A shape outlined with a closed path is measured the same way.
+
+Circles and angles finish at three points, rectangles at two. With `^`,
+a first point on a vertex of straight lines (any line or path point, or
+where two lines cross; a click reaches 12px for it) measures every angle
+round it at once: each line ending there is one arm, each passing through
+is two, and every gap between neighbouring arms under 180° is an angle,
+so a T gives its two right angles but not the straight back, and a corner
+not its outside. Anywhere else, the angle takes its three points as usual.
+Angles draw as an arc between their arms, labelled just outside it. A
+crossing is rounded to its pixel, so opposite angles there can differ by
+a fraction of a degree.
+
+Everything is in pixels until you calibrate: select a line or arc (the
+one just drawn is selected; `[ ]` or Alt+click pick another) and press
+`C`, which asks for its real length. If the line runs along a scale bar,
+`C` reads it (OCR round the line, in the background): the numbers at the
+line's ends, `0 … 100 m`, fill in `100 m`, with an unread 0 taken as 0,
+and a lone label such as `5 km` reads as itself. Typing replaces the
+reading. The real length can be typed (`= 5 m`; units `mm cm m
 km in ft yd mi`, `12'6"`, `12ft 6in`, and arithmetic such as `2*2.5 m`).
+The unit is free: any other name after the number is a unit of its own
+(`= 4.2 ly`, `= 3 bricks`, `= 2 light years`), and values read as
+multiples of it. A number with no unit (`= 4`) is in `u`, and Enter alone
+makes the line 1 u.
+Each value is shown in the unit of the reference's system that suits its
+size: km, m, cm or mm; mi, ft or in. `t` switches system (metric ↔
+imperial), so plain units have nothing to convert to.
 Esc stays in pixels. That measurement becomes the reference, drawn dashed
 and labelled `ref`. Everything reads in its unit from then on, with an
 error estimate: `4.20 m ±0.08`. The status shows the scale
@@ -847,9 +893,6 @@ A1    12.6 m² ±0.5     perimeter 14.3 m
 
 With `--json`, `kind` is `measure`, with `scale` and `measurements`
 (points in capture pixels).
-
-Baking (`a`) turns them into an annotation layer: dimension lines with
-arrowheads, outlines, and their labels as text. Enter then captures them.
 
 See `docs/measure.md`.
 

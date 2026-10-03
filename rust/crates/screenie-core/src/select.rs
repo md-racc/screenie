@@ -115,7 +115,12 @@ impl Session {
             }
             BoxOutcome::NotMine => {}
         }
-        if let Some(t) = self.lens_at(intent, self.sel.rect().centre()) {
+        // The loupe reopens where it was left (clamped into the box).
+        let lens_at = match (intent, self.loupe_at) {
+            (Intent::Loupe, Some(px)) => self.pixels.to_logical(px),
+            _ => self.sel.rect().centre(),
+        };
+        if let Some(t) = self.lens_at(intent, lens_at) {
             return t;
         }
         let needs_box = matches!(

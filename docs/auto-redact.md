@@ -1,7 +1,8 @@
 # Auto-redact: censor suggestions from OCR
 
 **Status:** in the Rust port: `r` in Censor, `--redact suggest|auto`, and
-`"redacted"` in `--json`. Not yet: codes (zbar outlines), the
+`"redacted"` in `--json`, and card security codes (`security-code`, below).
+Not yet: codes (zbar outlines), the
 OCR-tolerant email, `phone`/`uuid`, `literal`/`custom`, config, prescan
 and the cache. It is not in the prototype. `README.md` (Auto-redact) and `docs/architecture-rust.md`
 (§54–57) take precedence over this page.
@@ -72,6 +73,7 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 | `entropy` | long random-looking strings (≥20 chars, high Shannon entropy) | entropy per char, with an OCR-noise allowance |
 | `url-secret` | secret-looking query params in URLs (`token=`, `key=`, `sig=`, `code=`) | URL parse, param names |
 | `card` | card numbers | digits plus a Luhn check |
+| `security-code` | a card's CVV/CVC/CID | 3-4 isolated digits after a keyword (`CVV`, `CVC`, `CID`, `CSC`, "security code"), or within 4 line heights of a found card |
 | `iban` | IBANs | the mod-97 check |
 | `phone` | phone numbers | regex, off by default (too many false positives) |
 | `uuid` | UUIDs | regex, off by default |

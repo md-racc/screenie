@@ -368,6 +368,19 @@ pub struct Project {
     pub layers: Vec<Layer>,
     /// The next stable ID to hand out (shared by layers and ops).
     next_id: u64,
+    /// Measure's calibration, if one was set: `edit last` keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure_scale: Option<MeasureScale>,
+}
+
+/// Measure's scale as saved: `px` capture pixels are `real` of `unit`
+/// (a standard unit's name, or any other name), good to `error`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeasureScale {
+    pub px: f64,
+    pub real: f64,
+    pub unit: String,
+    pub error: f64,
 }
 
 impl Project {
@@ -377,6 +390,7 @@ impl Project {
             selection,
             layers: Vec::new(),
             next_id: 1,
+            measure_scale: None,
         }
     }
 

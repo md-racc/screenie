@@ -91,6 +91,65 @@ impl Ink {
 
 /// A pen trace keeps a point only this far (logical px) from the last.
 pub const TRACE_STEP: f64 = 0.5;
+/// An arc's first bulge, and its step (logical px).
+pub const BULGE: f64 = 24.0;
+pub const BULGE_STEP: f64 = 2.0;
+
+/// How a piece of the pen's line is held while a modifier is down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bend {
+    /// Shift: a straight line from where it started.
+    Straight,
+    /// Ctrl: an arc over that chord, bulging by the session's bulge.
+    Arc,
+}
+
+/// The held piece: from `start` (the trace's end when the modifier went
+/// down) to `end` (the pointer).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Segment {
+    start: LogicalPoint,
+    end: LogicalPoint,
+    bend: Bend,
+}
+
+/// The points of an arc from `a` to `b` (after `a`, ending exactly on
+/// `b`), bulging `bulge` off the chord: positive to the left of a→b on
+/// screen. Straight when the bulge or the chord is too small to bend.
+pub fn arc_points(a: LogicalPoint, b: LogicalPoint, bulge: f64) -> Vec<LogicalPoint> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let chord = dx.hypot(dy);
+    if chord < 1.0 || bulge.abs() < 0.5 {
+        return vec![b];
+    }
+    let (nx, ny) = (dy / chord, -dx / chord);
+    let peak = (
+        (a.x + b.x) / 2.0 + nx * bulge,
+        (a.y + b.y) / 2.0 + ny * bulge,
+    );
+    let Some((c, r)) = crate::measure::circumcircle((a.x, a.y), peak, (b.x, b.y)) else {
+        return vec![b];
+    };
+    let (start, sweep) = crate::measure::arc_sweep(c, (a.x, a.y), peak, (b.x, b.y));
+    let n = ((r * sweep.abs()) / 2.0).ceil().clamp(8.0, 256.0) as usize;
+    let mut pts: Vec<LogicalPoint> = (1..n)
+        .map(|i| {
+            let t = start + sweep * i as f64 / n as f64;
+            LogicalPoint::new(c.0 + r * t.cos(), c.1 + r * t.sin())
+        })
+        .collect();
+    pts.push(b);
+    pts
+}
+
+impl Segment {
+    fn points(&self, bulge: f64) -> Vec<LogicalPoint> {
+        match self.bend {
+            Bend::Straight => vec![self.end],
+            Bend::Arc => arc_points(self.start, self.end, bulge),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AnnotateMode {
@@ -99,6 +158,8 @@ pub struct AnnotateMode {
     pointer: LogicalPoint,
     /// The line being drawn.
     trace: Option<Vec<LogicalPoint>>,
+    /// Its piece held straight or as an arc, while Shift or Ctrl is down.
+    segment: Option<Segment>,
     /// The pen highlights instead of inking.
     pub highlighter: bool,
     /// The next callout's number, when set with `N`.
@@ -118,11 +179,33 @@ impl AnnotateMode {
         self.trace.is_some()
     }
 
+    /// How the piece being drawn is held, if a modifier holds it.
+    pub fn bend(&self) -> Option<Bend> {
+        self.segment.map(|s| s.bend)
+    }
+
+    /// The held piece becomes part of the trace.
+    fn settle(&mut self, bulge: f64) {
+        if let (Some(seg), Some(t)) = (self.segment.take(), &mut self.trace) {
+            t.extend(seg.points(bulge));
+        }
+    }
+
+    /// The trace as drawn now, the held piece included.
+    fn shown(&self, bulge: f64) -> Option<Vec<LogicalPoint>> {
+        let mut t = self.trace.clone()?;
+        if let Some(seg) = &self.segment {
+            t.extend(seg.points(bulge));
+        }
+        Some(t)
+    }
+
     pub fn new(main: LogicalRect) -> Self {
         Self {
             main,
             pointer: main.centre(),
             trace: None,
+            segment: None,
             highlighter: false,
             next_callout: None,
             keyboard: false,
@@ -140,16 +223,14 @@ pub struct ShapeMode {
 }
 
 impl ShapeMode {
-    /// A shape in the middle quarter of `main`.
-    pub fn new(main: LogicalRect, kind: ShapeTool) -> Self {
-        let r = LogicalRect::new(
-            main.x + main.w / 4.0,
-            main.y + main.h / 4.0,
-            main.w / 2.0,
-            main.h / 2.0,
-        );
+    /// A shape that starts as a point at `at` (inside `main`): the anchor
+    /// stays there, and the cursor corner (an arrow's tip) grows it, with
+    /// hjkl or by following the mouse; `o` makes the other end the cursor.
+    pub fn new(main: LogicalRect, kind: ShapeTool, at: LogicalPoint) -> Self {
+        let x = at.x.clamp(main.x, main.right());
+        let y = at.y.clamp(main.y, main.bottom());
         Self {
-            sel: AnchorCursor::new(r, main),
+            sel: AnchorCursor::new(LogicalRect::new(x, y, 0.0, 0.0), main),
             kind,
             both_heads: false,
             drag: None,
@@ -260,6 +341,10 @@ impl Session {
     }
 
     pub(crate) fn annotate_intent(&mut self, a: &mut AnnotateMode, intent: Intent) -> Transition {
+        if let Intent::Bulge(n) = intent {
+            self.pen_bulge += BULGE_STEP * f64::from(n);
+            return Transition::Stay;
+        }
         if self.ink_intent(intent) {
             return Transition::Stay;
         }
@@ -305,22 +390,56 @@ impl Session {
             Intent::Press(p) => {
                 a.keyboard = false;
                 a.trace = Some(vec![p]);
+                a.segment = None;
             }
             Intent::Motion(p) => {
                 a.pointer = p;
                 a.keyboard = false;
-                if let Some(t) = &mut a.trace {
-                    // A fast mouse reports far more often than the trace
-                    // moves a pixel: those points only cost rendering.
-                    let near = t
-                        .last()
-                        .is_some_and(|q| (q.x - p.x).hypot(q.y - p.y) < TRACE_STEP);
-                    if !near {
-                        t.push(p);
+                if a.trace.is_some() {
+                    // Shift holds the piece from here straight, Ctrl as an
+                    // arc; letting go carries on freehand from its end.
+                    let m = self.input_mods();
+                    let held = if m.ctrl {
+                        Some(Bend::Arc)
+                    } else if m.shift {
+                        Some(Bend::Straight)
+                    } else {
+                        None
+                    };
+                    match (held, &mut a.segment) {
+                        (Some(bend), Some(seg)) => {
+                            seg.bend = bend;
+                            seg.end = p;
+                        }
+                        (Some(bend), None) => {
+                            let start = a.trace.as_ref().and_then(|t| t.last().copied());
+                            a.segment = start.map(|start| Segment {
+                                start,
+                                end: p,
+                                bend,
+                            });
+                        }
+                        (None, _) => {
+                            a.settle(self.pen_bulge);
+                            let t = a.trace.as_mut().expect("drawing");
+                            // A fast mouse reports far more often than the
+                            // trace moves a pixel: those points only cost
+                            // rendering.
+                            let near = t
+                                .last()
+                                .is_some_and(|q| (q.x - p.x).hypot(q.y - p.y) < TRACE_STEP);
+                            if !near {
+                                t.push(p);
+                            }
+                        }
                     }
                 }
             }
             Intent::Release(p) => {
+                if let Some(seg) = &mut a.segment {
+                    seg.end = p;
+                }
+                a.settle(self.pen_bulge);
                 if let Some(mut t) = a.trace.take() {
                     if t.last() != Some(&p) {
                         t.push(p); // right up to where it was let go
@@ -357,7 +476,11 @@ impl Session {
                 return self.lens_at(intent, a.pointer).expect("a lens");
             }
             Intent::Shape(kind) => {
-                return Transition::Push(Mode::Shape(ShapeMode::new(a.main, kind)));
+                // At the loupe's spot if it's been used, else the pointer.
+                let at = self
+                    .loupe_at
+                    .map_or(a.pointer, |px| self.pixels.to_logical(px));
+                return Transition::Push(Mode::Shape(ShapeMode::new(a.main, kind, at)));
             }
             // A line still being drawn is kept, whatever ends it.
             Intent::Tool(Tool::Annotate) => self.lock_trace(a),
@@ -413,6 +536,7 @@ impl Session {
     }
 
     fn lock_trace(&mut self, a: &mut AnnotateMode) {
+        a.settle(self.pen_bulge);
         if let Some(t) = a.trace.take() {
             self.lock(self.pen_op(a, &t));
         }
@@ -450,6 +574,11 @@ impl Session {
         if let Some(t) = self.lens_at(intent, s.sel.rect().centre()) {
             return t;
         }
+        // The cursor corner follows the mouse; a drag still draws anew.
+        if let (Intent::Motion(p), None) = (intent, &s.drag) {
+            s.sel.place_cursor(p);
+            return Transition::Stay;
+        }
         match boxes::apply(&mut s.sel, &self.snap, &mut s.drag, intent) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
@@ -469,7 +598,7 @@ impl Session {
     /// The pen's line in progress, or the shape being edited.
     pub(crate) fn annotate_editing(&self, mode: &Mode) -> Option<OpData> {
         match mode {
-            Mode::Annotate(a) => a.trace.as_deref().and_then(|t| self.pen_op(a, t)),
+            Mode::Annotate(a) => a.shown(self.pen_bulge).and_then(|t| self.pen_op(a, &t)),
             Mode::Shape(s) => self.shape(s),
             _ => None,
         }

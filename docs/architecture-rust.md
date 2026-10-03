@@ -269,6 +269,7 @@ Project
         ordered operations
             stable op ID
             operation data
+    Measure's scale, if calibrated (px, real, unit name, error)
 ```
 
 The project model describes what exists now.
@@ -1778,27 +1779,32 @@ This keeps project serialization independent of OCR engine behavior.
 
 # 58. Measure
 
-Measure uses existing interaction capabilities where possible.
+Measure is a mode over the frozen picture, not a build tool: it opens no
+layer, and its measurements are mode state, overlay only.
 
-Examples:
+It reuses capabilities, and keeps pixels out of core like the rest:
 
 ```text
-line       AnchorCursor
-path       Trace
-calibration TextInput
-edge snap  analysis job
+points          PointCursor (Insert's), on capture pixels
+paths           polylines of dropped points
+calibration     TextInput child (Calibration purpose)
+edges, areas    host EdgeFinder: an edge along a ray; a flooded region
+scale bar       Analyzer job (OCR round the line), filling the prompt
 ```
 
 Measurement state contains:
 
 ```text
-geometry
-calibration
-computed value
-error estimate
+measurements    kind, points, name, excluded from totals
+calibration     Scale (px, real, unit, error): kept on the session, and
+                saved in the project (Project::measure_scale)
+undo            its own log (added, deleted, calibrated, excluded,
+                swapped, edited)
+editing         a point being moved (o, Alt+drag)
 ```
 
-Measurements may later become annotation operations when baked into the image.
+Values and errors are computed from the points and the scale when shown,
+never stored. `docs/measure.md` has the design.
 
 ---
 
@@ -2362,11 +2368,13 @@ says what was chosen and why. Smaller judgement calls live in
   frame version yet, because the frame never changes within a session.
   No analysis cache yet (§55): scans are on request.
 - **Measure is a mode, not a tool** (§58): it opens no layer and its
-  measurements are mode state, dropped on leaving unless baked (`a`) into
-  an ordinary annotation layer, as one project step. Its edges come from
+  measurements are mode state, overlay only, dropped on leaving (baking
+  them into an annotation layer was built, then dropped). Its edges come from
   a host `EdgeFinder` (the committed picture's grey along a ray), like the
-  `Sampler`, so core still never sees pixels. The scale lives on the
-  session for now, not in the project.
+  `Sampler`, so core still never sees pixels. The scale is kept on the
+  session and saved in the project (`Project::measure_scale`, an optional
+  field older projects don't have), so `edit last` keeps it;
+  measurements themselves aren't saved.
 - **Auto-redact's suggestions live in a `Redact` mode**, a child of
   Censor, never in the project (§57). Accepting adds black-bar censors to
   the open layer as one undo step (`LayerUndo::RemoveMany`). The session

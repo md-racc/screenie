@@ -86,6 +86,15 @@ impl Session {
     /// An analysis job finished (from the host, for an asynchronous
     /// analyzer). Results nobody waits for any more are dropped.
     pub fn job_done(&mut self, id: u64, result: JobResult) {
+        // A calibration prompt waiting on its scale bar.
+        for mode in self.stack_mut().iter_mut() {
+            if let Mode::Text(t) = mode {
+                if let Some((_, a, b)) = t.reading.filter(|r| r.0 == id) {
+                    crate::measure::fill_reading(t, result, a, b);
+                    return;
+                }
+            }
+        }
         let Some(i) = self
             .stack_mut()
             .iter()

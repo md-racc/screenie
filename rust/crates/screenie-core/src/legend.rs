@@ -93,7 +93,6 @@ pub const ANNOTATE_PALETTE: &[&[Item]] = &[&[
     INKS[4],
     ("rectangle", &[Intent::Shape(ShapeTool::Rect)]),
     ("circle", &[Intent::Shape(ShapeTool::Circle)]),
-    ("straight", &[Intent::Shape(ShapeTool::Line)]),
     ("arrow", &[Intent::Shape(ShapeTool::Arrow)]),
 ]];
 
@@ -105,7 +104,8 @@ pub const ANNOTATE: &[&[Item]] = &[
         ("text", &[Intent::Insert]),
         ("callout", &[Intent::Callout]),
         ("callout number", &[Intent::CalloutNumber]),
-        ("drag draw", &[]),
+        ("drag draw  S-drag straight  C-drag arc", &[]),
+        ("arc bulge", &[Intent::Bulge(1), Intent::Bulge(-1)]),
     ],
     &[
         (
@@ -253,6 +253,7 @@ pub const LOUPE: &[&[Item]] = &[
             &[Intent::ViewFilter(1), Intent::ViewFilter(-1)],
         ),
         ("click/drag place", &[]),
+        ("Measure: point", &[Intent::DropPoint]),
     ],
     &[
         ("colour", &[Intent::CopyColour]),
@@ -315,21 +316,33 @@ pub const REDACT: &[&[Item]] = &[&[
     ("back", &[Intent::Back]),
 ]];
 
+/// Measure's primitives, always shown (README: palettes for directly
+/// selectable kinds).
+pub const MEASURE_PALETTE: &[&[Item]] = &[&[
+    ("line", &[Intent::Measure(crate::measure::Prim::Line)]),
+    ("circle", &[Intent::Measure(crate::measure::Prim::Circle)]),
+    ("area", &[Intent::Measure(crate::measure::Prim::Area)]),
+    ("rect", &[Intent::Measure(crate::measure::Prim::Rect)]),
+    ("angle", &[Intent::Measure(crate::measure::Prim::Angle)]),
+]];
+
 pub const MEASURE: &[&[Item]] = &[
     &[
-        ("line/path", &[Intent::Measure(crate::measure::Prim::Line)]),
-        ("arc", &[Intent::Measure(crate::measure::Prim::Arc)]),
-        ("circle", &[Intent::Measure(crate::measure::Prim::Circle)]),
-        ("area", &[Intent::Measure(crate::measure::Prim::Area)]),
-        ("rect", &[Intent::Measure(crate::measure::Prim::Rect)]),
-        ("angle", &[Intent::Measure(crate::measure::Prim::Angle)]),
         ("point", &[Intent::DropPoint]),
+        ("path point", &[Intent::AddPoint]),
         ("finish", &[Intent::Confirm]),
         ("undo", &[Intent::Undo]),
+        (
+            "edit points  A-click select, A-drag move",
+            &[Intent::SwapOpposite],
+        ),
     ],
     &[
         ("edge", &[Intent::Jump(crate::geometry::Dir::Right)]),
-        ("step", &[Intent::Adjust(1), Intent::Adjust(-1)]),
+        (
+            "step, or bend a line",
+            &[Intent::Adjust(1), Intent::Adjust(-1)],
+        ),
         ("loupe", &[Intent::Loupe]),
         ("enhance", &[Intent::Enhance]),
         ("calibrate", &[Intent::Calibrate]),
@@ -338,10 +351,10 @@ pub const MEASURE: &[&[Item]] = &[
     ],
     &[
         ("select", &[Intent::ListStep(-1), Intent::ListStep(1)]),
+        ("move", &[Intent::ListMove(-1), Intent::ListMove(1)]),
         ("delete", &[Intent::ListDelete]),
         ("total", &[Intent::ListToggle]),
         ("copy", &[Intent::CopyMeasurements]),
-        ("bake", &[Intent::Bake]),
         ("back", &[Intent::Back]),
     ],
 ];
@@ -397,9 +410,7 @@ mod tests {
         assert_eq!(names, shown);
         assert_eq!(
             render(&keymap::ANNOTATE, ANNOTATE_PALETTE),
-            [
-                "1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle  s straight  v arrow"
-            ]
+            ["1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle  v arrow"]
         );
     }
 

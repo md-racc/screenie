@@ -489,6 +489,8 @@ fn measurements_draw_with_their_points_and_a_chip() {
                 reference: false,
                 selected: false,
                 points: vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+                arc: vec![],
+                label_out: None,
             },
             ItemView {
                 line: vec![pt(700.5, 500.5), pt(800.5, 500.5), pt(800.5, 600.5)],
@@ -499,6 +501,8 @@ fn measurements_draw_with_their_points_and_a_chip() {
                 reference: false,
                 selected: true,
                 points: vec![],
+                arc: vec![],
+                label_out: None,
             },
         ],
         progress: vec![pt(1000.5, 400.5), pt(1100.5, 450.5)],
@@ -539,5 +543,181 @@ fn the_tag_font_has_every_symbol_the_ui_shows() {
     // the legend's keys and the box's size.
     for c in "●·○Ø∩∠→±²°×…".chars() {
         assert_ne!(font.lookup_glyph_index(c), 0, "no glyph for {c:?}");
+    }
+}
+
+#[test]
+fn an_angle_draws_its_arc_and_a_label_centred_off_it() {
+    use screenie_core::measure::{ItemView, MeasureView};
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    let (cx, cy, r) = (800.5, 500.5, 30.0);
+    let arc: Vec<LogicalPoint> = (0..=24)
+        .map(|i| {
+            let t = std::f64::consts::FRAC_PI_2 * f64::from(i) / 24.0;
+            pt(cx + r * t.cos(), cy - r * t.sin())
+        })
+        .collect();
+    let h = 1.0 / 2f64.sqrt();
+    v.measure = Some(MeasureView {
+        items: vec![ItemView {
+            line: vec![pt(900.5, 500.5), pt(cx, cy), pt(800.5, 400.5)],
+            closed: false,
+            filled: false,
+            label: "90.0°".into(),
+            anchor: pt(cx + r * h, cy - r * h), // the arc's middle
+            reference: false,
+            selected: false,
+            points: vec![],
+            arc: arc.clone(),
+            label_out: Some((h, -h)),
+        }],
+        progress: vec![],
+        closed: false,
+    });
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    save("angle.png", &into);
+    // On the arc at 45°: cyan; inside it, nearer the vertex: not.
+    let on = at(&into, (cx + r * h) as i32, (cy - r * h) as i32);
+    assert!(on.2 > 200 && on.0 < 120, "the arc: {on:?}");
+    let inside = at(&into, (cx + 12.0) as i32, (cy - 12.0) as i32);
+    assert!(inside.2 < 100, "inside the arc: {inside:?}");
+    // The label clears the arc: every point of it still shows the arc.
+    for q in &arc {
+        let c = at(&into, q.x as i32, q.y as i32);
+        assert!(c.2 > 150, "covered at {q:?}: {c:?}");
+    }
+    // And it's there, out along the bisector: a run of chip black.
+    let dark = (0..60)
+        .filter(|&t| {
+            let (x, y) = (cx + r * h + f64::from(t) * h, cy - r * h - f64::from(t) * h);
+            at(&into, x as i32, y as i32).0 < 20
+        })
+        .count();
+    assert!(dark > 8, "{dark}");
+}
+
+#[test]
+fn the_selected_measurement_draws_over_the_rest() {
+    use screenie_core::measure::{ItemView, MeasureView};
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    let item = |line: Vec<LogicalPoint>, selected| ItemView {
+        line,
+        closed: false,
+        filled: false,
+        label: "x".into(),
+        anchor: pt(1500.5, 900.5),
+        reference: false,
+        selected,
+        points: vec![],
+        arc: vec![],
+        label_out: None,
+    };
+    // Two angles sharing their upward arm; the first is selected, so the
+    // second used to paint the shared arm over it.
+    v.measure = Some(MeasureView {
+        items: vec![
+            item(
+                vec![pt(900.5, 500.5), pt(800.5, 500.5), pt(800.5, 300.5)],
+                true,
+            ),
+            item(
+                vec![pt(700.5, 500.5), pt(800.5, 500.5), pt(800.5, 300.5)],
+                false,
+            ),
+        ],
+        progress: vec![],
+        closed: false,
+    });
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    for (x, y) in [(800, 400), (850, 500)] {
+        let c = at(&into, x, y);
+        assert!(c.0 > 200 && c.2 < 100, "amber at ({x},{y}): {c:?}");
+    }
+}
+
+fn measure_item(
+    line: Vec<LogicalPoint>,
+    label: &str,
+    anchor: LogicalPoint,
+) -> screenie_core::measure::ItemView {
+    screenie_core::measure::ItemView {
+        line,
+        closed: false,
+        filled: false,
+        label: label.into(),
+        anchor,
+        reference: false,
+        selected: false,
+        points: vec![],
+        arc: vec![],
+        label_out: None,
+    }
+}
+
+#[test]
+fn a_measurements_label_stays_on_its_own_monitor() {
+    use screenie_core::measure::MeasureView;
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    v.measure = Some(MeasureView {
+        items: vec![measure_item(
+            vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+            "4.20 m",
+            pt(800.5, 400.5),
+        )],
+        progress: vec![],
+        closed: false,
+    });
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 1, MONS[1], &v, &mut into); // the other monitor
+    let dark = (0..80)
+        .flat_map(|x| (360..420).map(move |y| (x, y)))
+        .filter(|&(x, y)| at(&into, x, y).0 < 10)
+        .count();
+    assert_eq!(dark, 0, "a chip leaked to the other monitor's edge");
+}
+
+#[test]
+fn a_lines_label_moves_off_an_angles_arc() {
+    use screenie_core::measure::MeasureView;
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    // An arc right where the line's label would go (above-right of its middle).
+    let arc: Vec<LogicalPoint> = (0..=24)
+        .map(|i| pt(806.0 + 2.0 * f64::from(i), 384.0 - 0.5 * f64::from(i)))
+        .collect();
+    let mut angle = measure_item(vec![], "30.0°", pt(1500.5, 900.5));
+    angle.arc = arc.clone();
+    v.measure = Some(MeasureView {
+        items: vec![
+            angle,
+            measure_item(
+                vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+                "4.20 m",
+                pt(800.5, 400.5),
+            ),
+        ],
+        progress: vec![],
+        closed: false,
+    });
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    save("label-off-arc.png", &into);
+    for q in &arc[1..arc.len() - 1] {
+        // (the ends are anti-aliased caps)
+        let c = at(&into, q.x as i32, q.y as i32);
+        assert!(c.2 > 150, "the arc is covered at {q:?}: {c:?}");
     }
 }

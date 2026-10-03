@@ -12,13 +12,17 @@ use crate::input::Rates;
 use crate::insert::{BIG, PointCursor, STEP, STEP_MAX, STEP_MIN};
 use crate::intent::{DirSet, Intent, Scale as Halve};
 use crate::lens::{EnhanceMode, LoupeMode};
-use crate::model::{Heads, LineOp, OpData, ShapeKind, ShapeOp, StrokeOp, TextOp};
 use crate::session::{FinishedAction, Mode, Outcome, Session, Transition};
 use crate::text::TextMode;
 use crate::units::{self, Display, Length, Scale};
 
 /// Points this close (capture pixels) to an existing one snap to it.
 pub const SNAP: f64 = 4.0;
+/// A Shift'd point, or `^`'s first, reaches this far (logical px) for an
+/// existing point to land on exactly.
+pub const VERTEX_REACH: f64 = 12.0;
+/// `+`/`-` or the wheel on an open line bend it this much (capture px).
+pub const BEND_STEP: f64 = 2.0;
 /// Segments an arc or circle is drawn with.
 const SEGMENTS: usize = 48;
 
@@ -32,6 +36,19 @@ pub trait EdgeFinder {
         d: Dir,
         bounds: PixelRect,
     ) -> Option<PixelPoint>;
+
+    /// The region round `seed` (an area by a click inside): flooded over
+    /// the picture, stopped by its edges and by `walls` (the drawn
+    /// measurements), within `bounds`. Its outline, or why there's none.
+    fn region(
+        &mut self,
+        _s: &Session,
+        _seed: PixelPoint,
+        _bounds: PixelRect,
+        _walls: &[(PixelPoint, PixelPoint)],
+    ) -> Result<Vec<PixelPoint>, String> {
+        Err("no picture to flood here".into())
+    }
 }
 
 /// What a measurement is.
@@ -123,7 +140,7 @@ pub fn circumcircle(a: P, b: P, c: P) -> Option<(P, f64)> {
 }
 
 /// The arc from `a` through `b` to `c`: start angle and (signed) sweep.
-fn arc_sweep(centre: P, a: P, b: P, c: P) -> (f64, f64) {
+pub(crate) fn arc_sweep(centre: P, a: P, b: P, c: P) -> (f64, f64) {
     let ang = |q: P| (q.1 - centre.1).atan2(q.0 - centre.0);
     let tau = std::f64::consts::TAU;
     let start = ang(a);
@@ -159,7 +176,16 @@ pub struct Measurement {
 }
 
 impl Measurement {
+    /// Whether it has the points its kind needs (values and outlines of
+    /// one that doesn't are empty, never a panic).
+    fn complete(&self) -> bool {
+        self.points.len() >= self.kind.min_points()
+    }
+
     pub fn values(&self) -> Values {
+        if !self.complete() {
+            return Values::default();
+        }
         let pts: Vec<P> = self.points.iter().map(|&q| p(q)).collect();
         let path = |closed: bool| {
             let mut l: f64 = pts.windows(2).map(|w| dist(w[0], w[1])).sum();
@@ -173,7 +199,8 @@ impl Measurement {
             Prim::Line => {
                 v.length = Some(path(false));
                 if let [a, b] = pts[..] {
-                    v.degrees = Some((-(b.1 - a.1)).atan2(b.0 - a.0).to_degrees());
+                    // + 0.0: a flat line is 0°, not -0°.
+                    v.degrees = Some((-(b.1 - a.1)).atan2(b.0 - a.0).to_degrees() + 0.0);
                 }
             }
             Prim::Arc => match circumcircle(pts[0], pts[1], pts[2]) {
@@ -224,6 +251,9 @@ impl Measurement {
     /// sampled), and whether it closes.
     pub fn outline(&self) -> (Vec<P>, bool) {
         let pts: Vec<P> = self.points.iter().map(|&q| p(q)).collect();
+        if !self.complete() {
+            return (pts, false);
+        }
         match self.kind {
             Prim::Arc | Prim::Circle => {
                 let Some((c, r)) = circumcircle(pts[0], pts[1], pts[2]) else {
@@ -251,6 +281,52 @@ impl Measurement {
         }
     }
 
+    /// An angle's arc, capture pixels: between its arms, a little way out
+    /// from the vertex (`k` px a logical px); its middle, and the way out
+    /// from the vertex there (a unit vector, for the label).
+    pub fn angle_arc(&self, k: f64) -> Option<(Vec<P>, P, (f64, f64))> {
+        if self.kind != Prim::Angle || !self.complete() {
+            return None;
+        }
+        let (a, v, c) = (p(self.points[0]), p(self.points[1]), p(self.points[2]));
+        let arm = dist(a, v).min(dist(c, v));
+        let r = (0.4 * arm).clamp(8.0 * k, 30.0 * k);
+        let dir = |q: P| (-(q.1 - v.1)).atan2(q.0 - v.0);
+        let from = dir(a);
+        let pi = std::f64::consts::PI;
+        // The short way round, from one arm to the other.
+        let sweep = (dir(c) - from + pi).rem_euclid(2.0 * pi) - pi;
+        let at = |t: f64, r: f64| (v.0 + r * t.cos(), v.1 - r * t.sin());
+        let arc = (0..=24)
+            .map(|i| at(from + sweep * f64::from(i) / 24.0, r))
+            .collect();
+        let mid = from + sweep / 2.0;
+        Some((arc, at(mid, r), (mid.cos(), -mid.sin())))
+    }
+
+    /// How far `q` is from its drawing (capture pixels).
+    pub fn distance_to(&self, q: P) -> f64 {
+        let (line, closed) = self.outline();
+        let seg = |a: P, b: P| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 == 0.0 {
+                0.0
+            } else {
+                (((q.0 - a.0) * dx + (q.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+            };
+            dist((a.0 + t * dx, a.1 + t * dy), q)
+        };
+        let mut d = line.first().map_or(f64::INFINITY, |&a| dist(a, q));
+        for w in line.windows(2) {
+            d = d.min(seg(w[0], w[1]));
+        }
+        if let (true, Some(&a), Some(&b)) = (closed, line.first(), line.last()) {
+            d = d.min(seg(b, a));
+        }
+        d
+    }
+
     /// Where its chip goes, capture pixels: a line's middle, an area's
     /// centre, an angle's vertex.
     pub fn anchor(&self) -> P {
@@ -259,9 +335,22 @@ impl Measurement {
             return p(self.points[1]);
         }
         if closed || self.kind == Prim::Circle {
-            let n = line.len() as f64;
+            // The polygon's centroid: its area's middle, however its points
+            // bunch (a flooded outline has many round a doorway).
+            let n = line.len();
+            let (mut a, mut cx, mut cy) = (0.0, 0.0, 0.0);
+            for i in 0..n {
+                let (p0, p1) = (line[i], line[(i + 1) % n]);
+                let cross = p0.0 * p1.1 - p1.0 * p0.1;
+                a += cross;
+                cx += (p0.0 + p1.0) * cross;
+                cy += (p0.1 + p1.1) * cross;
+            }
+            if a.abs() > 1e-9 {
+                return (cx / (3.0 * a), cy / (3.0 * a));
+            }
             let (sx, sy) = line.iter().fold((0.0, 0.0), |(x, y), q| (x + q.0, y + q.1));
-            return (sx / n, sy / n);
+            return (sx / n as f64, sy / n as f64);
         }
         // Halfway along.
         let total: f64 = line.windows(2).map(|w| dist(w[0], w[1])).sum();
@@ -290,6 +379,9 @@ pub struct MeasureMode {
     pub step: i32,
     /// The measurement in progress.
     pub points: Vec<PixelPoint>,
+    /// An open line's bend: its bulge off the chord, capture px (positive
+    /// to the left of first point → cursor). Not zero, it ends as an arc.
+    pub bend: f64,
     pub items: Vec<Measurement>,
     /// The list's selection, an index into `items`.
     pub selected: Option<usize>,
@@ -299,8 +391,6 @@ pub struct MeasureMode {
     pub display: Display,
     /// The measurement a calibration is being typed for.
     pub calibrating: Option<usize>,
-    /// The first suitable measurement asked for its length already.
-    pub asked: bool,
     /// Esc once with measurements: Esc again drops them.
     pub warned: bool,
     /// What the status says once (a bad calibration, no edge).
@@ -309,6 +399,10 @@ pub struct MeasureMode {
     /// appearing under it) doesn't move the cursor, only moving it does.
     pointer: Option<LogicalPoint>,
     counts: [u32; 6],
+    /// What `u` takes back, latest last (points in progress come first).
+    log: Vec<MeasureUndo>,
+    /// A point of a placed measurement being moved (`o`, or an Alt+drag).
+    pub edit: Option<PointEdit>,
 }
 
 impl MeasureMode {
@@ -319,17 +413,19 @@ impl MeasureMode {
             area,
             step: STEP,
             points: Vec::new(),
+            bend: 0.0,
             items: Vec::new(),
             selected: None,
             display: scale.map_or(Display::Pixels, |s| Display::Real(s.unit)),
             scale,
             reference: None,
             calibrating: None,
-            asked: scale.is_some(),
             warned: false,
             note: None,
             pointer: None,
             counts: [0; 6],
+            log: Vec::new(),
+            edit: None,
         }
     }
 
@@ -431,9 +527,14 @@ impl MeasureMode {
             Display::Real(u) if ppm.is_some() => Some(u),
             _ => None,
         };
+        // In the unit the value is shown in: fitted by its length (an
+        // area by its side), in the display's system.
         let real = |px: f64, power: i32| {
-            unit.zip(ppm)
-                .map(|(u, ppm)| px / (ppm * u.metres()).powi(power))
+            unit.zip(ppm).map(|(system, ppm)| {
+                let side = px.abs().powf(1.0 / f64::from(power)) / ppm;
+                let u = units::fit(system, side);
+                (px / (ppm * u.metres()).powi(power), u)
+            })
         };
         let items: Vec<serde_json::Value> = self
             .items
@@ -444,16 +545,16 @@ impl MeasureMode {
                 let mut o = json!({"kind": m.kind.name(), "name": m.name, "points": points});
                 if let Some(l) = v.length {
                     o["px"] = json!(l);
-                    if let Some(r) = real(l, 1) {
+                    if let Some((r, u)) = real(l, 1) {
                         o["real"] = json!(r);
-                        o["unit"] = json!(unit.map(|u| u.name()));
+                        o["unit"] = json!(u.name());
                     }
                 }
                 if let Some(a) = v.area {
                     o["px2"] = json!(a);
-                    if let Some(r) = real(a, 2) {
+                    if let Some((r, u)) = real(a, 2) {
                         o["real"] = json!(r);
-                        o["unit"] = json!(unit.map(|u| format!("{}²", u.name())));
+                        o["unit"] = json!(format!("{}²", u.name()));
                     }
                 }
                 if let (Some(d), Prim::Angle) = (v.degrees, m.kind) {
@@ -512,6 +613,130 @@ impl MeasureMode {
         rows
     }
 
+    /// Every measurement's drawing as segments, to the pixel: what an
+    /// area's flood can't cross.
+    fn walls(&self) -> Vec<(PixelPoint, PixelPoint)> {
+        let px = |q: P| PixelPoint::new(rnd(q.0), rnd(q.1));
+        let mut out = Vec::new();
+        for it in &self.items {
+            let (line, closed) = it.outline();
+            out.extend(line.windows(2).map(|w| (px(w[0]), px(w[1]))));
+            if let (true, Some(&a), Some(&b)) = (closed, line.first(), line.last()) {
+                out.push((px(b), px(a)));
+            }
+        }
+        out
+    }
+
+    /// Every straight segment of the lines and paths (arcs aren't straight).
+    fn segments(&self) -> impl Iterator<Item = (PixelPoint, PixelPoint)> + '_ {
+        self.items
+            .iter()
+            .filter(|m| m.kind == Prim::Line)
+            .flat_map(|m| m.points.windows(2).map(|w| (w[0], w[1])))
+    }
+
+    /// Where two segments cross (inside both, not at their ends).
+    fn crossings(&self) -> Vec<PixelPoint> {
+        let segs: Vec<(P, P)> = self.segments().map(|(a, b)| (p(a), p(b))).collect();
+        let mut out = Vec::new();
+        for (i, &(a, b)) in segs.iter().enumerate() {
+            for &(c, d) in &segs[i + 1..] {
+                let (r, q) = ((b.0 - a.0, b.1 - a.1), (d.0 - c.0, d.1 - c.1));
+                let den = r.0 * q.1 - r.1 * q.0;
+                if den.abs() < 1e-9 {
+                    continue; // parallel
+                }
+                let (ex, ey) = (c.0 - a.0, c.1 - a.1);
+                let t = (ex * q.1 - ey * q.0) / den;
+                let u = (ex * r.1 - ey * r.0) / den;
+                if t > 0.0 && t < 1.0 && u > 0.0 && u < 1.0 {
+                    out.push(PixelPoint::new(rnd(a.0 + t * r.0), rnd(a.1 + t * r.1)));
+                }
+            }
+        }
+        out
+    }
+
+    /// The rays from `v` along the segments through it: one where a
+    /// segment ends there, two where it passes through (within a pixel).
+    /// Each ray is the far end it heads for.
+    fn rays_at(&self, v: PixelPoint) -> Vec<PixelPoint> {
+        let pv = p(v);
+        let mut rays = Vec::new();
+        for (a, b) in self.segments() {
+            if a == v {
+                rays.push(b);
+            } else if b == v {
+                rays.push(a);
+            } else {
+                let (pa, pb) = (p(a), p(b));
+                let (dx, dy) = (pb.0 - pa.0, pb.1 - pa.1);
+                let len2 = dx * dx + dy * dy;
+                let t = ((pv.0 - pa.0) * dx + (pv.1 - pa.1) * dy) / len2;
+                let on = (pa.0 + t * dx, pa.1 + t * dy);
+                if t > 0.0 && t < 1.0 && dist(on, pv) <= 1.0 {
+                    rays.push(a);
+                    rays.push(b);
+                }
+            }
+        }
+        rays
+    }
+
+    /// Every angle round `v` between neighbouring rays, under 180°: the
+    /// back of a straight line and the outside of a corner aren't angles
+    /// anyone wants. As [arm, vertex, arm], counter-clockwise on screen.
+    fn angles_at(&self, v: PixelPoint) -> Vec<[PixelPoint; 3]> {
+        let dir = |q: PixelPoint| {
+            let (dx, dy) = (f64::from(q.x - v.x), f64::from(q.y - v.y));
+            (-dy).atan2(dx).to_degrees().rem_euclid(360.0)
+        };
+        let mut rays: Vec<(f64, PixelPoint)> =
+            self.rays_at(v).into_iter().map(|q| (dir(q), q)).collect();
+        rays.sort_by(|a, b| a.0.total_cmp(&b.0));
+        rays.dedup_by(|b, a| (b.0 - a.0).abs() < 0.5); // the same way twice
+        if rays.len() < 2 {
+            return Vec::new();
+        }
+        let n = rays.len();
+        (0..n)
+            .filter_map(|i| {
+                let (a, b) = (rays[i], rays[(i + 1) % n]);
+                let gap = (b.0 - a.0).rem_euclid(360.0);
+                (gap > 0.5 && gap < 179.5).then_some([a.1, v, b.1])
+            })
+            .collect()
+    }
+
+    /// The nearest point on a straight line or path segment to `q`, within
+    /// `reach` capture pixels (arcs aren't straight).
+    fn on_a_line(&self, q: PixelPoint, reach: f64) -> Option<PixelPoint> {
+        let q = p(q);
+        self.items
+            .iter()
+            .filter(|m| m.kind == Prim::Line)
+            .flat_map(|m| m.points.windows(2).map(|w| (p(w[0]), p(w[1]))))
+            .filter_map(|(a, b)| {
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let len2 = dx * dx + dy * dy;
+                if len2 == 0.0 {
+                    return None;
+                }
+                let t = (((q.0 - a.0) * dx + (q.1 - a.1) * dy) / len2).clamp(0.0, 1.0);
+                let on = (a.0 + t * dx, a.1 + t * dy);
+                let d = dist(on, q);
+                (d <= reach).then_some((d, on))
+            })
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .map(|(_, on)| PixelPoint::new(rnd(on.0), rnd(on.1)))
+    }
+
+    /// A line with its first point placed: `+`/`-` bend it.
+    pub fn line_open(&self) -> bool {
+        self.tool == Prim::Line && self.points.len() == 1
+    }
+
     fn name_next(&mut self, kind: Prim) -> String {
         let i = Prim::ALL.iter().position(|&k| k == kind).unwrap_or(0);
         self.counts[i] += 1;
@@ -538,6 +763,50 @@ impl Prim {
     ];
 }
 
+/// A placed measurement's point being moved: it follows the cursor until
+/// kept (Space, Enter, letting go of the drag) or put back (Esc, `u`).
+#[derive(Clone, Debug)]
+pub struct PointEdit {
+    pub item: usize,
+    pub point: usize,
+    /// Its points, and the scale if it's the reference, as they were.
+    original: Vec<PixelPoint>,
+    scale: Option<Scale>,
+    /// By the mouse (an Alt+drag): letting go keeps it.
+    dragging: bool,
+}
+
+/// One action `u` can take back. Measurements are found by name: names
+/// are never reused, and the log is undone latest first, so they're there.
+#[derive(Clone, Debug)]
+enum MeasureUndo {
+    /// The last `n` measurements were added (an angle's vertex adds several).
+    Added(usize),
+    /// One was deleted from `at` (and was the reference, or not).
+    Deleted {
+        at: usize,
+        item: Measurement,
+        reference: bool,
+    },
+    /// `x`: in or out of the total.
+    Excluded(String),
+    /// `<`/`>`: two swapped places.
+    Swapped(String, String),
+    /// A measurement's points (and the scale, if it was the reference)
+    /// before an edit.
+    Edited {
+        name: String,
+        points: Vec<PixelPoint>,
+        scale: Option<Scale>,
+    },
+    /// `C`: the calibration before it.
+    Calibrated {
+        scale: Option<Scale>,
+        reference: Option<String>,
+        display: Display,
+    },
+}
+
 /// What the overlay draws for Measure, in logical coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeasureView {
@@ -559,6 +828,11 @@ pub struct ItemView {
     pub selected: bool,
     /// Points, for their ticks.
     pub points: Vec<LogicalPoint>,
+    /// An angle's arc between its arms (empty for the rest).
+    pub arc: Vec<LogicalPoint>,
+    /// An angle's label goes out from `anchor` (its arc's middle) this way,
+    /// a unit vector, until it clears the arc; others go beside `anchor`.
+    pub label_out: Option<(f64, f64)>,
 }
 
 impl Session {
@@ -585,16 +859,64 @@ impl Session {
         ))))
     }
 
-    /// Drop a point at the cursor, snapped unless `snap` is off.
-    fn drop_point(&mut self, m: &mut MeasureMode, snap: bool) -> Option<Transition> {
+    /// Drop a point at the cursor, snapped unless `snap` is off. A line
+    /// ends at its second point, unless `keep` (Shift) makes it a path.
+    /// A `click` reaches further for a vertex when Shift'd or `^`'s first:
+    /// the mouse isn't as exact as the keys.
+    fn drop_point(
+        &mut self,
+        m: &mut MeasureMode,
+        snap: bool,
+        keep: bool,
+        click: bool,
+    ) -> Option<Transition> {
+        if m.tool == Prim::Area {
+            // A point inside: the region round it.
+            match self.find_region(m.cursor.at, m.cursor.bounds, &m.walls()) {
+                Ok(points) if points.len() >= 3 => {
+                    m.points = points;
+                    return self.finish_measurement(m);
+                }
+                Ok(_) => m.note = Some("too small to measure".into()),
+                Err(e) => m.note = Some(e),
+            }
+            return None;
+        }
         let mut at = m.cursor.at;
+        let picking_vertex = m.tool == Prim::Angle && m.points.is_empty();
         if snap {
-            let k = SNAP * self.pixels.scale();
-            if let Some(q) = m
-                .snap_points()
-                .filter(|q| dist(p(*q), p(at)) <= k)
-                .min_by(|a, b| dist(p(*a), p(at)).total_cmp(&dist(p(*b), p(at))))
-            {
+            let near = |pts: Vec<PixelPoint>, reach: f64| {
+                let k = reach * self.pixels.scale();
+                pts.into_iter()
+                    .filter(|q| dist(p(*q), p(at)) <= k)
+                    .min_by(|a, b| dist(p(*a), p(at)).total_cmp(&dist(p(*b), p(at))))
+            };
+            // A Shift+click (or `^`'s first click) reaches further for
+            // another measurement's vertex; every point snaps to any point
+            // close by.
+            let mut others: Vec<PixelPoint> = m
+                .items
+                .iter()
+                .flat_map(|i| i.points.iter().copied())
+                .collect();
+            // `^` can also take a point where two lines cross.
+            let crossings = if picking_vertex {
+                m.crossings()
+            } else {
+                Vec::new()
+            };
+            others.extend(&crossings);
+            let far = (click && (keep || picking_vertex))
+                .then(|| near(others, VERTEX_REACH))
+                .flatten()
+                // Else, for a Shift+click, onto a line or path near it.
+                .or_else(|| {
+                    (click && keep)
+                        .then(|| m.on_a_line(at, VERTEX_REACH * self.pixels.scale()))
+                        .flatten()
+                });
+            let close: Vec<PixelPoint> = m.snap_points().chain(crossings).collect();
+            if let Some(q) = far.or_else(|| near(close, SNAP)) {
                 at = q;
                 m.cursor.put(at.x, at.y, false);
             }
@@ -603,12 +925,46 @@ impl Session {
             m.note = Some("that's the last point: move the cursor first".into());
             return None;
         }
+        // `^` on a vertex of straight lines: every angle round it, now.
+        if picking_vertex {
+            let angles = m.angles_at(at);
+            if !angles.is_empty() {
+                m.log.push(MeasureUndo::Added(angles.len()));
+                for points in angles {
+                    let name = m.name_next(Prim::Angle);
+                    m.items.push(Measurement {
+                        kind: Prim::Angle,
+                        points: points.to_vec(),
+                        name,
+                        excluded: false,
+                    });
+                }
+                m.selected = Some(m.items.len() - 1);
+                m.warned = false;
+                return None;
+            }
+        }
         m.points.push(at);
         m.warned = false;
-        if m.tool.complete_at() == Some(m.points.len()) {
+        let done = match m.tool {
+            Prim::Line => !keep && m.points.len() >= 2,
+            tool => tool.complete_at() == Some(m.points.len()),
+        };
+        if done {
             return self.finish_measurement(m);
         }
         None
+    }
+
+    /// The measurement a two-point line becomes: an arc when bent.
+    fn bent(m: &MeasureMode, points: Vec<PixelPoint>) -> (Prim, Vec<PixelPoint>) {
+        let [a, b] = points[..] else {
+            return (m.tool, points);
+        };
+        if m.tool != Prim::Line || m.bend.abs() < 0.5 {
+            return (m.tool, points);
+        }
+        (Prim::Arc, vec![a, peak(a, b, m.bend), b])
     }
 
     /// The measurement in progress becomes one; the first that has a
@@ -624,25 +980,45 @@ impl Session {
             ));
             return None;
         }
-        let name = m.name_next(m.tool);
+        let (kind, points) = Self::bent(m, points);
+        m.bend = 0.0;
+        let name = m.name_next(kind);
         m.items.push(Measurement {
-            kind: m.tool,
+            kind,
             points,
             name,
             excluded: false,
         });
+        m.log.push(MeasureUndo::Added(1));
         m.selected = Some(m.items.len() - 1);
-        if m.tool.calibrates() && m.scale.is_none() && !m.asked {
-            m.asked = true;
-            return Some(self.ask_calibration(m, m.items.len() - 1));
-        }
+        // Pixels until asked: C on a line or arc sets the scale.
         None
     }
 
     fn ask_calibration(&mut self, m: &mut MeasureMode, index: usize) -> Transition {
         m.calibrating = Some(index);
-        let a = m.items[index].anchor();
-        Transition::Push(Mode::Text(TextMode::calibration(self.px_logical(a))))
+        let item = &m.items[index];
+        let mut t = TextMode::calibration(self.px_logical(item.anchor()));
+        // Read the scale bar it may run along: OCR round the line, which
+        // fills the prompt if it reads one before anything's typed.
+        let (a, b) = (item.points[0], *item.points.last().expect("a line"));
+        let k = self.pixels.scale();
+        let pad = rnd(48.0 * k);
+        let (x0, y0) = (a.x.min(b.x) - pad, a.y.min(b.y) - pad);
+        let (x1, y1) = (a.x.max(b.x) + pad, a.y.max(b.y) + pad);
+        let r = crate::geometry::PixelRect::new(x0, y0, x1 - x0, y1 - y0);
+        let c = m.cursor.bounds;
+        let rect = crate::geometry::PixelRect::new(
+            r.x.max(c.x),
+            r.y.max(c.y),
+            (r.x + r.w).min(c.x + c.w) - r.x.max(c.x),
+            (r.y + r.h).min(c.y + c.h) - r.y.max(c.y),
+        );
+        match self.start_job(crate::session::JobKind::Ocr { rect }) {
+            (_, Some(result)) => fill_reading(&mut t, result, a, b),
+            (id, None) => t.reading = Some((id, a, b)),
+        }
+        Transition::Push(Mode::Text(t))
     }
 
     /// The typed real length came back.
@@ -652,11 +1028,7 @@ impl Session {
         };
         match units::parse_length(text) {
             Ok(real) => self.set_reference(m, i, real),
-            Err(e) => {
-                // C asks again.
-                m.note = Some(e);
-                m.asked = false;
-            }
+            Err(e) => m.note = Some(e), // C asks again
         }
     }
 
@@ -668,90 +1040,79 @@ impl Session {
             return;
         }
         let s = Scale::new(px, real, item.points.len());
-        if s.error > units::SHORT_REFERENCE {
-            m.note = Some(format!(
-                "short reference (±{:.1}%): measure a longer one, or zoom the source",
-                s.error * 100.0
-            ));
-        }
+        m.log.push(MeasureUndo::Calibrated {
+            scale: m.scale,
+            reference: m.reference.clone(),
+            display: m.display,
+        });
         m.reference = Some(item.name.clone());
         m.display = Display::Real(s.unit);
         m.scale = Some(s);
         self.measure_scale = Some(s);
     }
 
-    /// `u`: the last point, else the last measurement (and the scale, if
-    /// it was the reference).
+    /// `u`: the last point of the one in progress, else the last action.
     fn measure_undo(&mut self, m: &mut MeasureMode) {
         if m.points.pop().is_some() {
             return;
         }
-        let Some(last) = m.items.pop() else { return };
-        if m.reference.as_deref() == Some(last.name.as_str()) {
-            m.reference = None;
-            m.scale = None;
-            m.display = Display::Pixels;
-            m.asked = false;
-            self.measure_scale = None;
-        }
-        m.selected = m.items.len().checked_sub(1);
-    }
-
-    /// `a`: the measurements as an annotation layer, then back to Select,
-    /// where Enter captures with them in.
-    fn bake(&mut self, m: &MeasureMode) -> Transition {
-        if m.items.is_empty() {
-            return Transition::Pop;
-        }
-        let rgb = self.ink.rgb;
-        let width = 2.0;
-        let mut ops = Vec::new();
-        for item in &m.items {
-            let (line, closed) = item.outline();
-            let pts: Vec<LogicalPoint> = line.iter().map(|&q| self.px_logical(q)).collect();
-            match item.kind {
-                Prim::Line if pts.len() == 2 => ops.push(OpData::Line(LineOp {
-                    a: pts[0],
-                    b: pts[1],
-                    rgb,
-                    width,
-                    heads: Heads::Both,
-                })),
-                Prim::Circle if pts.len() > 2 => {
-                    let v = item.values();
-                    let (c, r) = (item.anchor(), v.radius.unwrap_or(0.0));
-                    let a = self.px_logical((c.0 - r, c.1 - r));
-                    let b = self.px_logical((c.0 + r, c.1 + r));
-                    ops.push(OpData::Shape(ShapeOp {
-                        kind: ShapeKind::Circle,
-                        rect: LogicalRect::from_edges(a.x, a.y, b.x, b.y),
-                        rgb,
-                        width,
-                    }));
+        let index = |m: &MeasureMode, name: &str| m.items.iter().position(|i| i.name == name);
+        match m.log.pop() {
+            None => m.note = Some("nothing to undo".into()),
+            Some(MeasureUndo::Added(n)) => {
+                let keep = m.items.len().saturating_sub(n);
+                m.items.truncate(keep);
+                m.selected = m.items.len().checked_sub(1);
+            }
+            Some(MeasureUndo::Deleted {
+                at,
+                item,
+                reference,
+            }) => {
+                if reference {
+                    m.reference = Some(item.name.clone());
                 }
-                _ => {
-                    let mut pts = pts;
-                    if closed {
-                        pts.push(pts[0]);
-                    }
-                    ops.push(OpData::Stroke(StrokeOp {
-                        points: pts,
-                        rgb,
-                        width,
-                    }));
+                let at = at.min(m.items.len());
+                m.items.insert(at, item);
+                m.selected = Some(at);
+            }
+            Some(MeasureUndo::Excluded(name)) => {
+                if let Some(i) = index(m, &name) {
+                    m.items[i].excluded = !m.items[i].excluded;
+                    m.selected = Some(i);
                 }
             }
-            let at = self.px_logical(item.anchor());
-            ops.push(OpData::Text(TextOp {
-                origin: LogicalPoint::new(at.x + 4.0, at.y + 4.0),
-                text: m.label(item),
-                rgb,
-                size: 14.0,
-                chip: true,
-            }));
+            Some(MeasureUndo::Swapped(a, b)) => {
+                if let (Some(i), Some(j)) = (index(m, &a), index(m, &b)) {
+                    m.items.swap(i, j);
+                    m.selected = Some(j);
+                }
+            }
+            Some(MeasureUndo::Edited {
+                name,
+                points,
+                scale,
+            }) => {
+                if let Some(i) = index(m, &name) {
+                    m.items[i].points = points;
+                    m.selected = Some(i);
+                }
+                if scale.is_some() {
+                    m.scale = scale;
+                    self.measure_scale = scale;
+                }
+            }
+            Some(MeasureUndo::Calibrated {
+                scale,
+                reference,
+                display,
+            }) => {
+                m.scale = scale;
+                m.reference = reference;
+                m.display = display;
+                self.measure_scale = scale;
+            }
         }
-        self.add_layer(ops);
-        Transition::PopTo(0)
     }
 
     pub(crate) fn measure_view(&self) -> Option<MeasureView> {
@@ -769,21 +1130,34 @@ impl Session {
             .enumerate()
             .map(|(i, item)| {
                 let (line, closed) = item.outline();
+                let arc = item.angle_arc(self.pixels.scale());
                 ItemView {
                     line: line.iter().map(|&q| self.px_logical(q)).collect(),
                     closed,
                     filled: item.kind == Prim::Area,
                     label: m.label(item),
-                    anchor: self.px_logical(item.anchor()),
+                    anchor: self.px_logical(arc.as_ref().map_or(item.anchor(), |a| a.1)),
+                    label_out: arc.as_ref().map(|a| a.2),
                     reference: m.reference.as_deref() == Some(item.name.as_str()),
                     selected: Some(i) == m.selected,
                     points: item.points.iter().map(|&q| self.px_logical(p(q))).collect(),
+                    arc: arc.map_or_else(Vec::new, |(arc, ..)| {
+                        arc.iter().map(|&q| self.px_logical(q)).collect()
+                    }),
                 }
             })
             .collect();
         let mut progress: Vec<LogicalPoint> =
             m.points.iter().map(|&q| self.px_logical(p(q))).collect();
-        if !progress.is_empty() {
+        if let (Some(&a), true) = (progress.first(), m.line_open() && m.bend != 0.0) {
+            // An open line bent into an arc, to the cursor.
+            let c = self.px_logical(p(m.cursor.at));
+            progress.extend(crate::annotate::arc_points(
+                a,
+                c,
+                m.bend / self.pixels.scale(),
+            ));
+        } else if !progress.is_empty() {
             progress.push(self.px_logical(p(m.cursor.at)));
         }
         Some(MeasureView {
@@ -797,17 +1171,52 @@ impl Session {
         let c = m.cursor.at;
         let mut s = format!("{}  ({},{})", m.tool.name(), c.x, c.y);
         if let Some(&last) = m.points.last() {
-            let d = dist(p(last), p(c));
+            // The live length: along the arc when an open line is bent,
+            // else straight (other tools' kinds need more points).
+            let straight = dist(p(last), p(c));
+            let d = if m.line_open() && m.bend != 0.0 {
+                let (kind, points) = Self::bent(m, vec![last, c]);
+                Measurement {
+                    kind,
+                    points,
+                    name: String::new(),
+                    excluded: false,
+                }
+                .values()
+                .length
+                .unwrap_or(straight)
+            } else {
+                straight
+            };
             s.push_str(&format!(
                 "  → {}",
                 units::length(d, 2, m.scale.as_ref(), m.display)
             ));
+            if m.line_open() && m.bend != 0.0 {
+                s.push_str(&format!("  arc {}px", m.bend));
+            }
+            if self.input_mods().ctrl {
+                s.push_str("  45° lock");
+            }
         }
         if let Some(sc) = &m.scale {
             s.push_str(&format!("  {}", sc.describe()));
+            // As long as it lasts: a measurement is only as good as this.
+            if sc.error > units::SHORT_REFERENCE {
+                s.push_str("  short reference: measure a longer one, or zoom the source");
+            }
             if m.display == Display::Pixels {
                 s.push_str(" (showing px)");
             }
+        }
+        if let Some(e) = &m.edit {
+            let it = &m.items[e.item];
+            s.push_str(&format!(
+                "  editing {} point {}/{}",
+                it.name,
+                e.point + 1,
+                it.points.len()
+            ));
         }
         if m.warned {
             s.push_str(&format!("  Esc again drops {} measurements", m.items.len()));
@@ -817,16 +1226,172 @@ impl Session {
         s
     }
 
+    /// Start moving point `point` of measurement `item`.
+    fn edit_start(&mut self, m: &mut MeasureMode, item: usize, point: usize, dragging: bool) {
+        let it = &m.items[item];
+        let reference = m.reference.as_deref() == Some(it.name.as_str());
+        m.edit = Some(PointEdit {
+            item,
+            point,
+            original: it.points.clone(),
+            scale: if reference { m.scale } else { None },
+            dragging,
+        });
+        m.selected = Some(item);
+        let q = it.points[point];
+        m.cursor.put(q.x, q.y, true);
+    }
+
+    /// The edited point follows the cursor; the reference's scale keeps
+    /// its real length over the new pixel length.
+    fn edit_follow(&mut self, m: &mut MeasureMode) {
+        let Some(e) = &m.edit else { return };
+        let (i, k) = (e.item, e.point);
+        m.items[i].points[k] = m.cursor.at;
+        if m.reference.as_deref() == Some(m.items[i].name.as_str()) {
+            let item = &m.items[i];
+            if let (Some(s), Some(px)) = (m.scale, item.values().length) {
+                if px > 0.0 {
+                    let n = item.points.len() as f64;
+                    let s = Scale {
+                        px,
+                        error: n.sqrt() * units::POINT_ERROR / px,
+                        ..s
+                    };
+                    m.scale = Some(s);
+                    self.measure_scale = Some(s);
+                }
+            }
+        }
+    }
+
+    /// Keep the edit (one undo step, if anything moved), or put it back.
+    fn edit_end(&mut self, m: &mut MeasureMode, keep: bool) {
+        let Some(e) = m.edit.take() else { return };
+        let item = &mut m.items[e.item];
+        if !keep {
+            item.points = e.original;
+            if e.scale.is_some() {
+                m.scale = e.scale;
+                self.measure_scale = e.scale;
+            }
+        } else if item.points != e.original {
+            m.log.push(MeasureUndo::Edited {
+                name: item.name.clone(),
+                points: e.original,
+                scale: e.scale,
+            });
+        }
+    }
+
+    /// Alt+click: select the measurement under it; on one of its points,
+    /// move that point while the button's down.
+    fn alt_press(&mut self, m: &mut MeasureMode, at: LogicalPoint) {
+        let q = p(self.pixels.pixel_under(at));
+        let reach = VERTEX_REACH * self.pixels.scale();
+        let on_point = m
+            .items
+            .iter()
+            .enumerate()
+            .flat_map(|(i, it)| it.points.iter().enumerate().map(move |(k, &v)| (i, k, v)))
+            .map(|(i, k, v)| (dist(p(v), q), i, k))
+            .filter(|&(d, ..)| d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, i, k)) = on_point {
+            self.edit_start(m, i, k, true);
+            return;
+        }
+        let on_line = m
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| (it.distance_to(q), i))
+            .filter(|&(d, _)| d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match on_line {
+            Some((_, i)) => m.selected = Some(i),
+            None => m.note = Some("no measurement there".into()),
+        }
+    }
+
     pub(crate) fn measure_intent(&mut self, m: &mut MeasureMode, intent: Intent) -> Transition {
         let shift = self.input_mods().shift;
         let alt = self.input_mods().alt;
+        let ctrl = self.input_mods().ctrl;
+        // Moving a placed point: the cursor's keys and the mouse move it;
+        // Space or Enter keep it, Esc or u put it back, o goes to the next.
+        if let Some(e) = &m.edit {
+            let dragging = e.dragging;
+            match intent {
+                Intent::SwapOpposite => {
+                    let (i, k) = (e.item, e.point);
+                    let next = (k + 1) % m.items[i].points.len();
+                    m.edit.as_mut().expect("editing").point = next;
+                    let q = m.items[i].points[next];
+                    m.cursor.put(q.x, q.y, true);
+                    return Transition::Stay;
+                }
+                Intent::DropPoint | Intent::AddPoint | Intent::Confirm => {
+                    self.edit_end(m, true);
+                    return Transition::Stay;
+                }
+                Intent::Release(_) if dragging => {
+                    self.edit_end(m, true);
+                    return Transition::Stay;
+                }
+                Intent::Back | Intent::Undo => {
+                    self.edit_end(m, false);
+                    return Transition::Stay;
+                }
+                Intent::Motion(at) if dragging => {
+                    let q = self.pixels.pixel_under(at);
+                    m.cursor.put(q.x, q.y, false);
+                    self.edit_follow(m);
+                    return Transition::Stay;
+                }
+                Intent::Steer(_)
+                | Intent::Translate(_)
+                | Intent::HeldSteer(..)
+                | Intent::HeldTranslate(..)
+                | Intent::Scale(..)
+                | Intent::Jump(_)
+                | Intent::FarEdge(_)
+                | Intent::Motion(_)
+                | Intent::Adjust(_)
+                | Intent::ToggleHelp => {} // below, then the point follows
+                _ => self.edit_end(m, true), // anything else keeps it first
+            }
+        } else if intent == Intent::SwapOpposite {
+            // `o`: edit the selected measurement's points, from the first.
+            match m.selected {
+                Some(i) if m.points.is_empty() => self.edit_start(m, i, 0, false),
+                _ => m.note = Some("select a measurement ([ ], Alt+click), then o".into()),
+            }
+            return Transition::Stay;
+        }
+        let t = self.measure_intent_inner(m, intent, shift, alt, ctrl);
+        if m.edit.is_some() {
+            self.edit_follow(m);
+        }
+        t
+    }
+
+    fn measure_intent_inner(
+        &mut self,
+        m: &mut MeasureMode,
+        intent: Intent,
+        shift: bool,
+        alt: bool,
+        ctrl: bool,
+    ) -> Transition {
         if !matches!(
             intent,
             Intent::Back | Intent::Motion(_) | Intent::ToggleHelp
         ) {
             m.warned = false;
         }
-        if !matches!(intent, Intent::Motion(_)) {
+        // (letting go of a click isn't fresh input: its note stays)
+        if !matches!(intent, Intent::Motion(_) | Intent::Release(_)) {
             m.note = None;
         }
         let step = m.step;
@@ -870,33 +1435,42 @@ impl Session {
                     crate::geometry::Axis::Y => m.cursor.put(c.x, e, true),
                 }
             }
+            // On an open line, +/- and the wheel bend it; else the step.
+            Intent::Adjust(n) if m.line_open() => m.bend += BEND_STEP * f64::from(n),
             Intent::Adjust(n) => m.step = (m.step + n).clamp(STEP_MIN, STEP_MAX),
             Intent::Measure(kind) => {
                 if kind != m.tool {
                     m.points.clear();
+                    m.bend = 0.0;
                 }
                 m.tool = kind;
             }
-            Intent::DropPoint => {
-                if let Some(t) = self.drop_point(m, !alt) {
+            Intent::DropPoint | Intent::AddPoint => {
+                if let Some(t) = self.drop_point(m, !alt, intent == Intent::AddPoint, false) {
                     return t;
                 }
             }
             Intent::Motion(at) => {
                 if m.pointer.is_some_and(|was| was != at) {
-                    let q = self.pixels.pixel_under(at);
+                    let mut q = self.pixels.pixel_under(at);
+                    // Ctrl held: locked to 0/45/90° from the last point.
+                    if let (true, Some(&last)) = (ctrl, m.points.last()) {
+                        q = lock45(last, q);
+                    }
                     m.cursor.put(q.x, q.y, false);
                 }
                 m.pointer = Some(at);
             }
+            Intent::Press(at) if alt => self.alt_press(m, at),
             Intent::Press(at) => {
                 let mut q = self.pixels.pixel_under(at);
-                // Shift on a click: locked to 45° from the last point.
-                if let (true, Some(&last)) = (shift, m.points.last()) {
+                // Ctrl on a click: locked to 45° from the last point.
+                if let (true, Some(&last)) = (ctrl, m.points.last()) {
                     q = lock45(last, q);
                 }
                 m.cursor.put(q.x, q.y, true);
-                if let Some(t) = self.drop_point(m, !alt) {
+                // Shift on a click keeps a line going, as a path.
+                if let Some(t) = self.drop_point(m, true, shift, true) {
                     return t;
                 }
             }
@@ -904,7 +1478,7 @@ impl Session {
                 if let Some(&last) = m.points.last() {
                     // Enter ends at the cursor, if it moved on.
                     if last != m.cursor.at {
-                        if let Some(t) = self.drop_point(m, !alt) {
+                        if let Some(t) = self.drop_point(m, !alt, false, false) {
                             return t;
                         }
                     }
@@ -949,12 +1523,12 @@ impl Session {
                 Some(i) if m.items[i].kind.calibrates() => {
                     return self.ask_calibration(m, i);
                 }
-                _ => {
-                    m.asked = false;
-                    m.note = Some("the next line or arc sets the scale".into());
-                }
+                _ => m.note = Some("select a line or arc ([ ]), then C sets the scale".into()),
             },
             Intent::UnitSystem => match (m.display, m.scale) {
+                (_, Some(s)) if s.unit.is_tag() => {
+                    m.note = Some(format!("{}: nothing to convert to", s.unit.name()));
+                }
                 (Display::Real(u), Some(_)) => m.display = Display::Real(u.other()),
                 (Display::Pixels, Some(s)) => m.display = Display::Real(s.unit),
                 _ => m.note = Some("not calibrated".into()),
@@ -975,18 +1549,39 @@ impl Session {
             Intent::ListDelete => {
                 if let Some(i) = m.selected {
                     let gone = m.items.remove(i);
-                    if m.reference.as_deref() == Some(gone.name.as_str()) {
+                    let reference = m.reference.as_deref() == Some(gone.name.as_str());
+                    if reference {
                         m.reference = None; // the scale stays
                     }
+                    m.log.push(MeasureUndo::Deleted {
+                        at: i,
+                        item: gone,
+                        reference,
+                    });
                     m.selected = (!m.items.is_empty()).then(|| i.min(m.items.len() - 1));
                 }
             }
             Intent::ListToggle => {
                 if let Some(i) = m.selected {
                     m.items[i].excluded = !m.items[i].excluded;
+                    m.log.push(MeasureUndo::Excluded(m.items[i].name.clone()));
                 }
             }
-            Intent::Bake => return self.bake(m),
+            Intent::ListMove(d) => {
+                // Shown first-made at the top: up (`>`) is towards index 0.
+                if let Some(i) = m.selected {
+                    let j = i as i64 - i64::from(d);
+                    if (0..m.items.len() as i64).contains(&j) {
+                        let j = j as usize;
+                        m.items.swap(i, j);
+                        m.log.push(MeasureUndo::Swapped(
+                            m.items[i].name.clone(),
+                            m.items[j].name.clone(),
+                        ));
+                        m.selected = Some(j);
+                    }
+                }
+            }
             Intent::Loupe => {
                 return Transition::Push(Mode::Loupe(LoupeMode::new(
                     &self.pixels,
@@ -1009,6 +1604,30 @@ impl Session {
         Transition::Stay
     }
 
+    /// Space (or Shift+Space) in a loupe over Measure: a point at the
+    /// loupe's pixel exactly (unsnapped), and the loupe stays up. Only the length prompt (the
+    /// first line done) takes it down, to ask.
+    pub(crate) fn drop_through_loupe(&mut self, intent: Intent) {
+        let (Some(Mode::Loupe(mut l)), Some(Mode::Measure(mut m))) =
+            (self.stack_mut().pop(), self.stack_mut().pop())
+        else {
+            unreachable!("only called over Measure")
+        };
+        m.cursor.put(l.cursor.at.x, l.cursor.at.y, false);
+        // Exactly where the loupe is: no snapping, it's there for precision.
+        m.note = None;
+        let t = self
+            .drop_point(&mut m, false, intent == Intent::AddPoint, false)
+            .unwrap_or(Transition::Stay);
+        l.cursor.put(m.cursor.at.x, m.cursor.at.y, false);
+        self.loupe_at = Some(l.cursor.at);
+        self.stack_mut().push(Mode::Measure(m));
+        match t {
+            Transition::Stay => self.stack_mut().push(Mode::Loupe(l)),
+            other => self.apply(other),
+        }
+    }
+
     fn deliver_measurements(&self, m: &MeasureMode) -> Transition {
         Transition::Finish(Outcome::Done(FinishedAction::Measure {
             text: m.text(),
@@ -1016,11 +1635,121 @@ impl Session {
         }))
     }
 
+    fn find_region(
+        &mut self,
+        seed: PixelPoint,
+        bounds: PixelRect,
+        walls: &[(PixelPoint, PixelPoint)],
+    ) -> Result<Vec<PixelPoint>, String> {
+        let Some(mut f) = self.edge_finder.take() else {
+            return Err("no picture to flood here".into());
+        };
+        let r = f.region(self, seed, bounds, walls);
+        self.edge_finder = Some(f);
+        r
+    }
+
     fn find_edge(&mut self, from: PixelPoint, d: Dir, bounds: PixelRect) -> Option<PixelPoint> {
         let mut f = self.edge_finder.take()?;
         let r = f.edge(self, from, d, bounds);
         self.edge_finder = Some(f);
         r
+    }
+}
+
+/// The point `bend` off the middle of the chord a→b, to its left on
+/// screen (up when it runs rightwards): an arc's middle point.
+fn peak(a: PixelPoint, b: PixelPoint, bend: f64) -> PixelPoint {
+    let (dx, dy) = (f64::from(b.x - a.x), f64::from(b.y - a.y));
+    let len = dx.hypot(dy).max(1e-9);
+    let (mx, my) = (f64::from(a.x + b.x) / 2.0, f64::from(a.y + b.y) / 2.0);
+    PixelPoint::new(rnd(mx + dy / len * bend), rnd(my - dx / len * bend))
+}
+
+/// A length read off a scale bar next to a line from `a` to `b`: the
+/// numbers nearest each end (`0 … 100 m` reads `100 m`), or a lone number
+/// (a `5 km` label), with the unit glued to one or the nearest unit word.
+/// None when there's no number to read.
+pub fn scale_bar(ocr: &crate::ocr::OcrResult, a: PixelPoint, b: PixelPoint) -> Option<String> {
+    let word = regex::Regex::new(r"^([0-9]+(?:\.[0-9]+)?)([A-Za-z]+)?$").expect("a pattern");
+    let centre = |r: PixelRect| {
+        (
+            f64::from(r.x) + f64::from(r.w) / 2.0,
+            f64::from(r.y) + f64::from(r.h) / 2.0,
+        )
+    };
+    let mut numbers: Vec<(f64, P, Option<units::Unit>)> = Vec::new();
+    let mut unit_words: Vec<(units::Unit, P)> = Vec::new();
+    for w in &ocr.words {
+        let t = w.text.trim_matches(|c: char| ",;:()".contains(c));
+        if let Some(c) = word.captures(t) {
+            let value: f64 = c[1].parse().ok()?;
+            let unit = c
+                .get(2)
+                .and_then(|u| units::Unit::standard_name(u.as_str()));
+            if c.get(2).is_none() || unit.is_some() {
+                numbers.push((value, centre(w.bbox), unit));
+            }
+        } else if let Some(u) = units::Unit::standard_name(t) {
+            unit_words.push((u, centre(w.bbox)));
+        }
+    }
+    // A number belongs to an end if it's near it; a bar's start may be an
+    // unread (or unlabelled) 0, and a lone number is a label of its own.
+    let len = dist(p(a), p(b));
+    let near = 24f64.max(0.15 * len);
+    let nearest = |q: P| {
+        numbers
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (dist(n.1, q), i))
+            .filter(|&(d, _)| d <= near)
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .map(|(_, i)| i)
+    };
+    let (start, end) = (nearest(p(a)), nearest(p(b)));
+    let (value, i, j) = match (start, end) {
+        (Some(i), Some(j)) if i != j => ((numbers[j].0 - numbers[i].0).abs(), i, j),
+        (Some(i), _) | (None, Some(i)) => (numbers[i].0, i, i),
+        (None, None) if numbers.len() == 1 => (numbers[0].0, 0, 0),
+        (None, None) => return None,
+    };
+    if value <= 0.0 {
+        return None;
+    }
+    let mid = ((f64::from(a.x + b.x)) / 2.0, (f64::from(a.y + b.y)) / 2.0);
+    let unit = numbers[j].2.or(numbers[i].2).or_else(|| {
+        unit_words
+            .iter()
+            .min_by(|x, y| dist(x.1, mid).total_cmp(&dist(y.1, mid)))
+            .map(|u| u.0)
+    });
+    let v = if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value}")
+    };
+    Some(match unit {
+        Some(u) => format!("{v} {}", u.name()),
+        None => v,
+    })
+}
+
+/// A scale-bar reading into the calibration prompt, unless it's been
+/// typed in already.
+pub(crate) fn fill_reading(
+    t: &mut TextMode,
+    result: crate::session::JobResult,
+    a: PixelPoint,
+    b: PixelPoint,
+) {
+    t.reading = None;
+    let crate::session::JobResult::Ocr(Ok(ocr)) = result else {
+        return; // no OCR, or it failed: just type it
+    };
+    if let (Some(text), true) = (scale_bar(&ocr, a, b), t.text.is_empty()) {
+        t.text = text;
+        t.suggested = true;
     }
 }
 
@@ -1088,6 +1817,67 @@ mod tests {
     }
 
     #[test]
+    fn too_few_points_give_nothing_rather_than_a_panic() {
+        for kind in [
+            Prim::Line,
+            Prim::Arc,
+            Prim::Circle,
+            Prim::Area,
+            Prim::Rect,
+            Prim::Angle,
+        ] {
+            let short = m(kind, &[(0, 0), (10, 5)][..kind.min_points() - 1]);
+            assert_eq!(short.values(), Values::default(), "{kind:?}");
+            let _ = (short.outline(), short.anchor());
+        }
+    }
+
+    #[test]
+    fn an_angle_draws_its_arc_between_the_arms_and_labels_off_its_middle() {
+        // Right and up from (100, 100): a quarter circle, the short way.
+        let a = m(Prim::Angle, &[(200, 100), (100, 100), (100, 0)]);
+        let (arc, mid, out) = a.angle_arc(1.0).unwrap();
+        let r = 30.0; // 0.4 of a 100px arm, at most 30
+        for q in &arc {
+            assert!((dist(*q, (100.0, 100.0)) - r).abs() < 1e-9);
+            assert!(
+                q.0 >= 100.0 - 1e-9 && q.1 <= 100.0 + 1e-9,
+                "in the quadrant: {q:?}"
+            );
+        }
+        assert!((arc[0].0 - 130.0).abs() < 1e-9 && (arc[24].1 - 70.0).abs() < 1e-9);
+        // Its middle is on the bisector, and out is up and to the right.
+        let d = r / 2f64.sqrt();
+        assert!((mid.0 - (100.0 + d)).abs() < 1e-9 && (mid.1 - (100.0 - d)).abs() < 1e-9);
+        let h = 1.0 / 2f64.sqrt();
+        assert!((out.0 - h).abs() < 1e-9 && (out.1 + h).abs() < 1e-9);
+        // Short arms keep it small, but not below 8px.
+        let small = m(Prim::Angle, &[(110, 100), (100, 100), (100, 90)]);
+        let (arc, ..) = small.angle_arc(1.0).unwrap();
+        assert!((dist(arc[0], (100.0, 100.0)) - 8.0).abs() < 1e-9);
+        assert!(m(Prim::Line, &[(0, 0), (1, 1)]).angle_arc(1.0).is_none());
+    }
+
+    #[test]
+    fn an_areas_label_goes_at_its_centroid_however_its_points_bunch() {
+        // A 100x50 rectangle with many points bunched on its right side.
+        let mut pts = vec![(0, 0), (100, 0)];
+        pts.extend((1..20).map(|i| (100, i)));
+        pts.extend([(100, 50), (0, 50)]);
+        let a = m(Prim::Area, &pts).anchor();
+        assert!(
+            (a.0 - 50.0).abs() < 1e-6 && (a.1 - 25.0).abs() < 1e-6,
+            "{a:?}"
+        );
+    }
+
+    #[test]
+    fn a_flat_line_points_at_0_degrees_not_minus_0() {
+        let v = m(Prim::Line, &[(0, 0), (30, 0)]).values();
+        assert_eq!(units::degrees(v.degrees.unwrap()), "0.0°");
+    }
+
+    #[test]
     fn a_shift_click_locks_to_45_degrees() {
         let o = PixelPoint::new(0, 0);
         assert_eq!(lock45(o, PixelPoint::new(100, 9)), PixelPoint::new(100, 0));
@@ -1098,5 +1888,81 @@ mod tests {
     fn a_line_labels_at_its_middle() {
         let a = m(Prim::Line, &[(0, 0), (10, 0), (10, 10)]).anchor();
         assert!((a.0 - 10.0).abs() < 1e-9 && a.1.abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod scale_bar_tests {
+    use super::*;
+    use crate::ocr::{OcrResult, OcrWord};
+
+    /// Words at (x, y), 10px a character, 12 high.
+    fn ocr(words: &[(&str, i32, i32)]) -> OcrResult {
+        OcrResult {
+            text: String::new(),
+            words: words
+                .iter()
+                .map(|&(t, x, y)| OcrWord {
+                    text: t.into(),
+                    bbox: PixelRect::new(x, y, 10 * t.chars().count() as i32, 12),
+                    confidence: Some(90.0),
+                    line: 0,
+                })
+                .collect(),
+        }
+    }
+
+    fn read(words: &[(&str, i32, i32)]) -> Option<String> {
+        scale_bar(
+            &ocr(words),
+            PixelPoint::new(100, 100),
+            PixelPoint::new(300, 100),
+        )
+    }
+
+    #[test]
+    fn a_bar_reads_as_the_numbers_at_its_ends() {
+        // "0     50    100 m" under a bar from x 100 to 300.
+        let bar = [
+            ("0", 95, 106),
+            ("50", 190, 106),
+            ("100", 285, 106),
+            ("m", 330, 106),
+        ];
+        assert_eq!(read(&bar).as_deref(), Some("100 m"));
+        // Glued units, and a bar that doesn't start at 0.
+        let bar = [("10km", 85, 106), ("20km", 280, 106)];
+        assert_eq!(read(&bar).as_deref(), Some("10 km"));
+        // Only part of a bar: from 0 to 50 of it.
+        let bar = [
+            ("0", 95, 106),
+            ("50", 290, 106),
+            ("100", 485, 106),
+            ("ft", 530, 106),
+        ];
+        assert_eq!(read(&bar).as_deref(), Some("50 ft"));
+    }
+
+    #[test]
+    fn a_bar_whose_0_wasnt_read_starts_at_0() {
+        // OCR often drops a lone "0": "50 100 m", the line from 0 to 100.
+        let bar = [("50", 190, 106), ("100", 285, 106), ("m", 330, 106)];
+        assert_eq!(read(&bar).as_deref(), Some("100 m"));
+    }
+
+    #[test]
+    fn a_single_label_reads_as_itself_and_nothing_reads_as_nothing() {
+        assert_eq!(
+            read(&[("5", 180, 80), ("km", 200, 80)]).as_deref(),
+            Some("5 km")
+        );
+        assert_eq!(read(&[("1:500", 180, 80)]), None);
+        assert_eq!(read(&[("Kitchen", 150, 60)]), None);
+        assert_eq!(read(&[]), None);
+        // A number with no unit near: plain.
+        assert_eq!(
+            read(&[("0", 95, 106), ("40", 290, 106)]).as_deref(),
+            Some("40")
+        );
     }
 }

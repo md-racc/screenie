@@ -396,3 +396,34 @@ fn a_held_key_in_the_loupe_is_not_a_new_press_in_select() {
     s.keys("h");
     assert_ne!(s.rect(), START);
 }
+
+fn loupe_at(s: &Session) -> (i32, i32) {
+    match s.modes().last() {
+        Some(Mode::Loupe(l)) => (l.cursor.at.x, l.cursor.at.y),
+        _ => panic!("not in the loupe: {}", s.mode_name()),
+    }
+}
+
+#[test]
+fn the_loupe_reopens_where_it_was_left_for_this_run_only() {
+    let mut s = session();
+    s.keys("z");
+    assert_eq!(loupe_at(&s), (380, 215)); // the box's centre
+    s.keys("l l l j z"); // move it, leave it
+    s.keys("l"); // the box changes meanwhile
+    s.keys("z");
+    assert_eq!(loupe_at(&s), (383, 216));
+    let mut fresh = session(); // a new run starts at the centre again
+    fresh.keys("z");
+    assert_eq!(loupe_at(&fresh), (380, 215));
+}
+
+#[test]
+fn a_remembered_loupe_spot_outside_the_box_is_clamped_into_it() {
+    let mut s = session();
+    s.keys("z");
+    s.button(Button::Left, p(650.5, 250.5), true);
+    s.button(Button::Left, p(650.5, 250.5), false);
+    s.keys("z h h h h z"); // the box shrinks 20px from the right
+    assert_eq!(loupe_at(&s), (639, 250));
+}

@@ -35,6 +35,15 @@ pub struct TextMode {
     pub at: LogicalPoint,
     pub size: f64,
     pub chip: bool,
+    /// A calibration's scale-bar reading in flight: the job, and the
+    /// line's ends to read it against.
+    pub reading: Option<(
+        u64,
+        crate::geometry::PixelPoint,
+        crate::geometry::PixelPoint,
+    )>,
+    /// The text was read off a scale bar (and not typed yet).
+    pub suggested: bool,
 }
 
 impl TextMode {
@@ -45,6 +54,8 @@ impl TextMode {
             at,
             size: SIZE,
             chip: true,
+            reading: None,
+            suggested: false,
         }
     }
 
@@ -84,7 +95,13 @@ impl Session {
     pub(crate) fn text_intent(&mut self, t: &mut TextMode, intent: Intent) -> Transition {
         let styled = t.purpose == TextPurpose::Annotation;
         match intent {
-            Intent::Type(c) => t.text.push(c),
+            Intent::Type(c) => {
+                if std::mem::take(&mut t.suggested) {
+                    t.text.clear(); // typing replaces a reading
+                }
+                t.reading = None; // and one still coming is too late
+                t.text.push(c);
+            }
             Intent::Newline if styled => t.text.push('\n'),
             Intent::Backspace => {
                 t.text.pop();
@@ -122,7 +139,17 @@ impl Session {
             }
             TextPurpose::CalloutNumber => format!("next callout number: {}|", t.text),
             TextPurpose::Calibration => {
-                format!("= {}|  (Enter sets the scale, Esc stays in pixels)", t.text)
+                let from = if t.reading.is_some() {
+                    "  reading the scale bar…"
+                } else if t.suggested {
+                    "  read off the scale bar"
+                } else {
+                    ""
+                };
+                format!(
+                    "= {}|{from}  (5 m, or a number alone; Enter sets the scale, Esc stays in pixels)",
+                    t.text
+                )
             }
         }
     }

@@ -2,8 +2,10 @@
 
 **Status:** implemented in the Rust port (milestone 10). `README.md`
 (Annotate, Annotation extensions) is the reference now; this page is the
-design history. Where they differ, the README wins: line is `s` and the
-highlighter is `m` (a pen mode), because Shift+hjkl move the keyboard pen;
+design history. Where they differ, the README wins: straight lines and
+arcs are the pen held with Shift or Ctrl (there's no line key; a plain
+line is still Shape's `t` cycle), the highlighter is `m` (a pen mode),
+shapes start as a point at the loupe's spot or the pointer;
 the highlight is a trace, not a box; clicking text to re-edit it isn't
 built.
 
@@ -89,8 +91,7 @@ These are new layer ops, each with `key()` and `bbox()` like the others:
 - `CalloutOp(centre, n, rgb, size)`.
 - `TextOp(origin, text, rgb, size, chip)`.
 
-Measure's bake step (`docs/measure.md`) reuses `LineOp` (dimension arrows)
-and `TextOp` (labels).
+(Measure's bake step, which reused `LineOp` and `TextOp`, was dropped.)
 
 ## Open questions
 

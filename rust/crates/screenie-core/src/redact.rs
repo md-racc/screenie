@@ -23,6 +23,8 @@ pub enum Category {
     Entropy,
     UrlSecret,
     Card,
+    /// A card's CVV/CVC/CID: 3-4 digits after a keyword, or near a card.
+    SecurityCode,
     Iban,
     HomePath,
     Host,
@@ -39,6 +41,7 @@ impl Category {
             Category::Entropy => "entropy",
             Category::UrlSecret => "url-secret",
             Category::Card => "card",
+            Category::SecurityCode => "security-code",
             Category::Iban => "iban",
             Category::HomePath => "home-path",
             Category::Host => "host",
@@ -155,6 +158,88 @@ static URL_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     )
 });
 static CARD: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d(?:[ -]?\d){12,18}\b"));
+/// What a security code is labelled.
+/// OCR often runs the label into the code (`cvv:123`, `CVV123`).
+static CODE_WORD: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?i)\b(?:cvv2?|cvc2?|cid|csc|security\s+code|card\s+code)(?:\b|[0-9])"));
+static DIGITS: LazyLock<Regex> = LazyLock::new(|| re(r"[0-9]+"));
+
+/// 3 or 4 digits on their own, as char offsets: not part of a longer
+/// number, a date (`12/27`), a decimal (`1.234`) or a time (`123:00`); a
+/// label before them (`cvv:123`, `#123`) is fine.
+fn isolated_codes(text: &str) -> Vec<(usize, usize)> {
+    let cs: Vec<char> = text.chars().collect();
+    DIGITS
+        .find_iter(text)
+        .filter_map(|m| {
+            let (start, end) = (chars(text, m.start()), chars(text, m.end()));
+            let before = start.checked_sub(1).map(|i| cs[i]);
+            let after = cs.get(end).copied();
+            let after2 = cs.get(end + 1).copied();
+            let ok = (3..=4).contains(&(end - start))
+                && !matches!(before, Some('/' | '.' | ',' | '-'))
+                && !matches!(after, Some('/' | ',' | ':' | '-'))
+                // a decimal point, not a full stop
+                && !(after == Some('.') && after2.is_some_and(|c| c.is_ascii_digit()));
+            ok.then_some((start, end))
+        })
+        .collect()
+}
+/// A code this many line heights from a card, or less, is the card's.
+const CODE_NEAR: i32 = 4;
+/// A keyword this many characters before a code, or less, labels it.
+const CODE_AFTER: usize = 6;
+
+/// Security codes, which only mean something next to a card or a label:
+/// isolated 3-4 digit numbers after a keyword on their line, or within
+/// `CODE_NEAR` line heights of a card that was found.
+fn security_codes(lines: &[Line], found: &[Found]) -> Vec<Found> {
+    let cards: Vec<(PixelRect, i32)> = found
+        .iter()
+        .filter(|f| f.category == Category::Card)
+        .filter_map(|f| {
+            let l = &lines[f.line];
+            let r = union(&l.boxes[f.start..f.end.min(l.boxes.len())])?;
+            Some((r, l.boxes.iter().map(|b| b.h).max().unwrap_or(r.h)))
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let words: Vec<(usize, usize)> = CODE_WORD
+            .find_iter(&l.text)
+            .map(|m| (chars(&l.text, m.start()), chars(&l.text, m.end())))
+            .collect();
+        for (start, end) in isolated_codes(&l.text) {
+            let in_card = found.iter().any(|f| {
+                f.line == i && f.category == Category::Card && start < f.end && f.start < end
+            });
+            if in_card {
+                continue;
+            }
+            // The keyword's match may take the code's first digit (`CVV123`).
+            let labelled = words
+                .iter()
+                .any(|&(_, w_end)| w_end <= start + 1 && start + 1 - w_end <= CODE_AFTER + 1);
+            let near_card = union(&l.boxes[start..end]).is_some_and(|r| {
+                cards.iter().any(|&(card, lh)| {
+                    let gap_y = (r.y - (card.y + card.h)).max(card.y - (r.y + r.h)).max(0);
+                    let gap_x = (r.x - (card.x + card.w)).max(card.x - (r.x + r.w)).max(0);
+                    gap_y <= CODE_NEAR * lh && gap_x <= card.w.max(10 * lh)
+                })
+            });
+            if labelled || near_card {
+                out.push(Found {
+                    line: i,
+                    start,
+                    end,
+                    category: Category::SecurityCode,
+                    sure: true,
+                });
+            }
+        }
+    }
+    out
+}
 static IBAN: LazyLock<Regex> = LazyLock::new(|| re(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b"));
 static LONG: LazyLock<Regex> = LazyLock::new(|| re(r"[A-Za-z0-9+/=_-]{20,}"));
 
@@ -345,9 +430,11 @@ fn overlaps(a: &PixelRect, b: &PixelRect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// Elide a match for the list: its first few characters, then "…".
+/// Elide a match for the list: its first few characters (four at most,
+/// and never more than half, so a short secret isn't shown whole), then "…".
 fn elide(s: &str) -> String {
-    let head: String = s.chars().take(4).collect();
+    let keep = (s.chars().count() / 2).min(4);
+    let head: String = s.chars().take(keep).collect();
     format!("{head}…")
 }
 
@@ -362,6 +449,8 @@ pub fn propose(ocr: &OcrResult, env: &Env, pad: f64) -> Vec<Proposal> {
         .enumerate()
         .flat_map(|(i, l)| detect_line(i, &l.text, env))
         .collect();
+    let codes = security_codes(&lines, &found);
+    found.extend(codes);
     // The surer, longer match first, so merges keep its label.
     found.sort_by_key(|f| {
         (
@@ -538,6 +627,66 @@ mod tests {
             0.5,
         );
         assert_eq!(p.len(), 2, "{p:?}");
+    }
+
+    #[test]
+    fn a_security_code_near_a_card_is_found_and_the_card_groups_are_not() {
+        let card = ["4111", "1111", "1111", "1111"];
+        // Below the card, after a keyword, with an expiry date that isn't one.
+        let got = cats(&[&card, &["Exp", "12/27", "CVV", "123"]]);
+        assert_eq!(got, [("card", true), ("security-code", true)]);
+        // Below the card, no keyword: an isolated 3-digit number nearby.
+        let got = cats(&[&card, &["Name", "on", "card"], &["737"]]);
+        assert_eq!(got, [("card", true), ("security-code", true)]);
+        // Amex codes are four digits.
+        let got = cats(&[&["3782", "822463", "10005"], &["CID", "1234"]]);
+        assert_eq!(got, [("card", true), ("security-code", true)]);
+    }
+
+    #[test]
+    fn a_security_code_ocr_ran_into_its_label_is_still_found() {
+        // What tesseract made of "CVV: 123" on a card.
+        let card = ["4111", "1111", "1111", "1111"];
+        let got = cats(&[&card, &["cvv:123", "Valid", "Thru:", "12/30"]]);
+        assert_eq!(got, [("card", true), ("security-code", true)]);
+        assert_eq!(cats(&[&["CVV123"]]), [("security-code", true)]);
+        assert_eq!(cats(&[&["CVC#123"]]), [("security-code", true)]);
+        // A time still isn't one, nor a code with a colon after it.
+        assert_eq!(cats(&[&card, &["at", "12:30", "123:00"]]), [("card", true)]);
+    }
+
+    #[test]
+    fn a_short_secret_is_never_shown_whole() {
+        assert_eq!(elide("123"), "1…");
+        assert_eq!(elide("1234"), "12…");
+        assert_eq!(elide("adi@example.org"), "adi@…");
+    }
+
+    #[test]
+    fn a_keyword_finds_a_security_code_without_a_card() {
+        assert_eq!(cats(&[&["CVC:", "4321"]]), [("security-code", true)]);
+        assert_eq!(
+            cats(&[&["Security", "code", "987"]]),
+            [("security-code", true)]
+        );
+        assert_eq!(cats(&[&["cvv2", "123"]]), [("security-code", true)]);
+    }
+
+    #[test]
+    fn other_small_numbers_are_left_alone() {
+        // No card and no keyword.
+        assert_eq!(cats(&[&["room", "123", "at", "12:30"]]), []);
+        // A card, but the number is far below it.
+        let mut far: Vec<&[&str]> = vec![&["4111", "1111", "1111", "1111"]];
+        far.extend(std::iter::repeat_n(&["text"][..], 20));
+        far.push(&["123"]);
+        assert_eq!(cats(&far), [("card", true)]);
+        // Parts of dates, times and decimals aren't codes.
+        let got = cats(&[
+            &["4111", "1111", "1111", "1111"],
+            &["12/123", "1.234", "123:00"],
+        ]);
+        assert_eq!(got, [("card", true)]);
     }
 
     #[test]

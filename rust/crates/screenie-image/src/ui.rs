@@ -403,7 +403,7 @@ impl Ui {
 
         let mut chips: Vec<LogicalRect> = Vec::new();
         if let Some(m) = &view.measure {
-            chips = self.measures(m, monitor, s, into);
+            chips = self.measures(m, monitor, s, &view.occupied(), into);
         }
 
         if view.enhance.is_some() || view.loupe.is_some() {
@@ -458,6 +458,7 @@ impl Ui {
         m: &screenie_core::measure::MeasureView,
         monitor: LogicalRect,
         s: f64,
+        avoid: &[LogicalRect],
         into: &mut Image,
     ) -> Vec<LogicalRect> {
         use tiny_skia::{
@@ -520,21 +521,27 @@ impl Ui {
                 }
             };
             let dark = paint(0.0, 0.0, 0.0, 0.7);
-            for it in &m.items {
-                let Some(p) = path(&it.line, it.closed) else {
-                    continue;
-                };
-                if it.filled {
-                    pm.fill_path(
-                        &p,
-                        &paint(0.3, 0.85, 1.0, 0.15),
-                        FillRule::Winding,
-                        id,
-                        None,
-                    );
+            // The selected one last, so its highlight isn't drawn over where
+            // it shares a line with another (an angle's arm, say).
+            let order = m
+                .items
+                .iter()
+                .filter(|it| !it.selected)
+                .chain(m.items.iter().filter(|it| it.selected));
+            for it in order {
+                if let Some(p) = path(&it.line, it.closed) {
+                    if it.filled {
+                        let tint = paint(0.3, 0.85, 1.0, 0.15);
+                        pm.fill_path(&p, &tint, FillRule::Winding, id, None);
+                    }
+                    pm.stroke_path(&p, &dark, &stroke(3.5, false), id, None);
+                    let line = stroke(1.5, it.reference);
+                    pm.stroke_path(&p, &ink(it.selected), &line, id, None);
                 }
-                pm.stroke_path(&p, &dark, &stroke(3.5, false), id, None);
-                pm.stroke_path(&p, &ink(it.selected), &stroke(1.5, it.reference), id, None);
+                if let Some(arc) = path(&it.arc, false) {
+                    pm.stroke_path(&arc, &dark, &stroke(3.5, false), id, None);
+                    pm.stroke_path(&arc, &ink(it.selected), &stroke(1.5, false), id, None);
+                }
                 if let Some(d) = dots(&it.points, 2.5) {
                     pm.fill_path(&d, &dark, FillRule::Winding, id, None);
                 }
@@ -551,25 +558,60 @@ impl Ui {
                 }
             }
         }
-        // Chips, down a row while one would cover another.
-        let mut placed: Vec<LogicalRect> = Vec::new();
+        // Chips keep clear of the loupe's magnifier, angles' arcs and each
+        // other, trying a few spots round their anchor; each is drawn only on
+        // its anchor's monitor (tags never cross a seam).
+        let mut placed: Vec<LogicalRect> = avoid.to_vec();
+        placed.extend(m.items.iter().filter_map(|it| bounds(&it.arc)));
+        let reserved = placed.len();
+        let h = ROW - 2.0;
+        let fit = |r: LogicalRect| {
+            LogicalRect::new(
+                r.x.min(monitor.right() - r.w).max(monitor.x),
+                r.y.min(monitor.bottom() - ROW).max(monitor.y),
+                r.w,
+                r.h,
+            )
+        };
         for it in &m.items {
+            if !monitor.contains(it.anchor) {
+                continue;
+            }
             let cw = self.chip_width(&it.label);
-            let mut r = LogicalRect::new(it.anchor.x + 6.0, it.anchor.y - ROW - 4.0, cw, ROW - 2.0);
-            for _ in 0..6 {
-                if !placed.iter().any(|o| o.intersects(&r)) {
-                    break;
-                }
-                r = LogicalRect::new(r.x, r.y + ROW, r.w, r.h);
-            }
-            r.x = r.x.min(monitor.right() - cw).max(monitor.x);
-            r.y = r.y.min(monitor.bottom() - ROW).max(monitor.y);
+            let (x, y) = (it.anchor.x, it.anchor.y);
+            let spots: Vec<LogicalRect> = if let Some((ux, uy)) = it.label_out {
+                // An angle's label: out from its arc's middle until its
+                // nearest edge clears the arc, then further out.
+                let (hw, hh) = (cw / 2.0, h / 2.0);
+                (0..6)
+                    .map(|k| {
+                        let d = 4.0 + hw * ux.abs() + hh * uy.abs() + f64::from(k) * ROW;
+                        LogicalRect::new(x + ux * d - hw, y + uy * d - hh, cw, h)
+                    })
+                    .collect()
+            } else {
+                // Beside the anchor: above-right, below-right, the left
+                // side, then down a row at a time.
+                let mut v = vec![
+                    LogicalRect::new(x + 6.0, y - ROW - 4.0, cw, h),
+                    LogicalRect::new(x + 6.0, y + 6.0, cw, h),
+                    LogicalRect::new(x - 6.0 - cw, y - ROW - 4.0, cw, h),
+                    LogicalRect::new(x - 6.0 - cw, y + 6.0, cw, h),
+                ];
+                v.extend(
+                    (1..6).map(|k| LogicalRect::new(x + 6.0, y + 6.0 + f64::from(k) * ROW, cw, h)),
+                );
+                v
+            };
+            let r = spots
+                .iter()
+                .map(|&r| fit(r))
+                .find(|r| !placed.iter().any(|o| o.intersects(r)))
+                .unwrap_or_else(|| fit(spots[0]));
             placed.push(r);
-            if r.intersects(&monitor) {
-                self.chip(into, monitor, s, r.x, r.y + ROW - 2.0, &it.label);
-            }
+            self.chip(into, monitor, s, r.x, r.y + ROW - 2.0, &it.label);
         }
-        placed
+        placed.split_off(reserved)
     }
 
     /// The main box as shown, through the view filter, and where it sits.
@@ -827,6 +869,16 @@ fn swatch(into: &mut Image, s: f64, x: f64, y: f64, rgb: [f64; 3]) {
         inner,
         Paint::rgba(rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, 1.0),
     );
+}
+
+/// The rect round some points (none for none).
+fn bounds(pts: &[LogicalPoint]) -> Option<LogicalRect> {
+    let first = pts.first()?;
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
+    for q in pts {
+        (x0, y0, x1, y1) = (x0.min(q.x), y0.min(q.y), x1.max(q.x), y1.max(q.y));
+    }
+    Some(LogicalRect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
 /// A `t`-pixel outline just outside `b`.

@@ -97,9 +97,9 @@ fn a_locks_the_shape_and_goes_back_for_another() {
     let mut s = session();
     s.keys("a a"); // the pen: a does nothing
     assert_eq!(s.mode_name(), "annotate");
-    s.keys("r a"); // lock the rect, back to the pen
+    s.keys("r l j a"); // grow a rect from the point, lock it, back to the pen
     assert_eq!(s.mode_name(), "annotate");
-    s.keys("c a"); // a circle too
+    s.keys("c l j a"); // a circle too
     assert_eq!(kinds(&s), ["rect", "circle"]);
     assert!(s.layers().is_empty()); // nothing committed yet
     s.keys("c u"); // in a shape: u drops the last locked one
@@ -110,23 +110,23 @@ fn a_locks_the_shape_and_goes_back_for_another() {
 }
 
 #[test]
-fn a_shape_starts_in_the_middle_quarter_and_edits_like_a_box() {
+fn a_shape_starts_as_a_point_at_the_pointer_and_edits_like_a_box() {
     let mut s = session();
-    s.keys("a r");
+    s.keys("a r"); // the pen's pointer starts at the box's centre
     let Some(Mode::Shape(sh)) = s.modes().last() else {
         panic!()
     };
     assert_eq!((sh.kind, sh.sel.bounds()), (ShapeTool::Rect, START));
-    assert_eq!(sh.sel.rect(), r(240.0, 192.5, 280.0, 45.0));
+    assert_eq!(sh.sel.rect(), r(380.0, 215.0, 0.0, 0.0));
     s.keys("l t");
     let Some(Mode::Shape(sh)) = s.modes().last() else {
         panic!()
     };
-    assert_eq!((sh.kind, sh.sel.rect().w), (ShapeTool::Circle, 285.0));
+    assert_eq!((sh.kind, sh.sel.rect().w), (ShapeTool::Circle, 5.0));
     s.keys("Escape"); // drop just this shape
     assert_eq!(s.mode_name(), "annotate");
     assert!(kinds(&s).is_empty());
-    s.keys("r Return"); // lock it and commit the whole layer
+    s.keys("r l j Return"); // lock it and commit the whole layer
     assert_eq!(s.mode_name(), "select");
     assert_eq!(s.layers()[0].ops.len(), 1);
 }
@@ -134,7 +134,7 @@ fn a_shape_starts_in_the_middle_quarter_and_edits_like_a_box() {
 #[test]
 fn escape_in_a_shape_only_drops_the_shape() {
     let mut s = session();
-    s.keys("a r a c Escape");
+    s.keys("a r l j a c Escape");
     assert_eq!((s.mode_name(), kinds(&s).len()), ("annotate", 1));
     assert_eq!(s.pending(), None);
 }
@@ -181,10 +181,10 @@ fn the_status_line_shows_the_ink_and_no_cursor_for_the_pen() {
     assert_eq!(s.status(), "ANNOTATE  560×90  red 3px  layer");
     s.keys("Escape");
     assert!(s.status().starts_with("SELECT"));
-    s.keys("a r");
+    s.keys("a r l l j");
     assert_eq!(
         s.status(),
-        "SHAPE  560×90  (519,237)  red 3px  layer  rect  280×45"
+        "SHAPE  560×90  (389,219)  red 3px  layer  rect  10×5"
     );
 }
 
@@ -195,7 +195,7 @@ fn the_palettes_show_what_the_keys_pick() {
     s.keys("a");
     assert_eq!(
         s.palette(),
-        ["1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle  s straight  v arrow"]
+        ["1 white  2 black  3 red  4 green  5 blue  r rectangle  c circle  v arrow"]
     );
     s.keys("r");
     assert_eq!(
@@ -252,7 +252,7 @@ fn tools_share_one_layer_and_undo_crosses_them() {
 #[test]
 fn switching_tools_returns_to_where_the_layer_opened() {
     let mut s = session();
-    s.keys("a r x"); // from a shape straight to Censor: Shape and the pen go
+    s.keys("a r l j x"); // from a shape straight to Censor: Shape and the pen go
     assert_eq!(
         s.modes().iter().map(Mode::name).collect::<Vec<_>>(),
         ["censor"]
@@ -280,21 +280,22 @@ fn ctrl_and_alt_hjkl_mean_nothing_to_the_pen_and_the_box_stays() {
 fn lines_and_arrows_run_anchor_to_cursor_and_o_flips_them() {
     use screenie_core::model::Heads;
     let mut s = session();
-    s.keys("a v"); // an arrow box in the middle quarter: 240,192.5 to 520,237.5
-    s.keys("a");
+    // An arrow starts as a point at the pointer (the box's centre): the
+    // tail stays there and the tip, the cursor, grows it.
+    s.keys("a v l l l l j j a");
     let OpData::Line(l) = &s.open_layer().unwrap().ops[0].data else {
         panic!()
     };
     assert_eq!(
         (l.a, l.b, l.heads),
-        (p(240.0, 192.5), p(520.0, 237.5), Heads::End)
+        (p(380.0, 215.0), p(400.0, 225.0), Heads::End)
     );
-    s.keys("v o a"); // o: the cursor at the other end, so the arrow flips
+    s.keys("v l l j j o a"); // o: the cursor at the other end, so the arrow flips
     let OpData::Line(l) = &s.open_layer().unwrap().ops[1].data else {
         panic!()
     };
-    assert_eq!((l.a, l.b), (p(520.0, 237.5), p(240.0, 192.5)));
-    s.keys("v V a s a");
+    assert_eq!((l.a, l.b), (p(390.0, 225.0), p(380.0, 215.0)));
+    s.keys("v V l j a r t t l j a"); // a plain line: t from a rect, twice
     let ops = &s.open_layer().unwrap().ops;
     assert!(matches!(&ops[2].data, OpData::Line(l) if l.heads == Heads::Both));
     assert!(matches!(&ops[3].data, OpData::Line(l) if l.heads == Heads::None));
@@ -431,4 +432,188 @@ fn a_trace_keeps_one_point_a_half_pixel_however_fast_the_mouse() {
     // 10 px: about a point a half pixel, and the end exactly where let go.
     assert!((20..=22).contains(&st.points.len()), "{}", st.points.len());
     assert_eq!(st.points.last(), Some(&p(210.05, 200.0)));
+}
+
+fn shape_rect(s: &Session) -> screenie_core::geometry::LogicalRect {
+    match s.modes().last() {
+        Some(Mode::Shape(sh)) => sh.sel.rect(),
+        _ => panic!("not in a shape: {}", s.mode_name()),
+    }
+}
+
+#[test]
+fn a_shape_starts_at_the_loupe_spot_and_its_cursor_follows_the_mouse() {
+    let mut s = session();
+    s.keys("z");
+    s.button(Button::Left, p(300.5, 200.5), true);
+    s.button(Button::Left, p(300.5, 200.5), false);
+    s.keys("z a r");
+    let (gx, gy) = (300.5, 200.5); // the pixel's centre
+    assert_eq!(shape_rect(&s), r(gx, gy, 0.0, 0.0)); // a point
+    s.motion(p(400.0, 230.0)); // the cursor corner follows; the anchor stays
+    assert_eq!(shape_rect(&s), r(gx, gy, 400.0 - gx, 230.0 - gy));
+    s.motion(p(250.0, 180.0)); // across the anchor, it just flips
+    assert_eq!(shape_rect(&s), r(250.0, 180.0, gx - 250.0, gy - 180.0));
+    s.keys("o"); // now the other corner is the cursor
+    s.motion(p(320.0, 210.0));
+    assert_eq!(shape_rect(&s), r(250.0, 180.0, 70.0, 30.0));
+    s.keys("a");
+    assert_eq!(kinds(&s), ["rect"]);
+}
+
+#[test]
+fn an_arrow_from_the_loupe_spot_pins_its_tail_and_the_tip_follows() {
+    use screenie_core::model::Heads;
+    let mut s = session();
+    s.keys("z");
+    s.button(Button::Left, p(300.5, 200.5), true);
+    s.button(Button::Left, p(300.5, 200.5), false);
+    s.keys("z a v");
+    s.motion(p(420.0, 240.0));
+    s.keys("a");
+    let OpData::Line(l) = &s.open_layer().unwrap().ops[0].data else {
+        panic!()
+    };
+    assert_eq!(
+        (l.a, l.b, l.heads),
+        (p(300.5, 200.5), p(420.0, 240.0), Heads::End)
+    );
+}
+
+#[test]
+fn without_the_loupe_a_shape_starts_at_the_pointer() {
+    let mut s = session();
+    s.keys("a");
+    s.motion(p(500.0, 220.0));
+    s.keys("c");
+    assert_eq!(shape_rect(&s), r(500.0, 220.0, 0.0, 0.0));
+    s.keys("l"); // hjkl grow it from there
+    assert_eq!(shape_rect(&s), r(500.0, 220.0, 5.0, 0.0));
+}
+
+fn mods(s: &mut Session, m: Mods) {
+    s.handle(RawEvent::Modifiers { mods: m }, 0.0);
+}
+
+fn last_points(s: &Session) -> Vec<screenie_core::geometry::LogicalPoint> {
+    match &s.open_layer().unwrap().ops.last().unwrap().data {
+        OpData::Stroke(st) => st.points.clone(),
+        OpData::Highlight(h) => h.points.clone(),
+        other => panic!("not a pen line: {other:?}"),
+    }
+}
+
+/// The furthest a line's points get from the chord a→b (signed: positive
+/// is to the left of a→b on screen, i.e. up when it runs rightwards).
+fn bulge(pts: &[screenie_core::geometry::LogicalPoint]) -> f64 {
+    let (a, b) = (pts[0], *pts.last().unwrap());
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let len = dx.hypot(dy);
+    pts.iter()
+        .map(|q| ((q.x - a.x) * dy - (q.y - a.y) * dx) / len)
+        .fold(0.0, |m: f64, d| if d.abs() > m.abs() { d } else { m })
+}
+
+#[test]
+fn shift_while_drawing_makes_the_line_straight() {
+    let mut s = session();
+    s.keys("a");
+    mods(&mut s, Mods::SHIFT);
+    s.button(Button::Left, p(150.0, 200.0), true);
+    for q in [p(160.0, 190.0), p(170.0, 230.0), p(200.0, 200.0)] {
+        s.motion(q);
+    }
+    s.button(Button::Left, p(250.0, 220.0), false);
+    assert_eq!(last_points(&s), [p(150.0, 200.0), p(250.0, 220.0)]);
+}
+
+#[test]
+fn letting_go_of_shift_carries_on_freehand_and_shift_again_starts_straight_there() {
+    let mut s = session();
+    s.keys("a");
+    s.button(Button::Left, p(150.0, 200.0), true);
+    s.motion(p(160.0, 201.0)); // freehand
+    mods(&mut s, Mods::SHIFT);
+    s.motion(p(170.0, 230.0));
+    s.motion(p(200.0, 210.0)); // straight from 160,201
+    mods(&mut s, Mods::default());
+    s.motion(p(210.0, 215.0)); // freehand again, from 200,210
+    mods(&mut s, Mods::SHIFT);
+    s.motion(p(230.0, 240.0)); // a new straight piece, from 210,215
+    s.button(Button::Left, p(240.0, 225.0), false);
+    assert_eq!(
+        last_points(&s),
+        [
+            p(150.0, 200.0),
+            p(160.0, 201.0),
+            p(200.0, 210.0),
+            p(210.0, 215.0),
+            p(240.0, 225.0)
+        ]
+    );
+}
+
+#[test]
+fn ctrl_while_drawing_makes_an_arc_over_the_chord() {
+    let mut s = session();
+    s.keys("a");
+    mods(&mut s, Mods::CTRL);
+    s.button(Button::Left, p(200.0, 230.0), true);
+    s.motion(p(300.0, 230.0));
+    assert!(s.status().contains("arc 24px"), "{}", s.status());
+    s.button(Button::Left, p(300.0, 230.0), false);
+    let pts = last_points(&s);
+    assert_eq!(
+        (pts[0], *pts.last().unwrap()),
+        (p(200.0, 230.0), p(300.0, 230.0))
+    );
+    assert!(pts.len() > 8, "a curve, not a chord: {}", pts.len());
+    assert!((bulge(&pts) - 24.0).abs() < 0.5, "{}", bulge(&pts)); // up, 24px
+}
+
+#[test]
+fn ctrl_plus_minus_and_ctrl_wheel_set_the_bulge_and_below_zero_flips_it() {
+    let mut s = session();
+    s.keys("a");
+    let width = ink(&s).1;
+    mods(&mut s, Mods::CTRL);
+    s.button(Button::Left, p(200.0, 230.0), true);
+    s.motion(p(300.0, 230.0));
+    s.handle(RawEvent::Wheel { steps: 3 }, 0.0); // 2px a notch
+    assert!(s.status().contains("arc 30px"), "{}", s.status());
+    s.keys("<C-minus>");
+    assert!(s.status().contains("arc 28px"), "{}", s.status());
+    mods(&mut s, Mods::CTRL); // still held (the script let go of it)
+    s.handle(RawEvent::Wheel { steps: -26 }, 0.0); // through zero: the other side
+    assert!(s.status().contains("arc -24px"), "{}", s.status());
+    assert_eq!(ink(&s).1, width, "the width is untouched");
+    s.button(Button::Left, p(300.0, 230.0), false);
+    assert!((bulge(&last_points(&s)) + 24.0).abs() < 0.5); // down now
+    // The bulge is kept for the next arc; plain wheel is still the width.
+    mods(&mut s, Mods::default());
+    s.handle(RawEvent::Wheel { steps: 1 }, 0.0);
+    assert_eq!(ink(&s).1, width + 1.0);
+}
+
+#[test]
+fn an_arc_at_zero_bulge_is_straight_and_the_highlighter_bends_too() {
+    let mut s = session();
+    s.keys("a m");
+    mods(&mut s, Mods::CTRL);
+    s.button(Button::Left, p(200.0, 230.0), true);
+    s.motion(p(300.0, 230.0));
+    s.handle(RawEvent::Wheel { steps: -12 }, 0.0);
+    s.button(Button::Left, p(300.0, 230.0), false);
+    assert_eq!(last_points(&s), [p(200.0, 230.0), p(300.0, 230.0)]);
+    assert!(matches!(
+        s.open_layer().unwrap().ops[0].data,
+        OpData::Highlight(_)
+    ));
+}
+
+#[test]
+fn s_no_longer_opens_a_line_shift_draws_them() {
+    let mut s = session();
+    s.keys("a s");
+    assert_eq!(s.mode_name(), "annotate");
 }

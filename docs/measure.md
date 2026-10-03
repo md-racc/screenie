@@ -1,173 +1,173 @@
 # Measure: lengths, angles and areas, with a scale
 
-**Status:** in the Rust port (milestone 11). `README.md` (Measure) and
-`docs/architecture-rust.md` (§58) take precedence over this page, and the
-README has the keys as built. Built differently from this page:
-
-- **Line is `s`** (as Annotate's line), not `l`, which is hjkl's.
-- **Enter ends at the cursor**: a line is Space, move, Enter.
-- **`x` leaves one out of the total**, not Space, which drops points.
-- **A path is a polyline** of dropped points, not a `Trace`.
-- The cursor stays on the box's monitor, and Esc with measurements warns
-  first.
-- Not yet: snapping to edges (points snap to points), `--mode measure`
-  and `--result measure`, the scale in the project, and auto-calibrating
-  from a scale bar.
+**Status:** built in the Rust port. `README.md` (Measure) has the keys and
+takes precedence; `docs/architecture-rust.md` §58 has how it's built. This
+page is the design as it stands, and why. It was rewritten on 2026-10-03,
+after a round of changes made one at a time; the old design's differences
+are at the end.
 
 The box is already a measurement (its tag shows its size), and the loupe
 and enhance are made for precise placement. Measure turns that into a
 tool:
 - **in pixels** by default: UI work, checking alignment, measuring gaps;
-- **in real units** after calibrating. On a floor plan or map with a scale
-  bar, measure the bar once, type what it represents ("5 m"), and every
-  line, arc and area after it reads in metres.
+- **in real units** once calibrated: on a floor plan or map, measure the
+  scale bar once, say what it represents (or let screenie read it), and
+  every line, arc and area after it reads in metres.
 
-## Entering
+## Entering and leaving
 
-- In Select, press `m`, which is free there. It opens Measure over the
-  frozen picture, with the cursor at the box's cursor corner.
-- From the command line: `--mode measure`, or `--result measure` (Enter
+- `m` in Select, `--mode measure`, or `--result measure` (Enter then
   delivers the measurements).
-- Measure doesn't change the picture: it isn't a build tool and opens no
-  layer. Its drawings are overlay only, until you bake them (see Output).
+- Measure is a mode over the frozen picture, not a build tool: it opens
+  no layer, and its drawings are overlay only, never in the image.
+- `y`, or Enter with nothing in progress, delivers the measurements as
+  text (and `--json` data). Esc with nothing in progress goes back to
+  Select, warning first if there are measurements, which it drops. The
+  scale is kept for the session, and saved in the project.
 
-## Primitives
+## The cursor, and what the modifiers mean
 
-| Key | Primitive | Points | Reports |
+Points are placed with Insert's pixel cursor, on capture pixels, kept to
+the box's monitor. The mouse moves it too, once it moves.
+
+Each modifier means one thing, across keys and the mouse:
+
+| | Keys | Mouse |
+|---|---|---|
+| plain | `hjkl` step; `Space` drops a point | move; click drops a point |
+| **Shift** | `hjkl` ×4; `Shift+Space`: a path point | `Shift+click`: a path point, reaching 12px to land on another measurement's point or line |
+| **Ctrl** | `Ctrl+hjkl`: jump to the next edge in the picture | hold: lock to 0/45/90° from the last point |
+| **Alt** | `Alt+hjkl`: halfway to the monitor's edge; `Alt+Space`: a point, unsnapped | `Alt+click`: select a measurement; `Alt+drag` on its point: move it |
+
+So: **Shift extends** (a path; further reach), **Ctrl constrains** (to
+the picture's edges, to angles), **Alt is about measurements, not
+points** (select, move), except `Alt+Space`, the keyboard's unsnapped
+point. The loupe's points (`Space` inside it) are always exact, never
+snapped: it's the bypass.
+
+`+`/`-` and the wheel are the one adjustable amount: the step size, or,
+with a line open, its bend.
+
+## Tools
+
+The palette shows them, always:
+
+| Key | Tool | Placed by | Reports |
 |---|---|---|---|
-| `l` | line, or a path when you keep adding points | 2+ | length, angle (a path: total and each segment) |
-| `(` | arc (start, a point on it, end) | 3 | arc length, radius, angle swept |
-| `c` | circle (three points on it, as Annotate's `c`) | 3 | diameter, circumference, area |
-| `A` | area (polygon) | 3+ | area, perimeter |
-| `r` | rectangle (the box, or a new box) | 2 corners | w, h, area, diagonal |
-| `^` | angle (arm, vertex, arm) | 3 | degrees |
+| `s` | line | two points; Shift'd points make it a path, which Enter or a plain point ends; bent with `+`/`-` while open, it's an arc | length (a path's total), direction; an arc's length, radius, angle |
+| `c` | circle | three points on it | diameter, circumference, area |
+| `A` | area | one point inside: flooded out to the picture's edges and the drawn lines | area, perimeter |
+| `r` | rect | two corners; Enter with none measures the box | w × h, area, diagonal |
+| `^` | angle | arm, vertex, arm; or one point on a vertex of lines, for every angle round it | degrees |
 
-These keep clear of the grammar's meanings elsewhere: `o` corners, `p`
-colour, `w b` edges, `u` undo, `a` annotate.
+- **Angles at a vertex.** A first `^` point on any line or path point, or
+  where two lines cross, makes every angle round it at once: each line
+  ending there is one arm, each passing through is two, and every gap
+  under 180° between neighbouring arms is an angle. A T gives its two
+  right angles but not the straight back; a corner, not its outside.
+- **Areas by flood.** From the point, the region spreads over pixels
+  within 40 grey levels of it, stopped by the picture's edges and by every
+  drawn measurement (draw a line across a doorway to close a room). It
+  measures the outer outline, things inside included: to drawn lines, and
+  to the last pixel inside a picture's edge. Reaching the monitor's edge
+  means it isn't closed in, and it says so. A shape outlined with a
+  closed path is measured the same way.
+- **Snapping.** A point snaps to another point within 4px. A Shift+click
+  reaches 12px, for another measurement's point first, then its line. The
+  loupe and `Alt+Space` don't snap.
 
-Placing points uses the same grammar as elsewhere:
-- **Cursor:** Insert's pixel cursor. hjkl move, Shift is ×4, `+`/`-`
-  change the step. The mouse moves it too.
-- **Ctrl+hjkl** jumps to the next **edge in the picture** that way: a
-  contrast edge along the ray, such as a wall's line on a plan. Measuring
-  wall to wall is then two keystrokes, and exact to the pixel. This is the
-  one new piece of image analysis Measure needs.
-- **Space** or a left click drops a point.
-- **Enter** finishes the primitive (a path or area), and **Esc** abandons
-  the one in progress.
-- **u** takes back the last point, or the last primitive.
-- **Snapping:** points within a few pixels of an existing point, endpoint
-  or edge snap to it; Alt disables snapping while held. Shift while
-  *clicking* locks to 0/45/90° (Shift on hjkl is still the bigger step).
-- `z` / `e` open the loupe and enhance at the cursor, for sub-pixel care.
-  Points are placed at pixel centres of the capture (device pixels), not
-  logical ones.
+## Selecting and editing
+
+- The last measurement made is selected. `[`/`]` or Alt+click select
+  another; `<`/`>` move it in the list; `d` deletes it; `x` leaves it out
+  of the total (Space drops points here, so not Space).
+- `o` edits the selected measurement's points: the cursor goes to its
+  first point, `o` to the next, the cursor keys (or the mouse) move it,
+  Space or Enter keep it, Esc or `u` put it back. An Alt+drag on a point
+  does the same with the mouse.
+- Editing the reference rescales: its real length stays, its pixels
+  change.
+
+## Undo
+
+Measure has its own scope. `u` takes back a point of the one in
+progress, else the last action: a measurement (a vertex's angles as one),
+a delete (back where it was), a calibration (to the scale before), `x`,
+a move in the list, or an edit.
 
 ## Calibration
 
-The first **line, path or arc** you finish asks for its real length, in a
-small input chip at the end of it:
-
-```
-= 5 m_          (Enter to set the scale, Esc to stay in pixels)
-```
-
-- Input: a number and a unit. Supported units:
-  - metric: `mm`, `cm`, `m`, `km`;
-  - imperial: `in`, `ft`, `yd`, `mi`;
-  - feet and inches: `12'6"`, or `12ft 6in`.
-
-  Arithmetic like `2*2.5 m` is nice to have.
-- The scale is then `real length / pixel length`. That measurement becomes
-  the **reference**, drawn in a distinct style (dashed, with a ruler
-  glyph).
-- Everything else, drawn before or after, reads in real units: lengths in
-  the reference's unit, areas in its square. `t` toggles to the other
-  system (m ↔ ft), and `T` shows pixels again.
-- `C` re-calibrates against the selected measurement, or asks for a new
-  reference.
-- A scale can come in from the command line with `--measure-scale '84.2px=1m'`,
-  for a plan you open at the same zoom every time. It can also be saved in
-  the shot's project (`edit last` keeps it).
-
-**Why an arc can be the reference:** some plans draw their scale on a curve
-(a circular site boundary of known length), and a 3-point arc's length is
-as exact as a line's.
-
-**Precision.**
-- A reference 80 px long has about ±1 px of error at each end, so the
-  scale is only good to about ±1.8%. Measurements inherit that, plus their
-  own ±1 px per point.
-- The status tag shows it: `1 m = 84.2 px ±1.7%`, and a measurement shows
-  `4.20 m ±0.08`.
-- When the reference is short (error > 2%), the chip suggests measuring a
-  longer bar, or zooming the source first.
-
-**Assumptions.**
-- The plan is orthographic and isotropic: the same scale in x and y, which
-  holds for plans, maps and CAD exports. Rotation doesn't matter.
-- **Perspective photos are a non-goal.** They would need four-point
-  (homography) calibration; see Later.
+- Everything is in pixels until `C` on a selected line or arc, which asks
+  for its real length.
+- **Reading a scale bar.** `C` also OCRs round the line, in the
+  background, and fills the prompt if it reads a bar before anything's
+  typed: the numbers nearest the line's ends (`0 … 100 m` reads `100 m`;
+  an unread 0, as OCR often drops a lone one, counts as 0), or a lone
+  label (`5 km`). Typing replaces the reading.
+- **Units.** Standard ones (`mm cm m km in ft yd mi`, `12'6"`,
+  `12ft 6in`, and arithmetic like `2*2.5 m`) convert; any other name
+  (`4.2 ly`, `3 bricks`) is a unit of its own, read as multiples; a
+  number alone is `u`, and Enter alone makes the line 1 u.
+- **Showing values.** Each is shown in the unit of the reference's system
+  that suits its size (km, m, cm, mm; mi, ft, in); `t` switches system
+  and `T` shows pixels.
+- **Precision.** A reference `n` points and `L` px long is good to about
+  `√n / L` (80px: ±1.8%); a measurement inherits that, plus its own ±1px a
+  point, and shows it: `4.20 m ±0.08`. While the reference's error is
+  over 2%, the status says to measure a longer one.
+- `--measure-scale 84.2px=1m` starts calibrated, for a plan opened at the
+  same zoom every time.
 
 ## On screen
 
-- Each measurement is drawn in the overlay: lines with end ticks, arcs,
-  and area polygons with a light fill. Each has a chip at its midpoint or
-  centroid, like `4.20 m`, `12.6 m²` or `37.5°`.
-  - Chips follow the tag rules: never overlapping each other or the box's
-    tags, and never off a monitor.
-  - The reference's chip shows `ref 5 m`.
-- The side list shows every measurement, top first, and totals: the sum of
-  the selected lengths and areas. `[` `]` select, `d` deletes, and Space
-  hides one from the total.
-- The status tag shows the tool, the cursor pixel, the live length from
-  the last point, and the scale.
+- Measurements draw in cyan, the selected one in amber and on top, the
+  reference dashed; areas tinted; angles as an arc between their arms.
+- Each has a label chip: beside a line's middle, at an area's centroid,
+  out from an angle's arc. Labels keep clear of each other, the arcs and
+  the loupe, and stay on their own monitor.
+- The status shows the tool, the cursor pixel, the live length (along the
+  arc for a bent line), the scale, and what's being edited.
+- The side list shows every measurement and the totals of the lengths and
+  of the areas it counts.
 
 ## Output
 
-- **Enter**, with `--result measure` or `y`: the measurements as text,
-  copied, like this:
+`y` (or Enter with nothing in progress) delivers, and copies:
 
-  ```
-  ref   5 m        (411.0 px)
-  L1    4.20 m
-  A1   12.6 m²     perimeter 14.3 m
-  ∠1   37.5°
-  ```
+```
+ref   5.00 m  (411.0 px)
+L2    4.20 m ±0.08     at 37.5°
+A1    12.6 m² ±0.5     perimeter 14.3 m
+∠1    37.5°
+```
 
-  With `--json`:
+With `--json`, `kind` is `measure`, with `scale` (`px`, `real`, `unit`,
+`error`) and `measurements` (`kind`, `name`, `points` in capture pixels,
+`px` or `px2`, `real` and `unit` in the unit shown, `degrees`).
 
-  ```json
-  "scale": {"px": 411.0, "real": 5, "unit": "m", "error": 0.0034},
-  "measurements": [{"kind":"line","points":[[x,y],[x,y]],"px":352.1,"real":4.2,"unit":"m"}]
-  ```
+## Not in it
 
-  Points are in capture pixels.
-- **`a` (bake, as in annotate):** turns the measurements into an annotate layer:
-  - dimension lines with arrowheads and their labels;
-  - area outlines;
-  - the reference drawn as a scale bar.
+- **Perspective photos** (four-point calibration, a homography), and
+  different x/y scales for stretched scans.
+- **Snapping points to picture edges**: dropped on 2026-10-03; Ctrl+hjkl
+  jumps to them, and the area flood stops at them.
+- **Baking measurements into the image**: built, then dropped
+  (2026-10-03). Mark one up with Annotate if it needs to be in the shot.
+- **Counting** (click things to count them): an idea, not designed.
 
-  Then Enter captures an image with them in. This reuses the ops from
-  `docs/annotate.md` (arrows, text).
-- **Esc** back to Select drops the measurements, unless they were baked.
+## How it got here
 
-## Later
+Where this differs from the first design, and why:
 
-- **Auto-calibrate from the scale bar.** When the reference line runs
-  along a drawn scale bar, OCR the text next to it ("0  5  10 m") and
-  pre-fill the input. This reuses auto-redact's OCR with word boxes.
-- **Four-point calibration** for photos taken at an angle (a homography):
-  mark a known rectangle, and measure on the plane.
-- **Different x/y scales**, for stretched scans.
-- **Counting:** click things to count them (doors, outlets), with the
-  totals in the list.
-
-## Answered (2026-10-02, in the port)
-
-- `m` opens Measure with the line tool; the primitive keys switch.
-- Measurements are dropped on going back to Select (after a warning),
-  unless baked. The scale is kept for the session.
-- Ctrl+hjkl's edge is a change in grey along the ray, averaged over three
-  pixels across it: 32 levels from the last pixel, or 48 from two back
-  for anti-aliased edges. It lands on the first pixel that differs.
+- **Line is `s`, not `l`** (`l` is hjkl's). There's no arc tool (`(`): a
+  line bends into one. No polygon tool: areas flood from a point inside.
+- **Lines end at their second point**, with Shift for paths, rather than
+  waiting for Enter.
+- **No calibration until asked**: the first line used to ask for its
+  length.
+- **The 45° lock is holding Ctrl** (it was Shift+click), since Shift
+  extends.
+- **`x`, not Space, leaves one out of the total**, since Space drops
+  points; otherwise the list follows the shared grammar.
+- **A path is a polyline** of dropped points, not a `Trace`.
+- **The cursor stays on the box's monitor.**

@@ -1,7 +1,43 @@
 //! Measure's numbers: real units, typed lengths ("5 m", `12'6"`), the
 //! scale and its error, and how values are written (docs/measure.md).
 
-/// A unit of length.
+/// A name for a unit that isn't a standard length (`u`, `ly`, `bricks`):
+/// kept inline, so units stay plain values. Longer names are cut.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Tag {
+    len: u8,
+    bytes: [u8; Tag::MAX],
+}
+
+impl Tag {
+    pub const MAX: usize = 24;
+
+    pub fn new(name: &str) -> Tag {
+        let mut end = name.len().min(Tag::MAX);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut bytes = [0; Tag::MAX];
+        bytes[..end].copy_from_slice(&name.as_bytes()[..end]);
+        Tag {
+            len: end as u8,
+            bytes,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)]).expect("cut on a char boundary")
+    }
+}
+
+impl std::fmt::Debug for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+/// A unit of length: a standard one, which converts, or any other name
+/// (`Tag`), which values are simply multiples of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unit {
     Mm,
@@ -12,10 +48,12 @@ pub enum Unit {
     Ft,
     Yd,
     Mi,
+    /// Anything else: the reference's own unit (`u` with none given).
+    Tag(Tag),
 }
 
 impl Unit {
-    pub const ALL: [Unit; 8] = [
+    pub const STANDARD: [Unit; 8] = [
         Unit::Mm,
         Unit::Cm,
         Unit::M,
@@ -26,7 +64,12 @@ impl Unit {
         Unit::Mi,
     ];
 
-    pub fn name(self) -> &'static str {
+    /// No unit given: plain multiples of the reference.
+    pub fn plain() -> Unit {
+        Unit::Tag(Tag::new("u"))
+    }
+
+    pub fn name(&self) -> &str {
         match self {
             Unit::Mm => "mm",
             Unit::Cm => "cm",
@@ -36,7 +79,13 @@ impl Unit {
             Unit::Ft => "ft",
             Unit::Yd => "yd",
             Unit::Mi => "mi",
+            Unit::Tag(t) => t.as_str(),
         }
+    }
+
+    /// Whether it's a named unit of its own, with nothing to convert to.
+    pub fn is_tag(self) -> bool {
+        matches!(self, Unit::Tag(_))
     }
 
     /// Metres in one of it.
@@ -50,6 +99,8 @@ impl Unit {
             Unit::Ft => 0.3048,
             Unit::Yd => 0.9144,
             Unit::Mi => 1609.344,
+            // Not a length: only ever compared with itself.
+            Unit::Tag(_) => 1.0,
         }
     }
 
@@ -66,14 +117,26 @@ impl Unit {
             Unit::In => Unit::Cm,
             Unit::Ft | Unit::Yd => Unit::M,
             Unit::Mi => Unit::Km,
+            t @ Unit::Tag(_) => t,
         }
     }
 
-    fn parse(s: &str) -> Option<Unit> {
+    /// A standard unit by name, if it is one.
+    pub fn standard_name(name: &str) -> Option<Unit> {
+        Unit::standard(name)
+    }
+
+    /// A unit by name: a standard one, else a name of its own.
+    pub fn from_name(name: &str) -> Unit {
+        Unit::standard(name).unwrap_or(Unit::Tag(Tag::new(name)))
+    }
+
+    /// A standard unit by its name or mark.
+    fn standard(s: &str) -> Option<Unit> {
         match s {
             "'" => Some(Unit::Ft),
             "\"" => Some(Unit::In),
-            _ => Unit::ALL.into_iter().find(|u| u.name() == s),
+            _ => Unit::STANDARD.into_iter().find(|u| u.name() == s),
         }
     }
 }
@@ -85,38 +148,85 @@ pub struct Length {
     pub unit: Unit,
 }
 
+fn positive(value: f64, s: &str) -> Result<f64, String> {
+    if value > 0.0 && value.is_finite() {
+        Ok(value)
+    } else {
+        Err(format!("{:?}: a length must be more than zero", s.trim()))
+    }
+}
+
 /// `5 m`, `2.5km`, `2*2.5 m`, `12'6"`, `12ft 6in`: a number (or a little
-/// arithmetic) with a unit, or several summed, in the first one's unit.
+/// arithmetic) with a standard unit, or several summed, in the first one's
+/// unit. Any other name after the number is a unit of its own (`4.2 ly`,
+/// `3 light years`); a number alone is in `u`, and nothing at all is 1 u.
 pub fn parse_length(s: &str) -> Result<Length, String> {
-    let bad = || format!("can't read {:?}: a number and a unit, like 5 m", s.trim());
+    let bad = || {
+        format!(
+            "can't read {:?}: a number, maybe with a unit, like 5 m",
+            s.trim()
+        )
+    };
+    let t = s.trim();
+    if t.is_empty() {
+        return Ok(Length {
+            value: 1.0,
+            unit: Unit::plain(),
+        });
+    }
+    let is_unit_char = |c: char| c.is_alphabetic() || c == '\'' || c == '"';
+    let Some(first) = t.find(is_unit_char) else {
+        let value = positive(eval(t).ok_or_else(bad)?, s)?;
+        return Ok(Length {
+            value,
+            unit: Unit::plain(),
+        });
+    };
+    if let Some(l) = standard_length(t)? {
+        return Ok(l);
+    }
+    // A unit of its own: the number, then whatever name follows it.
+    let value = positive(eval(&t[..first]).ok_or_else(bad)?, s)?;
+    Ok(Length {
+        value,
+        unit: Unit::Tag(Tag::new(t[first..].trim())),
+    })
+}
+
+/// `t` in standard units only (`12ft 6in`), if that's what it is; a bad
+/// number is an error, a name that isn't a standard unit is `None`.
+fn standard_length(t: &str) -> Result<Option<Length>, String> {
+    let bad = || format!("can't read {t:?}: a number, maybe with a unit, like 5 m");
     let mut parts: Vec<(f64, Unit)> = Vec::new();
-    let mut rest = s.trim();
+    let mut rest = t;
     while !rest.is_empty() {
         // The number: everything up to the first unit letter or mark.
-        let end = rest
-            .find(|c: char| c.is_ascii_alphabetic() || c == '\'' || c == '"')
-            .ok_or_else(bad)?;
+        let Some(end) = rest.find(|c: char| c.is_alphabetic() || c == '\'' || c == '"') else {
+            return Ok(None); // a number with no unit after a standard one
+        };
         let value = eval(&rest[..end]).ok_or_else(bad)?;
         let tail = &rest[end..];
         let ulen = if tail.starts_with(['\'', '"']) {
             1
         } else {
-            tail.find(|c: char| !c.is_ascii_alphabetic())
+            tail.find(|c: char| !c.is_alphabetic())
                 .unwrap_or(tail.len())
         };
-        let unit = Unit::parse(&tail[..ulen]).ok_or_else(bad)?;
+        let Some(unit) = Unit::standard(&tail[..ulen]) else {
+            return Ok(None);
+        };
         parts.push((value, unit));
         rest = tail[ulen..].trim_start();
     }
-    let (_, unit) = *parts.first().ok_or_else(bad)?;
+    let Some(&(_, unit)) = parts.first() else {
+        return Ok(None);
+    };
     let metres: f64 = parts.iter().map(|(v, u)| v * u.metres()).sum();
-    if !(metres > 0.0 && metres.is_finite()) {
-        return Err(format!("{:?}: a length must be more than zero", s.trim()));
-    }
-    Ok(Length {
+    let metres = positive(metres, t)?;
+    Ok(Some(Length {
         value: metres / unit.metres(),
         unit,
-    })
+    }))
 }
 
 /// `+ - * /` over numbers, with the usual precedence.
@@ -170,6 +280,28 @@ pub struct Scale {
     pub real: f64,
     pub unit: Unit,
     pub error: f64,
+}
+
+impl From<Scale> for crate::model::MeasureScale {
+    fn from(s: Scale) -> Self {
+        Self {
+            px: s.px,
+            real: s.real,
+            unit: s.unit.name().to_string(),
+            error: s.error,
+        }
+    }
+}
+
+impl From<&crate::model::MeasureScale> for Scale {
+    fn from(s: &crate::model::MeasureScale) -> Self {
+        Scale {
+            px: s.px,
+            real: s.real,
+            unit: Unit::from_name(&s.unit),
+            error: s.error,
+        }
+    }
 }
 
 /// Each placed point is good to about this, in capture pixels.
@@ -264,11 +396,29 @@ fn plus_minus(text: &str, err: f64) -> String {
     format!("±{err:.decimals$}")
 }
 
+/// The unit of `system`'s family (metric or imperial; plain stays plain)
+/// that suits a length of `metres`: the largest it's at least one of.
+pub fn fit(system: Unit, metres: f64) -> Unit {
+    const METRIC: [Unit; 4] = [Unit::Km, Unit::M, Unit::Cm, Unit::Mm];
+    const IMPERIAL: [Unit; 3] = [Unit::Mi, Unit::Ft, Unit::In];
+    let family: &[Unit] = match system {
+        t @ Unit::Tag(_) => return t,
+        u if u.metric() => &METRIC,
+        _ => &IMPERIAL,
+    };
+    family
+        .iter()
+        .copied()
+        .find(|u| metres.abs() >= u.metres())
+        .unwrap_or(family[family.len() - 1])
+}
+
 /// A length `px` long, measured from `points` points: `4.20 m ±0.08`, or
-/// `352.1 px`.
+/// `352.1 px`. Real lengths take the fitting unit of the display's system.
 pub fn length(px: f64, points: usize, scale: Option<&Scale>, d: Display) -> String {
     match (d, scale) {
-        (Display::Real(unit), Some(s)) => {
+        (Display::Real(system), Some(s)) => {
+            let unit = fit(system, px / s.px_per_metre());
             let ppu = s.px_per_metre() * unit.metres();
             let v = px / ppu;
             let own = (points as f64).sqrt() * POINT_ERROR / ppu;
@@ -283,7 +433,8 @@ pub fn length(px: f64, points: usize, scale: Option<&Scale>, d: Display) -> Stri
 /// A length without its error, for details beside one that has it.
 pub fn length_bare(px: f64, scale: Option<&Scale>, d: Display) -> String {
     match (d, scale) {
-        (Display::Real(unit), Some(s)) => {
+        (Display::Real(system), Some(s)) => {
+            let unit = fit(system, px / s.px_per_metre());
             let ppu = s.px_per_metre() * unit.metres();
             format!("{} {}", sig3(px / ppu), unit.name())
         }
@@ -295,7 +446,9 @@ pub fn length_bare(px: f64, scale: Option<&Scale>, d: Display) -> String {
 /// error: `12.6 m² ±0.5`, or `1234 px²`.
 pub fn area(px2: f64, perimeter_px: f64, scale: Option<&Scale>, d: Display) -> String {
     match (d, scale) {
-        (Display::Real(unit), Some(s)) => {
+        (Display::Real(system), Some(s)) => {
+            // Fitted by its side: 0.09 m² is 900 cm².
+            let unit = fit(system, px2.sqrt() / s.px_per_metre());
             let ppu = s.px_per_metre() * unit.metres();
             let v = px2 / (ppu * ppu);
             let own = perimeter_px * POINT_ERROR / 2.0 / (ppu * ppu);
@@ -318,7 +471,9 @@ mod tests {
 
     fn len(s: &str) -> (f64, &'static str) {
         let l = parse_length(s).unwrap();
-        ((l.value * 1e6).round() / 1e6, l.unit.name())
+        // Leaked: a test's few names, to compare with literals.
+        let name: &'static str = Box::leak(l.unit.name().to_string().into_boxed_str());
+        ((l.value * 1e6).round() / 1e6, name)
     }
 
     #[test]
@@ -331,9 +486,50 @@ mod tests {
         assert_eq!(len("12'6\""), (12.5, "ft"));
         assert_eq!(len("12ft 6in"), (12.5, "ft"));
         assert_eq!(len("1 m 50 cm"), (1.5, "m"));
-        for bad in ["", "5", "m", "5 parsecs", "0 m", "-2 m", "five m"] {
+        // No unit: plain units, the reference's own scale; nothing is 1.
+        assert_eq!(len("5"), (5.0, "u"));
+        assert_eq!(len("2*3"), (6.0, "u"));
+        assert_eq!(len(""), (1.0, "u"));
+        assert_eq!(len("  "), (1.0, "u"));
+        assert_eq!(len("4 u"), (4.0, "u"));
+        // Any other name is a unit of its own (see below), so only a
+        // missing or non-positive number is wrong.
+        for bad in ["m", "0 m", "-2 m", "five m", "five", "0", "0 ly"] {
             assert!(parse_length(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn any_other_unit_is_kept_as_its_name() {
+        assert_eq!(len("4.2 ly"), (4.2, "ly"));
+        assert_eq!(len("3 light years"), (3.0, "light years"));
+        assert_eq!(len("12 bricks"), (12.0, "bricks"));
+        assert_eq!(len("5 parsecs"), (5.0, "parsecs"));
+        assert_eq!(len("2*3 tiles"), (6.0, "tiles"));
+        // The standard ones are still known, and convert.
+        assert_eq!(len("5 km"), (5.0, "km"));
+        assert!(parse_length("5 km").unwrap().unit.metric());
+        let ly = parse_length("1 ly").unwrap().unit;
+        assert!(!ly.metric() && ly.other() == ly, "nothing to convert to");
+        // A long name is cut, not refused.
+        assert_eq!(
+            parse_length("1 extraordinarily long unit names here")
+                .unwrap()
+                .unit
+                .name(),
+            "extraordinarily long uni"
+        );
+        // Values read in it, unfitted.
+        let s = Scale::parse("100px=1ly").unwrap();
+        assert_eq!(s.describe(), "1 ly = 100.0 px");
+        assert_eq!(
+            length_bare(50.0, Some(&s), Display::Real(s.unit)),
+            "0.500 ly"
+        );
+        assert_eq!(
+            length_bare(0.5, Some(&s), Display::Real(s.unit)),
+            "0.00500 ly"
+        );
     }
 
     #[test]
@@ -368,6 +564,42 @@ mod tests {
         let fine = Scale::parse("50px=1m").unwrap();
         assert_eq!(length(1915.0, 2, Some(&fine), m), "38.3 m ±0.03");
         assert_eq!(length_bare(1915.0, Some(&fine), m), "38.3 m");
+    }
+
+    #[test]
+    fn values_take_the_fitting_unit_of_the_references_system() {
+        let at = |scale: &str, px: f64| {
+            let s = Scale::parse(scale).unwrap();
+            length_bare(px, Some(&s), Display::Real(s.unit))
+        };
+        // A km reference: smaller things in m, smaller still in cm.
+        assert_eq!(at("100px=1km", 250.0), "2.50 km");
+        assert_eq!(at("100px=1km", 30.0), "300 m");
+        assert_eq!(at("100px=1km", 0.05), "50.0 cm");
+        // An m reference: cm and mm below a metre, km above a thousand.
+        assert_eq!(at("100px=1m", 30.0), "30.0 cm");
+        assert_eq!(at("100px=1m", 0.5), "5.00 mm");
+        assert_eq!(at("1px=1m", 2500.0), "2.50 km");
+        // Imperial: mi, then ft, then in.
+        assert_eq!(at("100px=1mi", 250.0), "2.50 mi");
+        assert_eq!(at("100px=1mi", 1.0), "52.8 ft");
+        assert_eq!(at("100px=1ft", 50.0), "6.00 in");
+        // t: the other system, fitted the same way.
+        let s = Scale::parse("100px=1m").unwrap();
+        assert_eq!(
+            length_bare(30.0, Some(&s), Display::Real(Unit::Ft)),
+            "11.8 in"
+        );
+        // Plain units never change.
+        assert_eq!(at("100px=1u", 0.5), "0.00500 u");
+        // Areas fit by their side: 0.09 m² is 900 cm².
+        let s = Scale::parse("100px=1m").unwrap();
+        assert!(area(900.0, 0.0, Some(&s), Display::Real(Unit::M)).starts_with("900 cm²"));
+        // The error is in the same unit.
+        assert_eq!(
+            length(30.0, 2, Some(&s), Display::Real(Unit::M)),
+            "30.0 cm ±1.4"
+        );
     }
 
     #[test]

@@ -310,6 +310,12 @@ pub struct Session {
     analyzer: Option<Box<dyn Analyzer>>,
     pub(crate) edge_finder: Option<Box<dyn EdgeFinder>>,
     pub(crate) enter: crate::select::EnterResult,
+    /// The loupe's pixel when last used, this run only: Select's `z` reopens
+    /// it there, and new shapes start there.
+    pub(crate) loupe_at: Option<PixelPoint>,
+    /// The pen's arc (Ctrl-drag): its bulge off the chord, logical px;
+    /// negative is the other side. Kept for the run.
+    pub(crate) pen_bulge: f64,
     pub(crate) box_locked: bool,
     /// Measure's scale: kept between visits, and from `--measure-scale`.
     pub(crate) measure_scale: Option<crate::units::Scale>,
@@ -367,6 +373,8 @@ impl Session {
             analyzer: None,
             edge_finder: None,
             enter: Default::default(),
+            loupe_at: None,
+            pen_bulge: crate::annotate::BULGE,
             box_locked: false,
             measure_scale: None,
             next_job: 1,
@@ -384,6 +392,7 @@ impl Session {
     /// ids) and its selection. Project history starts afresh.
     pub fn restore(&mut self, project: Project) {
         self.sel.set_rect(project.selection);
+        self.measure_scale = project.measure_scale.as_ref().map(Into::into);
         self.project = project;
     }
 
@@ -444,9 +453,11 @@ impl Session {
 
     /// Whether an analysis job is in flight (the host should keep polling).
     pub fn jobs_pending(&self) -> bool {
-        self.stack
-            .iter()
-            .any(|m| matches!(m, Mode::Redact(r) if r.scanning.is_some()))
+        self.stack.iter().any(|m| match m {
+            Mode::Redact(r) => r.scanning.is_some(),
+            Mode::Text(t) => t.reading.is_some(),
+            _ => false,
+        })
     }
 
     pub(crate) fn stack_mut(&mut self) -> &mut Vec<Mode> {
@@ -542,6 +553,7 @@ impl Session {
     pub fn project(&self) -> Project {
         let mut p = self.project.clone();
         p.selection = self.sel.rect();
+        p.measure_scale = self.measure_scale.map(Into::into);
         p
     }
 
@@ -656,6 +668,13 @@ impl Session {
             if a.keyboard && a.drawing() {
                 s.push_str("  pen down");
             }
+            match a.bend() {
+                Some(crate::annotate::Bend::Straight) => s.push_str("  straight"),
+                Some(crate::annotate::Bend::Arc) => {
+                    s.push_str(&format!("  arc {}px", self.pen_bulge));
+                }
+                None => {}
+            }
         }
         let locked = self.open.as_ref().map_or(0, |o| o.layer.ops.len());
         if self.open.is_some() {
@@ -762,6 +781,7 @@ impl Session {
             Some(Mode::Annotate(_)) => crate::legend::ANNOTATE_PALETTE,
             Some(Mode::Shape(_)) => crate::legend::SHAPE_PALETTE,
             Some(Mode::Filter(_)) => crate::legend::FILTER_PALETTE,
+            Some(Mode::Measure(_)) => crate::legend::MEASURE_PALETTE,
             _ => return vec![],
         };
         crate::legend::render(self.keymap(), lines)
@@ -845,9 +865,17 @@ impl Session {
                 self.dispatch(Intent::Motion(at));
             }
             RawEvent::Wheel { steps } => {
-                self.user_acted(Some(Intent::Adjust(steps.signum())));
+                // Ctrl+wheel bends the pen's arc in Annotate; else +/-.
+                let bend =
+                    self.input.mods().ctrl && matches!(self.stack.last(), Some(Mode::Annotate(_)));
+                let intent = if bend {
+                    Intent::Bulge(steps.signum())
+                } else {
+                    Intent::Adjust(steps.signum())
+                };
+                self.user_acted(Some(intent));
                 for _ in 0..steps.unsigned_abs() {
-                    self.dispatch(Intent::Adjust(steps.signum()));
+                    self.dispatch(intent);
                 }
             }
             RawEvent::FocusLost => self.input.reset(),
@@ -944,6 +972,12 @@ impl Session {
         if self.is_finished() {
             return;
         }
+        if matches!(intent, Intent::DropPoint | Intent::AddPoint)
+            && matches!(self.stack[..], [.., Mode::Measure(_), Mode::Loupe(_)])
+        {
+            self.drop_through_loupe(intent);
+            return;
+        }
         let t = match self.stack.pop() {
             None => self.select_intent(intent),
             Some(mut mode) => {
@@ -954,7 +988,11 @@ impl Session {
                     Mode::Filter(f) => self.filter_intent(f, intent),
                     Mode::Layers(m) => self.layers_intent(m, intent),
                     Mode::Insert(m) => self.insert_intent(m, intent),
-                    Mode::Loupe(m) => self.loupe_intent(m, intent),
+                    Mode::Loupe(m) => {
+                        let t = self.loupe_intent(m, intent);
+                        self.loupe_at = Some(m.cursor.at);
+                        t
+                    }
                     Mode::Enhance(m) => self.enhance_intent(m, intent),
                     Mode::Text(t) => self.text_intent(t, intent),
                     Mode::Redact(r) => self.redact_intent(r, intent),
@@ -1117,21 +1155,6 @@ impl Session {
             open.log.push(entry);
         }
         self.pending = None;
-    }
-
-    /// A committed layer of `ops` over the box, as one project step
-    /// (Measure's bake).
-    pub(crate) fn add_layer(&mut self, ops: Vec<OpData>) {
-        let id = self.project.new_layer_id();
-        self.open = Some(OpenLayer {
-            layer: Layer::new(id, self.sel.rect()),
-            depth: 0,
-            log: Vec::new(),
-        });
-        for op in ops {
-            self.insert_op(op, None);
-        }
-        let _ = self.close_layer(true);
     }
 
     /// Fold the last `n` log entries into one.

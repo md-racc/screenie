@@ -130,6 +130,8 @@ pub enum Intent {
     /// `Space` in Annotate: the keyboard pen down (drawing) or up (the line
     /// is locked).
     PenToggle,
+    /// Ctrl+`+`/`-` or Ctrl+wheel in Annotate: the arc's bulge, 2px a step.
+    Bulge(i32),
     /// `n` in Annotate: a numbered callout at the pen.
     Callout,
     /// `N` in Annotate: set the next callout's number (typed).
@@ -145,6 +147,8 @@ pub enum Intent {
     Measure(crate::measure::Prim),
     /// `Space` in Measure: drop a point (Alt: without snapping).
     DropPoint,
+    /// `Shift+Space` in Measure: drop a point and keep a line going (a path).
+    AddPoint,
     /// `y` in Measure: deliver the measurements as text.
     CopyMeasurements,
     /// `C`: calibrate against the selected measurement.
@@ -153,8 +157,6 @@ pub enum Intent {
     UnitSystem,
     /// `T` in Measure: pixels, or back to real units.
     ShowPixels,
-    /// `a` in Measure: bake the measurements into an annotation layer.
-    Bake,
 
     // Text input.
     /// A typed character, taken literally.

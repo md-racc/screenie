@@ -111,3 +111,40 @@ fn auto_redact_finds_secrets_in_real_ocr() {
         email.rect
     );
 }
+
+#[test]
+fn auto_redact_finds_a_card_and_its_security_code_in_real_ocr() {
+    if !have_tesseract() {
+        eprintln!("no tesseract: skipped");
+        return;
+    }
+    let Some(pic) = text_image("4111 1111 1111 1111 CVV 123", false) else {
+        return;
+    };
+    let found = screenie_core::redact::propose(&read(&pic), &Default::default(), 0.2);
+    let names: Vec<&str> = found.iter().map(|p| p.category.name()).collect();
+    assert_eq!(names, ["card", "security-code"], "{names:?}");
+}
+
+#[test]
+fn a_scale_bar_reads_from_real_ocr() {
+    if !have_tesseract() {
+        eprintln!("no tesseract: skipped");
+        return;
+    }
+    let Some(pic) = text_image("0      50      100 m", false) else {
+        return;
+    };
+    let r = read(&pic);
+    let at = |t: &str| {
+        let w = r.words.iter().find(|w| w.text == t).expect(t);
+        screenie_core::geometry::PixelPoint::new(w.bbox.x + w.bbox.w / 2, w.bbox.y - 6)
+    };
+    // A line drawn along the bar, from its 0 to its 100. Tesseract tends to
+    // drop the lone "0", so its start is a bar's length left of the 100
+    // from the 50.
+    let (fifty, hundred) = (at("50"), at("100"));
+    let zero = screenie_core::geometry::PixelPoint::new(2 * fifty.x - hundred.x, hundred.y);
+    let got = screenie_core::measure::scale_bar(&r, zero, hundred);
+    assert_eq!(got.as_deref(), Some("100 m"), "{:?}", r.text);
+}
