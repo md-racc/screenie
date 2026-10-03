@@ -69,7 +69,61 @@ pub struct Pick {
     /// `--mode`: the mode the picker opens in.
     pub mode: Option<screenie_core::select::StartMode>,
     pub lock_box: bool,
+    /// `--from SOURCE`: the picture (None is the screen).
+    pub from: Option<Source>,
     pub output: Output,
+}
+
+/// Where the picture comes from (docs/cli.md, SOURCES AND REGIONS).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    /// The frozen screen, the default.
+    Screen,
+    /// An image file (PNG, JPEG, WebP, PPM), or a screenie project PNG.
+    File(PathBuf),
+    /// An image on stdin.
+    Stdin,
+    /// A past shot, with its project: `last` (1) or `last:N`.
+    Last(usize),
+}
+
+impl Source {
+    pub fn parse(s: &str) -> Result<Source, String> {
+        Ok(match s {
+            "screen" => Source::Screen,
+            "-" => Source::Stdin,
+            _ if s == "last" || s.starts_with("last:") => Source::Last(parse_last(s)?),
+            _ => Source::File(PathBuf::from(s)),
+        })
+    }
+
+    /// An image rather than the screen or a shot: only `all` and `X,Y WxH`
+    /// (in its pixels) mean anything there.
+    pub fn is_image(&self) -> bool {
+        matches!(self, Source::File(_) | Source::Stdin)
+    }
+}
+
+/// A region that doesn't mean anything over an image (a window, a
+/// monitor, the ring), as a usage error.
+fn check_image_region(from: &Source, region: Option<&str>) -> Result<(), String> {
+    let Some(r) = region.map(str::trim) else {
+        return Ok(());
+    };
+    if r == "-" && *from == Source::Stdin {
+        return Err(
+            "--from - and a region from - both read stdin: give one in the arguments".into(),
+        );
+    }
+    let screen_only = ["monitor", "window:", "active", "last-region"]
+        .iter()
+        .any(|p| r.starts_with(p));
+    if screen_only {
+        return Err(format!(
+            "{r:?} means a part of the screen: over an image, the region is all or X,Y WxH (in its pixels)"
+        ));
+    }
+    Ok(())
 }
 
 /// How `--select-only` prints the box.
@@ -87,6 +141,8 @@ pub enum RegionFormat {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Shot {
     pub region: Option<String>,
+    /// `--from SOURCE`: the picture (None is the screen).
+    pub from: Option<Source>,
     pub output: Output,
 }
 
@@ -94,9 +150,10 @@ pub struct Shot {
 pub enum Command {
     Pick(Pick),
     Shot(Shot),
-    /// `edit last[:N]`: the picker over a past shot's project.
+    /// `edit FILE|-|last[:N]`: the picker over an image, or a past shot's
+    /// project (`pick --from SOURCE --region all`).
     Edit {
-        which: usize,
+        source: Source,
         pick: Pick,
     },
     /// `history [-n N] [--json]`.
@@ -111,9 +168,9 @@ pub enum Command {
 }
 
 pub const USAGE: &str = "\
-usage: screenie [pick] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
+usage: screenie [pick] [--from SOURCE] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie shot [REGION] [OUTPUT OPTIONS]
-       screenie edit last[:N] [--keys KEYS] [--no-ui] [OUTPUT OPTIONS]
+       screenie edit FILE|-|last[:N] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
 
 pick options:   --keys KEYS  --no-ui  --mode MODE  --result RESULT  --lock-box
@@ -140,7 +197,7 @@ fn parse_last(s: &str) -> Result<usize, String> {
             .and_then(|n| n.parse().ok())
             .filter(|&n| n >= 1)
             .ok_or_else(|| format!("bad shot {s:?}: last or last:N")),
-        None => Err("only past shots (last, last:N) can be edited so far".into()),
+        None => Err(format!("bad shot {s:?}: last or last:N")),
     }
 }
 
@@ -180,6 +237,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             Arg::Long("keys") => pick.keys = Some(p.value().map_err(err)?.string().map_err(err)?),
             Arg::Long("no-ui") => pick.no_ui = true,
+            Arg::Long("from") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                pick.from = match Source::parse(&v)? {
+                    Source::Screen => None,
+                    other => Some(other),
+                };
+            }
             Arg::Long("select-only") => pick.select_only = true,
             Arg::Long("lock-box") => pick.lock_box = true,
             Arg::Long("region-format") => {
@@ -301,12 +365,21 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             })
         }
         Some("edit") => {
-            let which = match positional.as_slice() {
-                [w] => parse_last(w)?,
-                [] => return Err("edit what? (edit last, or last:N)".into()),
-                _ => return Err("edit takes one shot".into()),
+            if pick.from.is_some() {
+                return Err("edit takes what it opens as FILE, not --from".into());
+            }
+            let source = match positional.as_slice() {
+                [w] => Source::parse(w)?,
+                [] => return Err("edit what? (a file, -, last or last:N)".into()),
+                _ => return Err("edit takes one image".into()),
             };
-            Ok(Command::Edit { which, pick })
+            if source == Source::Screen {
+                return Err("edit what? (a file, -, last or last:N)".into());
+            }
+            if source.is_image() {
+                check_image_region(&source, pick.region.as_deref())?;
+            }
+            Ok(Command::Edit { source, pick })
         }
         Some("shot") => {
             let picker_only = pick.keys.is_some()
@@ -325,14 +398,21 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             let region = pick
                 .region
                 .or_else(|| (!positional.is_empty()).then(|| positional.join(" ")));
+            if let Some(from) = pick.from.as_ref().filter(|f| f.is_image()) {
+                check_image_region(from, region.as_deref())?;
+            }
             Ok(Command::Shot(Shot {
                 region,
+                from: pick.from,
                 output: pick.output,
             }))
         }
         _ => {
             if let Some(extra) = positional.first() {
                 return Err(format!("unexpected argument {extra:?}"));
+            }
+            if let Some(from) = pick.from.as_ref().filter(|f| f.is_image()) {
+                check_image_region(from, pick.region.as_deref())?;
             }
             Ok(Command::Pick(pick))
         }
@@ -403,6 +483,44 @@ mod tests {
     }
 
     #[test]
+    fn from_a_file_stdin_or_a_past_shot() {
+        let Command::Pick(p) = cmd("--from shot.png").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.from, Some(Source::File(PathBuf::from("shot.png"))));
+        let Command::Shot(s) = cmd("shot --from - 0,0 10x10").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (s.from, s.region.as_deref()),
+            (Some(Source::Stdin), Some("0,0 10x10"))
+        );
+        let Command::Shot(s) = cmd("shot --from last:2").unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.from, Some(Source::Last(2)));
+        assert_eq!(
+            cmd("--from screen").unwrap(),
+            cmd("").unwrap(),
+            "screen is the default"
+        );
+        for bad in [
+            "--from - --region -", // both on stdin
+            "shot --from - -",     // the same, as shot's region
+            "--from pic.png --region monitor",
+            "shot --from pic.png active",
+            "--from pic.png --region window:class:foo",
+            "--from pic.png --region last-region",
+            "edit pic.png --from other.png",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
+        // A file's regions: the whole image, or a rect of its pixels.
+        assert!(cmd("--from pic.png --region all").is_ok());
+        assert!(cmd("shot --from pic.png 10,20 30x40").is_ok());
+    }
+
+    #[test]
     fn picker_options() {
         let Command::Pick(p) = cmd("--select-only --region-format hypr").unwrap() else {
             panic!()
@@ -459,14 +577,34 @@ mod tests {
     fn edit_and_history() {
         assert!(matches!(
             cmd("edit last").unwrap(),
-            Command::Edit { which: 1, .. }
+            Command::Edit {
+                source: Source::Last(1),
+                ..
+            }
         ));
         assert!(matches!(
             cmd("edit last:3").unwrap(),
-            Command::Edit { which: 3, .. }
+            Command::Edit {
+                source: Source::Last(3),
+                ..
+            }
         ));
         assert!(cmd("edit last:0").is_err());
-        assert!(cmd("edit pic.png").is_err());
+        assert!(matches!(
+            cmd("edit pic.png").unwrap(),
+            Command::Edit {
+                source: Source::File(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            cmd("edit -").unwrap(),
+            Command::Edit {
+                source: Source::Stdin,
+                ..
+            }
+        ));
+        assert!(cmd("edit").is_err());
         assert_eq!(
             cmd("history -n 5 --json").unwrap(),
             Command::History { n: 5, json: true }

@@ -3,6 +3,7 @@
 //! Depends on `screenie-core` for geometry; holds no input semantics.
 
 pub mod compose;
+pub mod decode;
 pub mod encode;
 pub mod frame;
 pub mod image;

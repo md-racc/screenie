@@ -53,7 +53,7 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
 }
 
 /// slurp's `X,Y WxH`.
-fn geometry(s: &str) -> Option<LogicalRect> {
+pub(crate) fn geometry(s: &str) -> Option<LogicalRect> {
     let (xy, wh) = s.split_once(' ')?;
     let (x, y) = xy.split_once(',')?;
     let (w, h) = wh.trim().split_once('x')?;

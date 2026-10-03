@@ -4,6 +4,7 @@ mod analysis;
 mod cli;
 mod deliver;
 mod files;
+mod open;
 mod picker;
 mod region;
 mod report;
@@ -162,6 +163,11 @@ fn redact_shot(
 type RedactedShot = (Picture, Project, Vec<(String, LogicalRect)>);
 
 fn shot(args: cli::Shot) -> Result<Report, Failure> {
+    match args.from.clone() {
+        Some(cli::Source::Last(n)) => return shot_last(n, &args),
+        Some(source) if source.is_image() => return shot_image(&source, &args),
+        _ => {}
+    }
     let spec = args.region.as_deref().unwrap_or("active");
     if spec == "active" {
         return shot_active(&args.output);
@@ -182,6 +188,53 @@ fn shot(args: cli::Shot) -> Result<Report, Failure> {
         .delivered(&d))
 }
 
+/// `shot --from FILE|-`: a region of an image (all of it by default),
+/// delivered as it is; a project PNG with its layers drawn in.
+fn shot_image(source: &cli::Source, args: &cli::Shot) -> Result<Report, Failure> {
+    let bytes = open::read(source).map_err(Failure::capture)?;
+    let img = match open::project_in(&bytes) {
+        Some((img, file)) => open::flatten(img, &file),
+        None => {
+            screenie_image::decode::decode(&bytes, open::BACKGROUND).map_err(Failure::capture)?
+        }
+    };
+    let monitor = open::its_own(&img);
+    let (frame, image) = screenie_image::compose::place(img, monitor.rect, 1.0, open::BACKGROUND);
+    let layout = open::one_monitor(&monitor);
+    let rect = open::region(args.region.as_deref().unwrap_or("all"), image, 1.0)
+        .map_err(Failure::usage)?;
+    let (picture, _, redacted) = redact_shot(&frame, &layout, rect, &args.output)?;
+    let d = deliver::image(&picture.crop(rect), &args.output, "Image", None)
+        .map_err(Failure::delivery)?;
+    Ok(Report::done("image")
+        .set(
+            "rect",
+            json!({"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h}),
+        )
+        .px(frame.map().to_pixels(rect))
+        .redacted(&args.output, &redacted)
+        .delivered(&d))
+}
+
+/// `shot --from last[:N]`: a past shot delivered again, its layers drawn
+/// in, over its own box unless a region says otherwise.
+fn shot_last(which: usize, args: &cli::Shot) -> Result<Report, Failure> {
+    let (img, file) = last_project(which)?;
+    let layout = file.layout.clone();
+    let rect = match args.region.as_deref() {
+        Some(spec) => resolve_region(spec, &layout, &ring_on(&layout))?,
+        None => file.project.selection,
+    };
+    let mut picture = Picture::new(Frame::new(img, layout.bounds));
+    picture.sync(&file.project.layers, None, None);
+    let d = deliver::image(&picture.crop(rect), &args.output, "Area", None)
+        .map_err(Failure::delivery)?;
+    Ok(Report::done("image")
+        .rect(rect, &layout)
+        .px(picture.committed().map().to_pixels(rect))
+        .delivered(&d))
+}
+
 /// A safety net for development runs: `SCREENIE_DEADLINE=SECS` takes the
 /// overlays down after that long, whatever happens.
 fn deadline() -> Option<Duration> {
@@ -190,6 +243,11 @@ fn deadline() -> Option<Duration> {
 }
 
 fn pick(args: cli::Pick) -> Result<Report, Failure> {
+    match args.from.clone() {
+        Some(cli::Source::Last(n)) => return edit_last(n, args),
+        Some(source) if source.is_image() => return pick_image(&source, args),
+        _ => {}
+    }
     let (wl, layout, frame) = capture()?;
     let ring = ring_on(&layout);
     let start = match &args.region {
@@ -202,12 +260,19 @@ fn pick(args: cli::Pick) -> Result<Report, Failure> {
         start,
         recall: ring,
     });
-    run_picker(wl, layout, frame, session, &args)
+    run_picker(wl, layout, frame, session, &args, true)
 }
 
-/// `edit last[:N]`: the picker over a past shot's capture, its layers
-/// still editable. The monitors must be the ones it was taken on.
-fn edit(which: usize, args: cli::Pick) -> Result<Report, Failure> {
+/// `edit FILE|-|last[:N]`: `pick --from SOURCE`, the box on all of it.
+fn edit(source: cli::Source, args: cli::Pick) -> Result<Report, Failure> {
+    match source {
+        cli::Source::Last(n) => edit_last(n, args),
+        source => pick_image(&source, args),
+    }
+}
+
+/// A past shot's project: the capture, and the project with its layout.
+fn last_project(which: usize) -> Result<(screenie_image::Image, ProjectFile), Failure> {
     let shot = files::shots()
         .into_iter()
         .nth(which - 1)
@@ -215,24 +280,44 @@ fn edit(which: usize, args: cli::Pick) -> Result<Report, Failure> {
     let path = files::project_of(&shot);
     let bytes =
         std::fs::read(&path).map_err(|e| Failure::capture(format!("{}: {e}", path.display())))?;
-    let (img, text) = screenie_image::encode::read_png(&bytes, PROJECT_KEY)
-        .map_err(|e| Failure::capture(format!("{}: {e}", path.display())))?;
-    let file =
-        ProjectFile::from_json(&text.ok_or_else(|| Failure::capture("no project in that file"))?)
-            .map_err(Failure::capture)?;
-    let wl = Wayland::connect().map_err(Failure::capture)?;
-    let now = Hyprland.layout().map_err(Failure::capture)?;
-    let same = |l: &Layout| {
+    open::project_in(&bytes)
+        .ok_or_else(|| Failure::capture(format!("{}: no project in it", path.display())))
+}
+
+/// Whether two layouts have the same monitors (a project reopens editable
+/// only on the monitors it was taken on).
+fn same_monitors(a: &Layout, b: &Layout) -> bool {
+    let key = |l: &Layout| {
         l.monitors
             .iter()
             .map(|m| (m.name.clone(), m.rect, m.scale))
             .collect::<Vec<_>>()
     };
-    if same(&now) != same(&file.layout) {
+    key(a) == key(b)
+}
+
+/// `edit last[:N]` (`--from last[:N]`): the picker over a past shot's
+/// capture, its layers still editable. The monitors must be the ones it
+/// was taken on.
+fn edit_last(which: usize, args: cli::Pick) -> Result<Report, Failure> {
+    let (img, file) = last_project(which)?;
+    let wl = Wayland::connect().map_err(Failure::capture)?;
+    let now = Hyprland.layout().map_err(Failure::capture)?;
+    if !same_monitors(&now, &file.layout) {
         return Err(Failure::capture(
             "the monitors have changed since that shot, and edit needs the same ones",
         ));
     }
+    edit_project(wl, img, file, args)
+}
+
+/// The picker over a project's capture, its layers restored.
+fn edit_project(
+    wl: Wayland,
+    img: screenie_image::Image,
+    file: ProjectFile,
+    args: cli::Pick,
+) -> Result<Report, Failure> {
     let layout = file.layout;
     let frame = Frame::new(img, layout.bounds);
     let ring = ring_on(&layout);
@@ -250,16 +335,60 @@ fn edit(which: usize, args: cli::Pick) -> Result<Report, Failure> {
     let mut project = file.project;
     project.selection = selection;
     session.restore(project);
-    run_picker(wl, layout, frame, session, &args)
+    run_picker(wl, layout, frame, session, &args, true)
+}
+
+/// `--from FILE|-` (`edit FILE|-`): the picker over an image, on the
+/// focused monitor, the box on all of it unless `--region` says. A
+/// screenie project PNG reopens with its layers when its monitors are
+/// still there, else with them drawn in.
+fn pick_image(source: &cli::Source, args: cli::Pick) -> Result<Report, Failure> {
+    let bytes = open::read(source).map_err(Failure::capture)?;
+    let wl = Wayland::connect().map_err(Failure::capture)?;
+    let now = Hyprland.layout().map_err(Failure::capture)?;
+    let img = match open::project_in(&bytes) {
+        Some((img, file)) if same_monitors(&now, &file.layout) => {
+            return edit_project(wl, img, file, args);
+        }
+        Some((img, file)) => open::flatten(img, &file),
+        None => {
+            screenie_image::decode::decode(&bytes, open::BACKGROUND).map_err(Failure::capture)?
+        }
+    };
+    let monitor = now
+        .monitors
+        .iter()
+        .find(|m| m.id == now.focused)
+        .or(now.monitors.first())
+        .ok_or_else(|| Failure::capture("no monitor to show it on"))?
+        .clone();
+    let (frame, image) =
+        screenie_image::compose::place(img, monitor.rect, monitor.scale, open::BACKGROUND);
+    let layout = open::one_monitor(&monitor);
+    let k = frame.map().scale();
+    let start = match &args.region {
+        Some(spec) => open::region(spec, image, k).map_err(Failure::usage)?,
+        None => image,
+    };
+    let session = Session::new(Setup {
+        layout: layout.clone(),
+        pixels: *frame.map(),
+        start: Some(start),
+        recall: vec![],
+    });
+    run_picker(wl, layout, frame, session, &args, false)
 }
 
 /// Play the keys, show the picker if they didn't finish it, and deliver.
+/// `screen`: from the screen or a past shot, so the box joins the recall
+/// ring and the shot keeps a project; not for an opened image.
 fn run_picker(
     mut wl: Wayland,
     layout: Layout,
     frame: Frame,
     mut session: Session,
     args: &cli::Pick,
+    screen: bool,
 ) -> Result<Report, Failure> {
     let font = screenie_platform::fonts::monospace();
     if let Some(f) = &font {
@@ -315,7 +444,7 @@ fn run_picker(
         wl.run_overlay(&layout, &mut app, deadline())
             .map_err(Failure::capture)?;
         drop(wl);
-        if let Some(r) = select_only(app.session.outcome(), &layout, args) {
+        if let Some(r) = select_only(app.session.outcome(), &layout, args, screen) {
             return r;
         }
         let project = app.session.project();
@@ -328,12 +457,13 @@ fn run_picker(
             &args.output,
             &project,
             &redacted,
+            screen,
         );
     }
     drop(wl);
     let mut picture = Picture::new(frame);
     picture.sync(session.layers(), None, None);
-    if let Some(r) = select_only(session.outcome(), &layout, args) {
+    if let Some(r) = select_only(session.outcome(), &layout, args, screen) {
         return r;
     }
     let project = session.project();
@@ -344,6 +474,7 @@ fn run_picker(
         &args.output,
         &project,
         &session.redacted(),
+        screen,
     )
 }
 
@@ -352,6 +483,7 @@ fn select_only(
     outcome: Option<&Outcome>,
     layout: &Layout,
     args: &cli::Pick,
+    screen: bool,
 ) -> Option<Result<Report, Failure>> {
     if !args.select_only {
         return None;
@@ -365,7 +497,9 @@ fn select_only(
         ) => *rect,
         _ => return None,
     };
-    files::remember(&layout.monitors, rect);
+    if screen {
+        files::remember(&layout.monitors, rect);
+    }
     let text = region::format(rect, args.region_format);
     Some(
         deliver::text(&text, &args.output, "Region")
@@ -432,6 +566,7 @@ fn finish(
     out: &cli::Output,
     project: &Project,
     redacted: &[(&str, LogicalRect)],
+    screen: bool,
 ) -> Result<Report, Failure> {
     let layers = &project.layers;
     let Some(Outcome::Done(action)) = outcome else {
@@ -443,9 +578,14 @@ fn finish(
             project.selection = rect;
             let base = picture.base().image();
             let keep = || project_png(base, &project, layout);
-            let d = deliver::image(&picture.crop(rect), out, "Area", Some(&keep))
+            // An opened image keeps no project: its "monitor" is a canvas.
+            let keep: Option<&dyn Fn() -> Result<Vec<u8>, String>> =
+                if screen { Some(&keep) } else { None };
+            let d = deliver::image(&picture.crop(rect), out, "Area", keep)
                 .map_err(Failure::delivery)?;
-            files::remember(&layout.monitors, rect);
+            if screen {
+                files::remember(&layout.monitors, rect);
+            }
             let described: Vec<String> = layers
                 .iter()
                 .filter(|l| !l.hidden)
@@ -469,7 +609,9 @@ fn finish(
                 .set("copied", out.copies())
         }
         FinishedAction::Ocr { rect } => {
-            files::remember(&layout.monitors, rect);
+            if screen {
+                files::remember(&layout.monitors, rect);
+            }
             let text = ocr(picture, rect, out)?;
             if text.is_empty() {
                 if deliver::notifies(out) {
@@ -500,7 +642,9 @@ fn finish(
                 .set("copied", out.copies())
         }
         FinishedAction::Pin { rect } => {
-            files::remember(&layout.monitors, rect);
+            if screen {
+                files::remember(&layout.monitors, rect);
+            }
             let png = screenie_image::encode::png(&picture.crop(rect), out.png_level)
                 .map_err(|e| Failure::delivery(e.to_string()))?;
             let dir = files::runtime_dir().map_err(|e| Failure::delivery(e.to_string()))?;
@@ -565,7 +709,7 @@ fn main() -> ExitCode {
         }
         Command::Shot(args) => shot(args),
         Command::Pick(args) => pick(args),
-        Command::Edit { which, pick } => edit(which, pick),
+        Command::Edit { source, pick } => edit(source, pick),
         Command::History { n, json } => {
             return match history(n, json) {
                 Ok(_) => ExitCode::SUCCESS,

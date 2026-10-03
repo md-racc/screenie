@@ -123,7 +123,16 @@ Window regions:
 Other sources:
 - With `--from FILE` or `-`, only `all` and `X,Y WxH` apply (in image
   pixels). Window and monitor regions are exit 2.
+- The picker shows an image on the focused monitor, centred, at the
+  monitor's scale or more, so a big image is shown smaller but every pixel
+  is kept; the box starts on all of it.
+- A screenie project PNG (`--save-project`, or one beside a shot) reopens
+  with its layers when its monitors are still there, and otherwise opens
+  with them drawn in, never as the bare capture.
+- An opened image doesn't join the `.` ring or keep a project of its own.
 - `--from last` keeps the layout it was taken with, so every region works.
+  `shot --from last` delivers it again, its layers drawn in, over its own
+  box unless a region is given.
 
 `last-region` is anchored to its monitor by name (it follows a rearranged
 layout), and falls back to the global rect, clamped, when that monitor is gone.

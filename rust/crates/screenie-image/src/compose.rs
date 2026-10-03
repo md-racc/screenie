@@ -147,6 +147,36 @@ pub fn compose(bounds: LogicalRect, scale: f64, parts: &[(LogicalRect, Image)]) 
     out
 }
 
+/// An image (`--from FILE`) shown on a monitor: on a canvas covering the
+/// monitor at scale `k`, the monitor's own or more, so that every image
+/// pixel is a canvas pixel (a big image is shown smaller, never resampled).
+/// Centred, on `background`. The frame, and the image's logical rect.
+pub fn place(
+    img: Image,
+    monitor: LogicalRect,
+    scale: f64,
+    background: crate::image::Rgb,
+) -> (crate::frame::Frame, LogicalRect) {
+    let (iw, ih) = (img.width(), img.height());
+    let k = scale
+        .max(f64::from(iw) / monitor.w)
+        .max(f64::from(ih) / monitor.h);
+    let (cw, ch) = ((monitor.w * k).ceil() as u32, (monitor.h * k).ceil() as u32);
+    let (ox, oy) = ((cw - iw) / 2, (ch - ih) / 2);
+    let mut canvas = Image::filled(cw, ch, background);
+    canvas.blit(&img, img.extent(), ox as i32, oy as i32);
+    // The canvas's own extent in logical px (a hair over the monitor when
+    // k doesn't divide it), so its scale is exactly k.
+    let bounds = LogicalRect::new(monitor.x, monitor.y, f64::from(cw) / k, f64::from(ch) / k);
+    let rect = LogicalRect::new(
+        monitor.x + f64::from(ox) / k,
+        monitor.y + f64::from(oy) / k,
+        f64::from(iw) / k,
+        f64::from(ih) / k,
+    );
+    (crate::frame::Frame::new(canvas, bounds), rect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
