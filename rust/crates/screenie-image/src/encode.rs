@@ -96,6 +96,46 @@ pub fn read_png(bytes: &[u8], keyword: &str) -> io::Result<(Image, Option<String
     Ok((img, text))
 }
 
+/// JPEG at `quality` (1-100): lossy, for photos and size.
+pub fn jpeg(img: &Image, quality: u8) -> Result<Vec<u8>, String> {
+    let (w, h) = (img.width(), img.height());
+    let (w16, h16) = (
+        u16::try_from(w).map_err(|_| "too wide for JPEG")?,
+        u16::try_from(h).map_err(|_| "too tall for JPEG")?,
+    );
+    let rgb: Vec<u8> = img
+        .data()
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100))
+        .encode(&rgb, w16, h16, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| format!("JPEG: {e}"))?;
+    Ok(out)
+}
+
+/// WebP, lossless (the encoder has no lossy mode).
+pub fn webp(img: &Image) -> Result<Vec<u8>, String> {
+    let rgb: Vec<u8> = img
+        .data()
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let mut out = Vec::new();
+    image_webp::WebPEncoder::new(&mut out)
+        .encode(&rgb, img.width(), img.height(), image_webp::ColorType::Rgb8)
+        .map_err(|e| format!("WebP: {e}"))?;
+    Ok(out)
+}
+
+/// PPM (binary P6): no compression, quickest to pipe to another tool.
+pub fn ppm(img: &Image) -> Vec<u8> {
+    let mut out = format!("P6\n{} {}\n255\n", img.width(), img.height()).into_bytes();
+    out.extend(img.data().chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

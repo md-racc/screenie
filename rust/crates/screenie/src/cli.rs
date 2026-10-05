@@ -27,6 +27,78 @@ pub struct Output {
     pub save_project: bool,
     /// `--redact suggest|auto`.
     pub redact: Option<Redact>,
+    /// `--delay SECONDS`: wait before capturing the screen.
+    pub delay: Option<f64>,
+    /// `--cursor`: the pointer in the capture.
+    pub cursor: bool,
+    /// `--format`: how images are written out.
+    pub format: Format,
+    /// `--scale`: the output's resolution.
+    pub scale: OutputScale,
+    /// `--pin`: float the result too.
+    pub pin: bool,
+    /// `--colour-format`: how a colour result is written.
+    pub colour_format: ColourFormat,
+    /// `--no-copy-uri`: copy a saved image without its file's URI.
+    pub no_copy_uri: bool,
+    /// `--quality N`: JPEG's, 1-100 (unused by other formats, so a
+    /// config's quality and a profile's format can sit together).
+    pub quality: Option<u8>,
+}
+
+/// `--scale native|min|FACTOR`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum OutputScale {
+    /// The highest scale of the monitors the box is on.
+    #[default]
+    Native,
+    /// The lowest: no monitor upsampled.
+    Min,
+    /// Pixels a logical pixel.
+    Factor(f64),
+}
+
+/// How a colour result is written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColourFormat {
+    /// `#rrggbb`
+    #[default]
+    Hex,
+    /// `rgb(r, g, b)`
+    Rgb,
+    /// `hsl(h, s%, l%)`
+    Hsl,
+}
+
+/// An image's encoding for `--save`, `--stdout` and the clipboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Format {
+    #[default]
+    Png,
+    Jpeg,
+    /// Lossless.
+    Webp,
+    Ppm,
+}
+
+impl Format {
+    pub fn ext(self) -> &'static str {
+        match self {
+            Format::Png => "png",
+            Format::Jpeg => "jpg",
+            Format::Webp => "webp",
+            Format::Ppm => "ppm",
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Format::Png => "image/png",
+            Format::Jpeg => "image/jpeg",
+            Format::Webp => "image/webp",
+            Format::Ppm => "image/x-portable-pixmap",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,9 +234,30 @@ pub enum Command {
         json: bool,
     },
     Help,
+    /// `help keys|regions|config`.
+    HelpTopic(String),
+    /// `completions bash|zsh|fish`.
+    Completions(String),
     Version,
     /// Internal: serve the clipboard (see platform::clipboard).
     ServeClipboard,
+    /// Internal: a pin's window (see platform::pins).
+    ServePin(Vec<String>),
+    /// `pin [FILE|-|last[:N]] [--at X,Y]`.
+    Pin {
+        source: Source,
+        at: Option<(f64, f64)>,
+        json: bool,
+    },
+    /// `pin list [--json]`.
+    PinList {
+        json: bool,
+    },
+    /// `pin close [ID...|--all]`.
+    PinClose {
+        ids: Vec<u32>,
+        json: bool,
+    },
 }
 
 pub const USAGE: &str = "\
@@ -172,6 +265,9 @@ usage: screenie [pick] [--from SOURCE] [--region REGION] [PICK OPTIONS] [OUTPUT 
        screenie shot [REGION] [OUTPUT OPTIONS]
        screenie edit FILE|-|last[:N] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
+       screenie help [keys|regions|config]
+       screenie completions bash|zsh|fish
+       screenie pin [FILE|-|last[:N]] [--at X,Y]  |  pin list [--json]  |  pin close ID...|--all
 
 pick options:   --keys KEYS  --no-ui  --mode MODE  --result RESULT  --lock-box
                 --select-only  --region-format slurp|json|hypr
@@ -182,6 +278,10 @@ RESULT: image | text | colour | code | pin | measure
 output options: --save [DIR]  --stdout  --copy | --no-copy  --png-level 0-9
                 --notify | --no-notify  --quiet  --no-history  --ocr-lang LANG  --json
                 --save-project  --redact suggest|auto
+                --format png|jpeg|webp|ppm  --quality 1-100 (JPEG)  --pin
+                --colour-format hex|rgb|hsl  --no-copy-uri
+capture options: --delay SECONDS  --cursor  --scale native|min|FACTOR
+global options: -p NAME (a config profile)  --config PATH  --no-config
 
 REGION: all | monitor | monitor:NAME | X,Y WxH | last-region[:N] | -
 --redact auto is best effort: OCR misses small, stylised, low-contrast and
@@ -214,6 +314,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     {
         return Ok(Command::ServeClipboard);
     }
+    if args
+        .first()
+        .is_some_and(|a| a == screenie_platform::pins::SERVE_ARG)
+    {
+        let rest = args[1..].iter().map(|a| a.to_string_lossy().to_string());
+        return Ok(Command::ServePin(rest.collect()));
+    }
     let mut p = Parser::from_args(args);
     let mut verb: Option<String> = None;
     let mut pick = Pick {
@@ -225,6 +332,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     };
     let mut positional: Vec<String> = Vec::new();
     let mut history_n: usize = 20;
+    let mut pin_at: Option<(f64, f64)> = None;
+    let mut pin_all = false;
     let mut region_format = false;
     let err = |e: lexopt::Error| e.to_string();
     while let Some(arg) = p.next().map_err(err)? {
@@ -292,6 +401,62 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Arg::Long("stdout") => o.stdout = true,
             Arg::Long("json") => o.json = true,
             Arg::Long("save-project") => o.save_project = true,
+            Arg::Long("cursor") => o.cursor = true,
+            Arg::Long("pin") => o.pin = true,
+            Arg::Long("scale") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                o.scale = match v.as_str() {
+                    "native" => OutputScale::Native,
+                    "min" => OutputScale::Min,
+                    _ => OutputScale::Factor(
+                        v.parse()
+                            .ok()
+                            .filter(|f: &f64| (0.05..=8.0).contains(f))
+                            .ok_or_else(|| {
+                                format!("--scale {v:?}: native, min, or a factor 0.05 to 8")
+                            })?,
+                    ),
+                };
+            }
+            Arg::Long("copy-uri") => o.no_copy_uri = false,
+            Arg::Long("no-copy-uri") => o.no_copy_uri = true,
+            Arg::Long("colour-format") | Arg::Long("color-format") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                o.colour_format = match v.as_str() {
+                    "hex" => ColourFormat::Hex,
+                    "rgb" => ColourFormat::Rgb,
+                    "hsl" => ColourFormat::Hsl,
+                    _ => return Err(format!("--colour-format {v:?}: hex, rgb or hsl")),
+                };
+            }
+            Arg::Long("format") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                o.format = match v.as_str() {
+                    "png" => Format::Png,
+                    "jpeg" | "jpg" => Format::Jpeg,
+                    "webp" => Format::Webp,
+                    "ppm" => Format::Ppm,
+                    _ => return Err(format!("--format {v:?}: png, jpeg, webp or ppm")),
+                };
+            }
+            Arg::Long("quality") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                o.quality = Some(
+                    v.parse()
+                        .ok()
+                        .filter(|q| (1..=100).contains(q))
+                        .ok_or_else(|| format!("--quality {v:?}: 1 to 100"))?,
+                );
+            }
+            Arg::Long("delay") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                let secs: f64 = v
+                    .parse()
+                    .ok()
+                    .filter(|s: &f64| (0.0..=3600.0).contains(s))
+                    .ok_or_else(|| format!("--delay {v:?}: seconds, 0 to 3600"))?;
+                o.delay = Some(secs);
+            }
             Arg::Long("redact") => {
                 o.redact = Some(
                     match p.value().map_err(err)?.string().map_err(err)?.as_str() {
@@ -301,6 +466,15 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     },
                 )
             }
+            Arg::Long("at") if verb.as_deref() == Some("pin") => {
+                let v = p.value().map_err(err)?.string().map_err(err)?;
+                let xy = v
+                    .split_once(',')
+                    .and_then(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
+                    .ok_or_else(|| format!("--at {v:?}: X,Y"))?;
+                pin_at = Some(xy);
+            }
+            Arg::Long("all") if verb.as_deref() == Some("pin") => pin_all = true,
             Arg::Short('n') if verb.as_deref() == Some("history") => {
                 history_n = p.value().map_err(err)?.parse().map_err(err)?;
             }
@@ -324,7 +498,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 let v = v.string().map_err(err)?;
                 if verb.is_none()
                     && positional.is_empty()
-                    && matches!(v.as_str(), "pick" | "shot" | "edit" | "history")
+                    && matches!(
+                        v.as_str(),
+                        "pick" | "shot" | "edit" | "history" | "help" | "completions" | "pin"
+                    )
                 {
                     verb = Some(v);
                 } else {
@@ -354,7 +531,57 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     {
         return Err("--redact suggest needs the picker: use --redact auto".into());
     }
+    // Waiting and the pointer are about capturing the screen.
+    let capturing = pick.output.delay.is_some() || pick.output.cursor;
+    let from_image =
+        pick.from.as_ref().is_some_and(|f| *f != Source::Screen) || verb.as_deref() == Some("edit");
+    if capturing && from_image {
+        return Err("--delay and --cursor are for capturing the screen, not an image".into());
+    }
     match verb.as_deref() {
+        Some("help") => match positional.as_slice() {
+            [] => Ok(Command::Help),
+            [t] => Ok(Command::HelpTopic(t.clone())),
+            _ => Err("help takes one topic: keys, regions or config".into()),
+        },
+        Some("pin") => match positional.first().map(String::as_str) {
+            Some("list") if positional.len() == 1 => Ok(Command::PinList {
+                json: pick.output.json,
+            }),
+            Some("close") => {
+                let ids = positional[1..]
+                    .iter()
+                    .map(|i| i.parse().map_err(|_| format!("pin close {i:?}: an id")))
+                    .collect::<Result<Vec<u32>, String>>()?;
+                match (ids.is_empty(), pin_all) {
+                    (true, false) => Err("pin close which? IDs, or --all".into()),
+                    (false, true) => Err("pin close: IDs or --all, not both".into()),
+                    _ => Ok(Command::PinClose {
+                        ids,
+                        json: pick.output.json,
+                    }),
+                }
+            }
+            _ if positional.len() > 1 => Err("pin takes one image".into()),
+            first => {
+                let source = match first {
+                    None => Source::Last(1),
+                    Some(s) => Source::parse(s)?,
+                };
+                if source == Source::Screen {
+                    return Err("pin what? (a file, -, last or last:N)".into());
+                }
+                Ok(Command::Pin {
+                    source,
+                    at: pin_at,
+                    json: pick.output.json,
+                })
+            }
+        },
+        Some("completions") => match positional.as_slice() {
+            [sh] => Ok(Command::Completions(sh.clone())),
+            _ => Err("completions bash, zsh or fish?".into()),
+        },
         Some("history") => {
             if let Some(extra) = positional.first() {
                 return Err(format!("unexpected argument {extra:?}"));
@@ -480,6 +707,115 @@ mod tests {
         assert!(cmd("--redact maybe").is_err());
         assert!(cmd("shot --redact suggest").is_err());
         assert!(cmd("--no-ui --redact suggest").is_err());
+    }
+
+    #[test]
+    fn pin_verbs() {
+        assert!(matches!(
+            cmd("pin").unwrap(),
+            Command::Pin {
+                source: Source::Last(1),
+                at: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cmd("pin pic.png --at 10,20").unwrap(),
+            Command::Pin {
+                source: Source::File(_),
+                at: Some((10.0, 20.0)),
+                ..
+            }
+        ));
+        assert_eq!(
+            cmd("pin list --json").unwrap(),
+            Command::PinList { json: true }
+        );
+        assert_eq!(
+            cmd("pin close 2 3").unwrap(),
+            Command::PinClose {
+                ids: vec![2, 3],
+                json: false
+            }
+        );
+        assert_eq!(
+            cmd("pin close --all --json").unwrap(),
+            Command::PinClose {
+                ids: vec![],
+                json: true
+            }
+        );
+        for bad in [
+            "pin close",
+            "pin close 1 --all",
+            "pin close x",
+            "pin --at 1",
+            "pin a b",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
+        assert!(cmd("--at 1,2").is_err(), "--at is pin's");
+    }
+
+    #[test]
+    fn scale() {
+        let Command::Shot(s) = cmd("shot --scale 0.5").unwrap() else {
+            panic!()
+        };
+        assert_eq!(s.output.scale, OutputScale::Factor(0.5));
+        let Command::Pick(p) = cmd("--scale min").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.scale, OutputScale::Min);
+        for bad in ["--scale 0", "--scale big", "--scale 20"] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn formats_and_quality() {
+        let Command::Shot(s) = cmd("shot --format jpeg --quality 80").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (s.output.format, s.output.quality),
+            (Format::Jpeg, Some(80))
+        );
+        let Command::Pick(p) = cmd("--format webp").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (p.output.format.ext(), p.output.format.mime()),
+            ("webp", "image/webp")
+        );
+        for bad in ["--format gif", "--format jpeg --quality 0", "--quality 101"] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
+        // Quality with another format is just unused (a config's quality
+        // under a profile's format).
+        assert!(cmd("--format webp --quality 50").is_ok());
+    }
+
+    #[test]
+    fn delay_and_cursor_are_for_capturing_the_screen() {
+        let Command::Shot(s) = cmd("shot --delay 2.5 --cursor").unwrap() else {
+            panic!()
+        };
+        assert_eq!((s.output.delay, s.output.cursor), (Some(2.5), true));
+        let Command::Pick(p) = cmd("--delay 3").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.delay, Some(3.0));
+        for bad in [
+            "--delay -1",
+            "--delay soon",
+            "--delay 3 --from pic.png",
+            "shot --cursor --from pic.png",
+            "edit pic.png --delay 1",
+            "--delay 99999",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

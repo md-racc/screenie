@@ -9,6 +9,9 @@ use crate::keymap::{Keymap, SESSION};
 /// One legend entry: a label and the intents whose keys it lists.
 pub type Item = (&'static str, &'static [Intent]);
 
+/// A legend or palette: lines of items.
+pub type Lines = &'static [&'static [Item]];
+
 /// Select's legend, line by line.
 pub const SELECT: &[&[Item]] = &[
     &[
@@ -44,6 +47,7 @@ pub const SELECT: &[&[Item]] = &[
     ],
     &[
         ("insert", &[Intent::Insert]),
+        ("measure", &[Intent::Measure(crate::measure::Prim::Line)]),
         ("loupe", &[Intent::Loupe]),
         ("enhance", &[Intent::Enhance]),
     ],
@@ -385,6 +389,39 @@ pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
         .collect()
 }
 
+/// A mode's palette (shown always) and legend (under `?`), by name.
+pub fn of(name: &str) -> Option<(Lines, Lines)> {
+    Some(match name {
+        "select" => (&[], SELECT),
+        "censor" => (&[], CENSOR),
+        "annotate" => (ANNOTATE_PALETTE, ANNOTATE),
+        "shape" => (SHAPE_PALETTE, SHAPE),
+        "filter" => (FILTER_PALETTE, FILTER),
+        "layers" => (&[], LAYERS),
+        "insert" => (&[], INSERT),
+        "loupe" => (&[], LOUPE),
+        "enhance" => (&[], ENHANCE),
+        "text" => (&[], TEXT),
+        "redact" => (&[], REDACT),
+        "measure" => (MEASURE_PALETTE, MEASURE),
+        _ => return None,
+    })
+}
+
+/// Every mode's keys, palette then legend, from the keymaps themselves
+/// (`screenie help keys`).
+pub fn reference() -> Vec<(&'static str, Vec<String>)> {
+    crate::keymap::all()
+        .into_iter()
+        .filter_map(|(name, map)| {
+            let (palette, legend) = of(name)?;
+            let mut lines = render(map, palette);
+            lines.extend(render(map, legend));
+            Some((name, lines))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,7 +434,7 @@ mod tests {
             [
                 "o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  + - scope  . last  u undo",
                 "x censor  a annotate  f filter  1-9 layers",
-                "i insert  z loupe  e enhance",
+                "i insert  m measure  z loupe  e enhance",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",
             ]
         );
@@ -415,22 +452,19 @@ mod tests {
     }
 
     #[test]
+    fn the_reference_has_every_mode_and_their_keys() {
+        let r = reference();
+        assert_eq!(r.len(), keymap::all().len(), "every mode has a legend");
+        let measure = &r.iter().find(|(n, _)| *n == "measure").unwrap().1;
+        assert!(measure[0].contains("s line"), "palette first: {measure:?}");
+        assert!(measure.iter().any(|l| l.contains("C calibrate")));
+    }
+
+    #[test]
     fn every_legend_item_is_bound() {
         for (name, map) in keymap::all() {
-            let lines = match name {
-                "select" => SELECT,
-                "censor" => CENSOR,
-                "annotate" => ANNOTATE,
-                "shape" => SHAPE,
-                "filter" => FILTER,
-                "layers" => LAYERS,
-                "insert" => INSERT,
-                "loupe" => LOUPE,
-                "enhance" => ENHANCE,
-                "text" => TEXT,
-                "redact" => REDACT,
-                "measure" => MEASURE,
-                _ => continue,
+            let Some((_, lines)) = of(name) else {
+                continue;
             };
             for (label, intents) in lines.iter().flat_map(|l| l.iter()) {
                 for &i in *intents {

@@ -76,7 +76,11 @@ Global options: `-p, --profile NAME` (repeatable), `--config PATH`,
 
 `pin list` / `pin close [ID...|--all]`
 : The open pins. Pins are screenie's own windows, not swayimg's, so it can
-  list and close them.
+  list and close them. A pin is a plain window with app id `screenie-pin`,
+  which a window rule floats and pins (`float`, `pin` on class
+  `^screenie-pin$`); dragging it moves it, and Esc, `q` or the middle
+  button close it. With `--json`, `pin` prints its report, `pin list` one
+  line per pin, and `pin close` the IDs it closed.
 
 `help keys|regions|config`
 : Print a section of the man page (the picker's keys, the REGION grammar,
@@ -204,7 +208,9 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 ## CAPTURE OPTIONS (pick and shot)
 
 `--delay SECONDS`
-: Wait before capturing. The picker shows a countdown chip.
+: Wait before capturing (up to an hour), with a notification saying how
+  long. There's no countdown on screen: anything drawn there would be in
+  the capture.
 
 `--cursor`
 : Include the mouse pointer in the capture.
@@ -215,6 +221,9 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
   - `min` is the lowest, so no monitor is upsampled.
   - `FACTOR` is relative to logical size: `1` is logical, `2` for docs,
     `0.5` for chat.
+  - "In the box" means the monitors it's on, not the whole layout. An
+    opened image's native size is its own pixels, and a window shot's is
+    the window's.
 
 ## OUTPUT OPTIONS
 
@@ -226,8 +235,8 @@ Output options are composable and apply to any verb that produces a result.
   given explicitly. `--json` doesn't, because it only describes the result.
   - Text results are copied as text.
   - A saved image is offered as `image/png`, plus `text/uri-list` when it
-    was saved, so file-drop targets get the file. `[output] copy-uri =
-    false` turns that off, for an app that pastes the path over the picture.
+    was saved, so file-drop targets get the file. `--no-copy-uri` (`[output] copy-uri =
+    false`) turns that off, for an app that pastes the path over the picture.
   - Wayland's clipboard lives only as long as its owner, so screenie forks
     a small child that serves the selection until something else is copied
     (as wl-copy does).
@@ -239,7 +248,11 @@ Output options are composable and apply to any verb that produces a result.
   - `{class}` `{title}` `{monitor}`: where the box was;
   - `{w}` `{h}`: the size in output pixels;
   - `{kind}`: the result type;
-  - `{n}`: a counter.
+  - `{n}`: a counter (the files already in its directory, plus one).
+
+  The extension follows `--format`, replacing one the template gives, so a
+  name always says what's in the file. `{class}` and `{title}` are known
+  for window shots; otherwise they're `unknown`.
 
   A name that already exists gets `-1`, `-2`… (two shots in a second never
   overwrite).
@@ -262,14 +275,18 @@ Output options are composable and apply to any verb that produces a result.
 : Also float the result.
 
 `--format png|jpeg|webp|ppm` and `--quality N`
-: The image encoding (default png). ppm is fastest for piping to another
+: The image encoding (default png) for `--save`, `--stdout` and the
+  clipboard (which also offers PNG, for apps that only take that); the
+  history copy that `last` uses stays PNG. `--quality` is JPEG's (1-100,
+  default 90); WebP is lossless. ppm is fastest for piping to another
   tool.
 
 `--png-level 0-9`
 : The zlib level. The default is 1 (fast, a few percent bigger).
 
 `--colour-format hex|rgb|hsl`
-: For colour results (default hex: `#rrggbb`).
+: For colour results (default hex: `#rrggbb`; `rgb(r, g, b)`;
+  `hsl(h, s%, l%)`).
 
 `--ocr-lang LANG`
 : The tesseract language (default eng). This replaces the prototype's
@@ -322,6 +339,18 @@ The config file is `$XDG_CONFIG_HOME/screenie/config.toml` (TOML).
   config.
 - `--config PATH` uses a different file; `--no-config` ignores it (useful
   for tests).
+- **Built so far** (2026-10-03): `[output]` copy, notify, quiet, json,
+  save, save-project, format, quality, png-level; `[ocr]` lang; `[pick]`
+  region, mode, result, lock-box, measure-scale; `[capture]` delay,
+  cursor; `[history]` keep (0 only, for `--no-history`); `[redact]` mode;
+  and `[profile.NAME]` with `-p NAME` (repeatable, left to right). Each
+  section applies to the verbs it means something for (`[pick]` not to
+  `shot`; `[pick] region` not to `edit`'s image). `[output]` also takes
+  pin, colour-format and copy-uri, and `[capture]` scale. The `[redact]`
+  lists, `[look]` and `[keys.*]` are warned about and skipped until
+  they're built; any other
+  key is an error naming it. `--quality` is unused by formats other than
+  JPEG (so a config's quality can sit under a profile's format).
 
 ```toml
 [output]

@@ -64,6 +64,8 @@ pub struct HyprClient {
     pub focus_history_id: i64,
     #[serde(default)]
     pub stable_id: String,
+    #[serde(default)]
+    pub pid: i64,
 }
 
 impl HyprMonitor {
@@ -188,15 +190,81 @@ pub fn request(cmd: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Move process `pid`'s window to `(x, y)`, global logical pixels. Hyprland
+/// 0.56 dispatches Lua; older ones take the dispatcher line.
+pub fn move_window(pid: u32, x: i32, y: i32) -> Result<()> {
+    let lua =
+        format!("dispatch hl.dsp.window.move({{ x = {x}, y = {y}, window = \"pid:{pid}\" }})");
+    if request(&lua)?.trim() == "ok" {
+        return Ok(());
+    }
+    let old = request(&format!("dispatch movewindowpixel exact {x} {y},pid:{pid}"))?;
+    match old.trim() {
+        "ok" => Ok(()),
+        e => Err(Error::Protocol(format!("moving a window: {e}"))),
+    }
+}
+
 fn query<T: for<'de> Deserialize<'de>>(cmd: &str) -> Result<T> {
     let text = request(cmd)?;
     serde_json::from_str(&text).map_err(|e| Error::Protocol(format!("{cmd}: {e}")))
+}
+
+/// A window by `window:`'s spec (without the prefix): `class:REGEX`,
+/// `title:REGEX`, `address:0x…` or `pid:N`. Of several matches, the most
+/// recently focused; none matching is `Ok(None)`, a bad spec an error.
+pub fn find_window<'a>(
+    clients: &'a [HyprClient],
+    spec: &str,
+) -> std::result::Result<Option<&'a HyprClient>, String> {
+    let (key, value) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("window:{spec}: class:REGEX, title:REGEX, address:0x… or pid:N"))?;
+    let pattern = |v: &str| regex::Regex::new(v).map_err(|e| format!("window:{key}: {e}"));
+    let matches: Box<dyn Fn(&HyprClient) -> bool> = match key {
+        "class" => {
+            let re = pattern(value)?;
+            Box::new(move |c| re.is_match(&c.class))
+        }
+        "title" => {
+            let re = pattern(value)?;
+            Box::new(move |c| re.is_match(&c.title))
+        }
+        "address" => {
+            let a = value.to_lowercase();
+            Box::new(move |c| c.address.to_lowercase() == a)
+        }
+        "pid" => {
+            let pid: i64 = value
+                .parse()
+                .map_err(|_| format!("window:pid:{value}: not a number"))?;
+            Box::new(move |c| c.pid == pid)
+        }
+        _ => return Err(format!("window:{key}: class, title, address or pid")),
+    };
+    // Focus history counts up from the latest (0); -1 is never focused.
+    let order = |c: &HyprClient| {
+        if c.focus_history_id < 0 {
+            i64::MAX
+        } else {
+            c.focus_history_id
+        }
+    };
+    Ok(clients
+        .iter()
+        .filter(|c| c.mapped && matches(c))
+        .min_by_key(|c| order(c)))
 }
 
 /// The live Hyprland session.
 pub struct Hyprland;
 
 impl Hyprland {
+    /// Every client window.
+    pub fn clients(&self) -> Result<Vec<HyprClient>> {
+        query("j/clients")
+    }
+
     pub fn active_client(&self) -> Result<Option<HyprClient>> {
         let text = request("j/activewindow")?;
         // With nothing focused, Hyprland answers `{}`.
@@ -235,7 +303,34 @@ mod tests {
             fullscreen,
             focus_history_id: focus,
             stable_id: String::new(),
+            pid: 100 + focus,
         }
+    }
+
+    #[test]
+    fn a_window_by_class_title_address_or_pid_the_latest_focused_first() {
+        let mut a = client("firefox", 1, 0, false, 2);
+        a.title = "Docs — Mozilla Firefox".into();
+        let b = client("firefox", 1, 0, false, 0); // focused last
+        let c = client("kitty", 2, 0, false, 1);
+        let all = vec![a.clone(), b.clone(), c.clone()];
+        let find = |spec: &str| find_window(&all, spec).map(|w| w.map(|w| w.address.clone()));
+        assert_eq!(
+            find("class:fire").unwrap(),
+            Some(b.address.clone()),
+            "most recent"
+        );
+        assert_eq!(find("class:^kitty$").unwrap(), Some(c.address.clone()));
+        assert_eq!(find("title:Docs").unwrap(), Some(a.address.clone()));
+        assert_eq!(
+            find(&format!("address:{}", c.address)).unwrap(),
+            Some(c.address.clone())
+        );
+        assert_eq!(find("pid:102").unwrap(), Some(a.address.clone()));
+        assert_eq!(find("class:slack").unwrap(), None);
+        assert!(find("class:(").is_err(), "a bad pattern");
+        assert!(find("colour:red").is_err());
+        assert!(find("pid:x").is_err());
     }
 
     fn names(cs: Vec<HyprClient>) -> Vec<String> {

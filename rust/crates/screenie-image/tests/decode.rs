@@ -99,3 +99,27 @@ fn an_image_placed_on_a_monitor_crops_back_exactly() {
         assert_eq!(frame.crop(rect).data(), img.data(), "{w}x{h}@{scale}");
     }
 }
+
+#[test]
+fn what_screenie_writes_it_reads_back() {
+    let img = noise(64, 48);
+    let webp = screenie_image::encode::webp(&img).unwrap();
+    assert_eq!(
+        decode::decode(&webp, Rgb(0, 0, 0)).unwrap().data(),
+        img.data(),
+        "lossless"
+    );
+    let ppm = screenie_image::encode::ppm(&img);
+    assert_eq!(
+        decode::decode(&ppm, Rgb(0, 0, 0)).unwrap().data(),
+        img.data()
+    );
+    // JPEG is lossy: close on a smooth picture, and smaller at lower quality.
+    let smooth = screenie_image::Image::filled(64, 48, Rgb(40, 120, 200));
+    let hi = screenie_image::encode::jpeg(&smooth, 95).unwrap();
+    let back = decode::decode(&hi, Rgb(0, 0, 0)).unwrap();
+    let c = back.rgb(PixelPoint::new(30, 20)).unwrap();
+    assert!(close(c, Rgb(40, 120, 200), 4), "{c:?}");
+    let lo = screenie_image::encode::jpeg(&img, 30).unwrap();
+    assert!(lo.len() < screenie_image::encode::jpeg(&img, 95).unwrap().len());
+}

@@ -4,6 +4,7 @@
 mod capture;
 mod keys;
 mod overlay;
+mod pin;
 mod window;
 
 pub use overlay::OverlayApp;
@@ -61,10 +62,24 @@ pub(crate) struct State {
     /// Toplevels, bound only for a window capture.
     toplevels: Option<smithay_client_toolkit::foreign_toplevel_list::ForeignToplevelList>,
     window: Option<window::WindowCapture>,
+    /// Captures include the pointer (`--cursor`).
+    cursor: bool,
+    /// A pin's window, while one is up.
+    pin: Option<pin::PinWindow>,
+    pin_error: Option<String>,
+    /// The seat, for a pin's move.
+    seat_handle: Option<wl_seat::WlSeat>,
 }
 
 /// The empty user data for globals with no events of interest.
 pub(crate) struct NoEvents;
+
+impl Wayland {
+    /// Whether captures from here on include the pointer.
+    pub fn set_cursor(&mut self, on: bool) {
+        self.state.cursor = on;
+    }
+}
 
 impl Wayland {
     /// Connect and bind everything screenie might use. Outputs are known
@@ -95,6 +110,10 @@ impl Wayland {
             key_repeat: None,
             toplevels: None,
             window: None,
+            cursor: false,
+            pin: None,
+            pin_error: None,
+            seat_handle: None,
         };
         queue
             .roundtrip(&mut state)
@@ -264,6 +283,7 @@ impl SeatHandler for State {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
+        self.seat_handle = Some(seat.clone());
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seat.get_keyboard(qh, &seat, None).ok();
         }
@@ -328,6 +348,9 @@ impl KeyboardHandler for State {
         _: u32,
         event: KeyEvent,
     ) {
+        if let Some(p) = &mut self.pin {
+            p.key(&event);
+        }
         if let Some(o) = &mut self.overlay {
             o.key(event, true);
         }
@@ -406,6 +429,11 @@ impl PointerHandler for State {
         pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        if let Some(p) = &mut self.pin {
+            for ev in events {
+                p.pointer(self.seat_handle.as_ref(), ev);
+            }
+        }
         if let Some(o) = &mut self.overlay {
             for ev in events {
                 o.pointer(conn, qh, pointer, self.cursor_shape.as_ref(), ev);

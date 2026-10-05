@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value, json};
 
-use screenie_core::geometry::{LogicalRect, PixelRect};
+use screenie_core::geometry::LogicalRect;
 use screenie_core::layout::Layout;
 
 use crate::deliver::Delivered;
@@ -56,8 +56,9 @@ impl Report {
         }
     }
 
-    pub fn px(self, p: PixelRect) -> Self {
-        self.set("px", json!({"w": p.w, "h": p.h}))
+    /// The delivered image's size, as `px`.
+    pub fn size(self, img: &screenie_image::Image) -> Self {
+        self.set("px", json!({"w": img.width(), "h": img.height()}))
     }
 
     pub fn delivered(self, d: &Delivered) -> Self {
@@ -82,6 +83,10 @@ impl Report {
             .map(|(w, r)| json!({"what": w.as_ref(), "rect": {"x": r.x, "y": r.y, "w": r.w, "h": r.h}}))
             .collect();
         self.set("redacted", list)
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.fields.get(key)
     }
 
     pub fn line(&self) -> String {

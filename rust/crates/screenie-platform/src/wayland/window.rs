@@ -189,7 +189,12 @@ impl Wayland {
 
         self.state.window = Some(WindowCapture::default());
         let source = sources.create_source(&handle, &qh, NoEvents);
-        let session = manager.create_session(&source, Options::empty(), &qh, WindowData);
+        let options = if self.state.cursor {
+            Options::PaintCursors
+        } else {
+            Options::empty()
+        };
+        let session = manager.create_session(&source, options, &qh, WindowData);
         self.wait_for("describing the window", |s| {
             s.window
                 .as_ref()

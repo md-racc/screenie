@@ -35,7 +35,9 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
             .ok_or_else(|| format!("no monitor named {name:?}"));
     }
     if spec.starts_with("window:") {
-        return Err("window regions aren't in the port yet".into());
+        return Err(
+            "window regions are for the live screen (shot, or pick from the screen)".into(),
+        );
     }
     if let Some(rest) = spec.strip_prefix("last-region") {
         let n: usize = match rest.strip_prefix(':') {

@@ -143,9 +143,99 @@ pub fn stamp() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S").to_string()
 }
 
+/// What a `--save` template's fields stand for.
+#[derive(Clone, Debug, Default)]
+pub struct Naming {
+    pub class: Option<String>,
+    pub title: Option<String>,
+    pub monitor: Option<String>,
+    pub w: u32,
+    pub h: u32,
+    /// The result's kind (`image`).
+    pub kind: String,
+}
+
+/// Whether `--save`'s argument is a template rather than a directory.
+pub fn is_template(s: &str) -> bool {
+    s.contains('%') || s.contains('{')
+}
+
+/// A `--save` template filled in: strftime fields (at `now`) and `{class}`
+/// `{title}` `{monitor}` `{w}` `{h}` `{kind}` `{n}` (the count of files in
+/// its directory, plus one). The directory, the file's stem, and its
+/// extension if it gave one.
+pub fn render_template(
+    template: &str,
+    now: &jiff::Zoned,
+    naming: &Naming,
+) -> Result<(PathBuf, String, Option<String>), String> {
+    // A field's text can't make a path or a strftime field of its own.
+    let clean = |v: &Option<String>| {
+        v.as_deref()
+            .unwrap_or("unknown")
+            .replace(['/', '\0'], "-")
+            .replace('%', "%%")
+    };
+    let mut t = template
+        .replace("{class}", &clean(&naming.class))
+        .replace("{title}", &clean(&naming.title))
+        .replace("{monitor}", &clean(&naming.monitor))
+        .replace("{w}", &naming.w.to_string())
+        .replace("{h}", &naming.h.to_string())
+        .replace("{kind}", &naming.kind.replace('%', "%%"));
+    t = jiff::fmt::strtime::format(&t, now).map_err(|e| format!("--save template: {e}"))?;
+    let path = expand(Path::new(&t));
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .ok_or("--save template: it needs a file name")?;
+    let name = if name.contains("{n}") {
+        let count = fs::read_dir(&dir).map_or(0, |d| d.count());
+        name.replace("{n}", &(count + 1).to_string())
+    } else {
+        name
+    };
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if ["png", "jpg", "jpeg", "webp", "ppm"].contains(&ext) => {
+            (stem.to_string(), Some(ext.to_string()))
+        }
+        _ => (name, None),
+    };
+    Ok((dir, stem, ext))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_templates_fill_in_their_fields() {
+        let now: jiff::Zoned = "2026-10-03T14:02:11+01:00[Europe/London]".parse().unwrap();
+        let naming = Naming {
+            class: Some("firefox".into()),
+            title: Some("a/b 100%".into()),
+            monitor: Some("DP-3".into()),
+            w: 800,
+            h: 600,
+            kind: "image".into(),
+        };
+        let (dir, stem, ext) = render_template(
+            "/tmp/s/%Y-%m/{monitor}_{class}_{w}x{h}_%H%M.png",
+            &now,
+            &naming,
+        )
+        .unwrap();
+        assert_eq!(dir, PathBuf::from("/tmp/s/2026-10"));
+        assert_eq!(
+            (stem.as_str(), ext.as_deref()),
+            ("DP-3_firefox_800x600_1402", Some("png"))
+        );
+        // A title's slash and percent are just text; no extension: none given.
+        let (_, stem, ext) = render_template("/tmp/{title}", &now, &naming).unwrap();
+        assert_eq!((stem.as_str(), ext), ("a-b 100%", None));
+        assert!(is_template("~/s/%Y.png") && is_template("{class}") && !is_template("~/shots"));
+    }
 
     #[test]
     fn same_second_shots_get_their_own_names() {

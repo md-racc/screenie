@@ -203,7 +203,8 @@ impl Wayland {
         for output in outputs {
             let info = self.state.outputs.info(&output);
             let i = self.state.capture.len();
-            let frame = manager.capture_output(0, &output, &qh, FrameData(i));
+            let overlay_cursor = i32::from(self.state.cursor);
+            let frame = manager.capture_output(overlay_cursor, &output, &qh, FrameData(i));
             self.state.capture.push(Pending {
                 name: info.as_ref().and_then(|i| i.name.clone()),
                 transform: info.map_or(Transform::NORMAL, |i| transform(i.transform)),

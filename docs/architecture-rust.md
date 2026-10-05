@@ -1661,9 +1661,18 @@ list
 close
 ```
 
-An initial implementation may continue to delegate to an external viewer.
+Built natively (2026-10-05): each pin is its own detached process,
+`screenie __serve-pin ID PATH SCALE [X,Y]`, showing the image in an xdg
+toplevel (app id `screenie-pin`, no decorations, fixed size, drawn at the
+capture's scale). A window rule floats and pins it; once Hyprland lists the
+window, the process moves it to X,Y (`hl.dsp.window.move` on 0.56's Lua
+dispatch, `movewindowpixel exact` before).
 
-A later native implementation should not require changes to picker interaction code.
+Records are `$XDG_RUNTIME_DIR/screenie/pins/ID.json` (id, pid, image,
+position, size). `pin list` drops records whose process isn't a pin server
+any more; `pin close` sends SIGTERM, and the server removes its record and
+image on the way out. One process a pin keeps a crash to one pin and needs
+no daemon; the picker only spawns.
 
 ---
 
@@ -2393,8 +2402,9 @@ says what was chosen and why. Smaller judgement calls live in
   clipboard dies with its owner, and this needs no `unsafe` fork.
 - **tiny-skia** draws strokes and shapes; **fontdue** draws the tags;
   filters and view filters are our own per-pixel maths.
-- OCR (tesseract, TSV), codes (zbarimg) and pins (swayimg) are external
-  programs, as in the prototype.
+- OCR (tesseract, TSV) and codes (zbarimg) are external programs, as in
+  the prototype. Pins were swayimg too, until 2026-10-05; they're now
+  screenie's own windows (§53).
 
 ## Files
 
