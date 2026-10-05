@@ -7,7 +7,7 @@ mod overlay;
 mod pin;
 mod window;
 
-pub use overlay::OverlayApp;
+pub use overlay::{OverlayApp, Pointer};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},

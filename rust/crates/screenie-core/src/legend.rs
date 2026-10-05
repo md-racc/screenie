@@ -63,6 +63,33 @@ pub const SELECT: &[&[Item]] = &[
 ];
 
 /// Censor's legend.
+/// Select's palette: the modes it opens and what it finishes with, so a
+/// session can go by mouse alone (docs/mouse.md).
+pub const SELECT_PALETTE: &[&[Item]] = &[
+    &[
+        ("insert", &[Intent::Insert]),
+        ("loupe", &[Intent::Loupe]),
+        ("enhance", &[Intent::Enhance]),
+        ("censor", &[Intent::Tool(Tool::Censor)]),
+        ("annotate", &[Intent::Tool(Tool::Annotate)]),
+        ("filter", &[Intent::Tool(Tool::Filter)]),
+        ("measure", &[Intent::Measure(crate::measure::Prim::Line)]),
+        ("layers", &[Intent::Choose(1)]),
+    ],
+    &[
+        ("image", &[Intent::Confirm]),
+        ("text", &[Intent::Ocr]),
+        ("colour", &[Intent::CopyColour]),
+        ("code", &[Intent::DecodeCode]),
+        ("pin", &[Intent::Pin]),
+    ],
+];
+
+pub const CENSOR_PALETTE: &[&[Item]] = &[&[
+    ("pixelate/bar", &[Intent::CycleKind]),
+    ("find secrets", &[Intent::Redact]),
+]];
+
 pub const CENSOR: &[&[Item]] = &[
     &[
         ("pixelate/bar", &[Intent::CycleKind]),
@@ -367,6 +394,25 @@ pub const MEASURE: &[&[Item]] = &[
 /// the session keys). An item listing intents none of which is bound is
 /// left out; one listing none is a plain note.
 pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
+    render_items(map, lines)
+        .into_iter()
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>()
+                .join(ITEM_GAP)
+        })
+        .collect()
+}
+
+/// What separates a line's items.
+pub const ITEM_GAP: &str = "  ";
+
+/// Each line's items, spelled as `render` joins them, with the intent a
+/// click on one sends (its first; none for a label alone). Items whose
+/// intents have no key here are left out, and so are empty lines.
+pub fn render_items(map: &Keymap, lines: &[&[Item]]) -> Vec<Vec<(String, Option<Intent>)>> {
     lines
         .iter()
         .map(|items| {
@@ -378,12 +424,12 @@ pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
                         .filter_map(|&i| map.keys_for(i).or_else(|| SESSION.keys_for(i)))
                         .collect();
                     if intents.is_empty() {
-                        return Some(label.to_string());
+                        return Some((label.to_string(), None));
                     }
-                    (!keys.is_empty()).then(|| format!("{} {label}", keys.join(" ")))
+                    (!keys.is_empty())
+                        .then(|| (format!("{} {label}", keys.join(" ")), Some(intents[0])))
                 })
                 .collect::<Vec<_>>()
-                .join("  ")
         })
         .filter(|l| !l.is_empty())
         .collect()
@@ -392,8 +438,8 @@ pub fn render(map: &Keymap, lines: &[&[Item]]) -> Vec<String> {
 /// A mode's palette (shown always) and legend (under `?`), by name.
 pub fn of(name: &str) -> Option<(Lines, Lines)> {
     Some(match name {
-        "select" => (&[], SELECT),
-        "censor" => (&[], CENSOR),
+        "select" => (SELECT_PALETTE, SELECT),
+        "censor" => (CENSOR_PALETTE, CENSOR),
         "annotate" => (ANNOTATE_PALETTE, ANNOTATE),
         "shape" => (SHAPE_PALETTE, SHAPE),
         "filter" => (FILTER_PALETTE, FILTER),

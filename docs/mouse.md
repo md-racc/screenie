@@ -1,8 +1,7 @@
 # Mouse: clickable palettes, and the box by its edges
 
-**Status:** designed (workshopped 2026-10-05), not built. When it's built,
-`README.md` (Mouse, Select, Tags) takes it over and this page keeps the
-reasons.
+**Status:** built (2026-10-05). `README.md` (Mouse, Tags) is the spec
+now; this page keeps the reasons.
 
 The goal is a whole session by mouse alone: box, a build tool, its kinds,
 commit, finish. Today the mouse can draw and snap the box, scroll scope,
@@ -25,8 +24,8 @@ mode, pick a kind, resize the box or move it.
   ```
 
   The finish row is there because right click only gives the image.
-- **Censor gets a palette** of its types (`pixelate  solid`), so `t` has a
-  mouse way too.
+- **Censor gets a palette**: `t pixelate/bar` (the type) and `r find
+  secrets` (auto-redact), so both have a mouse way too.
 - **A chip takes its clicks.** A press on any chip doesn't reach the
   picture or the box; a drag starting on one does nothing.
 - **Hover shows the target:** the item under the pointer is drawn
@@ -36,9 +35,10 @@ mode, pick a kind, resize the box or move it.
 
 ## The box by its edges
 
-Wherever a drag draws a box (`boxes.rs`): Select, Censor, Filter, and
-Annotate's shapes. Not the pen or the highlighter, where a drag is a
-stroke and a stroke near the box's edge must stay one:
+In Select, Censor and Filter (`boxes::apply` with handles). Not the pen
+or the highlighter, where a drag is a stroke, and not Annotate's shapes,
+whose cursor corner follows the pointer: every press would land on it,
+and a plain drag there draws a new shape:
 
 - **Grab:** a press within 6 px of the box's edge, inside or out, grabs
   that edge; within 6 px of a corner, the corner. Dragging an edge moves

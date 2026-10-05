@@ -61,7 +61,7 @@ pub struct FilterMode {
     /// An ongoing run of one edit to one filter: (filter, edit, the layer
     /// log's length after its entry).
     run: Option<(OpId, Edit, usize)>,
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
 }
 
 impl FilterMode {
@@ -166,7 +166,8 @@ impl Session {
         if let Some(t) = self.lens_at(intent, f.sel.rect().centre()) {
             return t;
         }
-        match boxes::apply(&mut f.sel, &self.snap, &mut f.drag, intent) {
+        let mods = Some(self.input_mods());
+        match boxes::apply(&mut f.sel, &self.snap, &mut f.drag, intent, mods) {
             BoxOutcome::NotMine => {}
             outcome => {
                 if let BoxOutcome::Click(at) = outcome {

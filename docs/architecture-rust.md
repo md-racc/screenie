@@ -2390,6 +2390,13 @@ says what was chosen and why. Smaller judgement calls live in
   remembers which ops were accepted, so `--json` reports only the ones
   still shown.
 
+- **The mouse's chips and handles** (docs/mouse.md, 2026-10-05): the Ui
+  records where it drew each chip and palette item (`Ui::hit`), and the
+  picker gives a left press on one to the chip (`Session::act` for an
+  item) before the session sees it. Box handles are core (`boxes::Handle`,
+  `Session::pointer_handle`); `OverlayApp::pointer` turns them into a
+  cursor shape (wp-cursor-shape).
+
 ## Platform
 
 - **One Wayland connection** (smithay-client-toolkit 0.21) for capture and

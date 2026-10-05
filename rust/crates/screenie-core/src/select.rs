@@ -103,7 +103,14 @@ impl Session {
         if boxes::starts_change(intent) {
             self.remember();
         }
-        match boxes::apply(&mut self.sel, &self.snap, &mut self.select.drag, intent) {
+        let mods = Some(self.input_mods());
+        match boxes::apply(
+            &mut self.sel,
+            &self.snap,
+            &mut self.select.drag,
+            intent,
+            mods,
+        ) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
                 // A click snaps to the window under the pointer, or the

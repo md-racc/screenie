@@ -250,6 +250,11 @@ Output options are composable and apply to any verb that produces a result.
   - `{kind}`: the result type;
   - `{n}`: a counter (the files already in its directory, plus one).
 
+  A plain file name (`out.png`, `~/shots/today.webp`: an image extension
+  and no fields) is a template too, naming one file, unless a directory
+  of that name exists. `--save NAME` takes it as the value when it has a
+  `/`, starts with `~` or `.`, or ends in an image extension.
+
   The extension follows `--format`, replacing one the template gives, so a
   name always says what's in the file. `{class}` and `{title}` are known
   for window shots; otherwise they're `unknown`.
@@ -339,7 +344,7 @@ The config file is `$XDG_CONFIG_HOME/screenie/config.toml` (TOML).
   config.
 - `--config PATH` uses a different file; `--no-config` ignores it (useful
   for tests).
-- **Built so far** (2026-10-03): `[output]` copy, notify, quiet, json,
+- **Built so far** (2026-10-05): `[output]` copy, notify, quiet, json,
   save, save-project, format, quality, png-level; `[ocr]` lang; `[pick]`
   region, mode, result, lock-box, measure-scale; `[capture]` delay,
   cursor; `[history]` keep (0 only, for `--no-history`); `[redact]` mode,

@@ -36,6 +36,8 @@ fn frame(scale: u32) -> Picture {
 
 fn view(top: Vec<String>) -> View {
     View {
+        palette: vec![],
+        hover: None,
         rect: START,
         cursor: LogicalPoint::new(START.right(), START.bottom()),
         active: true,

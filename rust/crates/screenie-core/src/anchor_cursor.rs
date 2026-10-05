@@ -166,6 +166,12 @@ impl AnchorCursor {
         self.set_edges(e);
     }
 
+    /// Make `end` the cursor's edge on `axis`, moving nothing (an edge
+    /// taken hold of with the mouse).
+    pub fn take_cursor(&mut self, axis: Axis, end: End) {
+        self.cursor[ax(axis)] = end;
+    }
+
     /// Move the cursor `px` toward `dir`.
     pub fn cursor_by(&mut self, dir: Dir, px: f64) {
         let axis = dir.axis();

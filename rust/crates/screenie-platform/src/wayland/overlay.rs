@@ -14,7 +14,9 @@ use smithay_client_toolkit::{
         Connection, QueueHandle,
         protocol::{wl_pointer, wl_shm, wl_surface},
     },
-    reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape,
+    reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+        Shape, WpCursorShapeDeviceV1,
+    },
     seat::{
         keyboard::{KeyEvent, Modifiers},
         pointer::{PointerEvent, PointerEventKind, cursor_shape::CursorShapeManager},
@@ -49,6 +51,40 @@ pub trait OverlayApp {
     /// Draw monitor `index` of the layout into `into`, which covers that
     /// monitor at its device scale.
     fn draw(&mut self, index: usize, into: &mut Image);
+    /// The pointer's shape, as things are now.
+    fn pointer(&self) -> Pointer {
+        Pointer::Default
+    }
+}
+
+/// The pointer's shapes the overlay uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pointer {
+    #[default]
+    Default,
+    /// Over something that moves whole.
+    Move,
+    /// Over a left or right edge.
+    ResizeX,
+    /// Over a top or bottom edge.
+    ResizeY,
+    /// Over the top-left or bottom-right corner.
+    ResizeNwse,
+    /// Over the top-right or bottom-left corner.
+    ResizeNesw,
+}
+
+impl Pointer {
+    fn shape(self) -> Shape {
+        match self {
+            Pointer::Default => Shape::Default,
+            Pointer::Move => Shape::Move,
+            Pointer::ResizeX => Shape::EwResize,
+            Pointer::ResizeY => Shape::NsResize,
+            Pointer::ResizeNwse => Shape::NwseResize,
+            Pointer::ResizeNesw => Shape::NeswResize,
+        }
+    }
 }
 
 /// How the overlay run ended.
@@ -94,6 +130,10 @@ pub(crate) struct Overlay {
     /// Wheel motion from continuous sources, toward the next step.
     wheel: f64,
     closed: bool,
+    /// The pointer's shape device, the serial of its last enter, and the
+    /// shape it was given.
+    shape: Option<(WpCursorShapeDeviceV1, u32)>,
+    shown_pointer: Pointer,
 }
 
 /// Logical pixels of continuous scrolling per wheel step.
@@ -182,8 +222,11 @@ impl Overlay {
         match ev.kind {
             PointerEventKind::Enter { serial } => {
                 if let Some(m) = shapes {
-                    m.get_shape_device(pointer, qh)
-                        .set_shape(serial, Shape::Default);
+                    let device = m.get_shape_device(pointer, qh);
+                    device.set_shape(serial, self.shown_pointer.shape());
+                    if let Some((old, _)) = self.shape.replace((device, serial)) {
+                        old.destroy();
+                    }
                 }
                 self.push(RawEvent::Motion { at });
             }
@@ -381,6 +424,8 @@ impl Wayland {
             events: Vec::new(),
             wheel: 0.0,
             closed: false,
+            shape: None,
+            shown_pointer: Pointer::Default,
         });
         if let Some(r) = self.state.key_repeat {
             self.state
@@ -417,6 +462,13 @@ impl Wayland {
             }
             if changed {
                 overlay.mark_dirty();
+                let want = app.pointer();
+                if want != overlay.shown_pointer {
+                    if let Some((device, serial)) = &overlay.shape {
+                        device.set_shape(*serial, want.shape());
+                    }
+                    overlay.shown_pointer = want;
+                }
             }
             overlay.draw_due(app, &qh)?;
         };

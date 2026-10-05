@@ -422,6 +422,22 @@ impl Session {
         self.measure_view()
     }
 
+    /// What the pointer has, or would take, hold of in the top mode's box
+    /// (for the pointer's shape): the drag's while one is under way.
+    pub fn pointer_handle(&self) -> crate::boxes::Handle {
+        use crate::boxes::{Handle, handle_at};
+        let (sel, drag) = match self.stack.last() {
+            None => (&self.sel, &self.select.drag),
+            Some(Mode::Censor(c)) => (&c.sel, &c.drag),
+            Some(Mode::Filter(f)) => (&f.sel, &f.drag),
+            _ => return Handle::None,
+        };
+        match drag {
+            Some(d) => d.handle(),
+            None => handle_at(sel, self.pointer, self.input.mods()),
+        }
+    }
+
     /// What auto-redact looks for and makes (`[redact]` config, and the
     /// machine).
     pub fn set_redact_rules(&mut self, rules: crate::redact::Rules) {
@@ -779,14 +795,42 @@ impl Session {
 
     /// What the top mode's keys directly pick: always shown, above the box.
     pub fn palette(&self) -> Vec<String> {
+        self.palette_items()
+            .into_iter()
+            .map(|l| {
+                l.into_iter()
+                    .map(|(t, _)| t)
+                    .collect::<Vec<_>>()
+                    .join(crate::legend::ITEM_GAP)
+            })
+            .collect()
+    }
+
+    /// The palette's items, line by line, with what a click on each sends.
+    pub fn palette_items(&self) -> Vec<Vec<(String, Option<Intent>)>> {
         let lines = match self.stack.last() {
+            None => crate::legend::SELECT_PALETTE,
+            Some(Mode::Censor(_)) => crate::legend::CENSOR_PALETTE,
             Some(Mode::Annotate(_)) => crate::legend::ANNOTATE_PALETTE,
             Some(Mode::Shape(_)) => crate::legend::SHAPE_PALETTE,
             Some(Mode::Filter(_)) => crate::legend::FILTER_PALETTE,
             Some(Mode::Measure(_)) => crate::legend::MEASURE_PALETTE,
             _ => return vec![],
         };
-        crate::legend::render(self.keymap(), lines)
+        crate::legend::render_items(self.keymap(), lines)
+    }
+
+    /// Do what a key bound to `intent` would (a palette item clicked).
+    pub fn act(&mut self, intent: Intent) {
+        if self.is_finished() {
+            return;
+        }
+        self.user_acted(Some(intent));
+        if keymap::SESSION.keys_for(intent).is_some() {
+            self.session_intent(intent);
+        } else {
+            self.dispatch(intent);
+        }
     }
 
     // --- input ------------------------------------------------------------------

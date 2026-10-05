@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use screenie_core::geometry::{LogicalPoint, LogicalRect, PixelPoint, PixelRect, rnd};
+use screenie_core::intent::Intent;
 use screenie_core::lens::{CHIP, ViewFilter, ZOOM};
 use screenie_core::session::{BoxView, Mode};
 use screenie_core::tags::{self, ROW};
@@ -28,6 +29,11 @@ pub struct View {
     pub status: String,
     /// The palette and legend lines, shown above the box.
     pub top: Vec<String>,
+    /// The palette's lines (the first of `top`), item by item, with what
+    /// a click on each sends.
+    pub palette: Vec<Vec<(String, Option<Intent>)>>,
+    /// Where the pointer is, for the palette item under it.
+    pub hover: Option<LogicalPoint>,
     /// The ink, shown as a swatch after the status (Annotate, Shape).
     pub swatch: Option<[f64; 3]>,
     /// List tags (the filter stack), shown beside the box.
@@ -68,6 +74,8 @@ impl View {
             active: s.select_is_top(),
             boxes: s.boxes(),
             status: s.status(),
+            palette: s.palette_items(),
+            hover: None,
             top: {
                 let mut top = s.palette();
                 if s.show_help() {
@@ -216,6 +224,18 @@ pub struct Ui {
     /// The main box as shown, view-filtered, for the lenses: keyed by the
     /// picture's generation, the box and the filter.
     lens_source: Option<((u64, PixelRect, ViewFilter), Image)>,
+    /// Each monitor's chips as last drawn, and the palette items among
+    /// them, with what a click on one sends (`hit`).
+    hits: HashMap<usize, Vec<(LogicalRect, Option<Intent>)>>,
+}
+
+/// What's under a point, of what was drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    /// A chip: it takes the click, and the click does nothing.
+    Chip,
+    /// A palette item: the click sends this.
+    Item(Intent),
 }
 
 impl Ui {
@@ -227,7 +247,31 @@ impl Ui {
             glyphs: HashMap::new(),
             bases: HashMap::new(),
             lens_source: None,
+            hits: HashMap::new(),
         })
+    }
+
+    /// The palette items last drawn, where they are and what each sends.
+    pub fn items(&self) -> Vec<(LogicalRect, Intent)> {
+        self.hits
+            .values()
+            .flatten()
+            .filter_map(|&(r, i)| Some((r, i?)))
+            .collect()
+    }
+
+    /// What's at `at` (global logical), of the chips last drawn: a palette
+    /// item before the chip it's on.
+    pub fn hit(&self, at: LogicalPoint) -> Option<Hit> {
+        let under = self.hits.values().flatten().filter(|(r, _)| r.contains(at));
+        let mut chip = false;
+        for (_, intent) in under {
+            match intent {
+                Some(i) => return Some(Hit::Item(*i)),
+                None => chip = true,
+            }
+        }
+        chip.then_some(Hit::Chip)
     }
 
     /// A chip's width for `text`, logical px: its advance plus padding.
@@ -414,6 +458,7 @@ impl Ui {
         }
 
         // Tags, status first so the others keep clear of it.
+        let mut hits = Vec::new();
         let status = vec![view.status.clone()];
         let mut placed: Vec<LogicalRect> = view.occupied();
         placed.extend(chips);
@@ -438,9 +483,29 @@ impl Ui {
             if !r.intersects(&monitor) {
                 continue;
             }
+            let is_top = std::ptr::eq(lines, &view.top);
             for (i, line) in lines.iter().enumerate() {
                 let bottom = r.y + ROW * (i as f64 + 1.0) - 2.0;
                 self.chip(into, monitor, s, r.x, bottom, line);
+                let top = bottom - self.cap_height() - 8.0;
+                let h = bottom - top;
+                hits.push((LogicalRect::new(r.x, top, self.chip_width(line), h), None));
+                // A palette line's items: where each one's text is.
+                let Some(items) = view.palette.get(i).filter(|_| is_top) else {
+                    continue;
+                };
+                let gap = self.chip_width(screenie_core::legend::ITEM_GAP) - 8.0;
+                let mut x = r.x + 4.0;
+                for (text, intent) in items {
+                    let w = self.chip_width(text) - 8.0;
+                    let item = LogicalRect::new(x - 2.0, top, w + 4.0, h);
+                    x += w + gap;
+                    let Some(intent) = intent else { continue };
+                    hits.push((item, Some(*intent)));
+                    if view.hover.is_some_and(|p| item.contains(p)) {
+                        invert(into, dev_rect(item, monitor, s));
+                    }
+                }
             }
             if let (true, Some(rgb)) = (is_status, view.swatch) {
                 let x = r.x + self.chip_width(&lines[0]) + 5.0 - monitor.x;
@@ -448,6 +513,7 @@ impl Ui {
                 swatch(into, s, x, y, rgb);
             }
         }
+        self.hits.insert(index, hits);
     }
 
     /// Measure's drawings: lines with their points, area fills, the one in
@@ -806,6 +872,15 @@ fn bilinear(sample: &impl Fn(PixelPoint) -> Option<[u8; 4]>, x: f64, y: f64) -> 
 
 /// Invert the pixels of a rectangle (DIFFERENCE with white): shows on any
 /// colour.
+/// A global logical rect on `monitor`, in its device pixels.
+fn dev_rect(r: LogicalRect, monitor: LogicalRect, s: f64) -> PixelRect {
+    let x0 = rnd((r.x - monitor.x) * s);
+    let y0 = rnd((r.y - monitor.y) * s);
+    let x1 = rnd((r.right() - monitor.x) * s);
+    let y1 = rnd((r.bottom() - monitor.y) * s);
+    PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+}
+
 fn invert(into: &mut Image, r: PixelRect) {
     let (iw, ih) = (into.width() as i32, into.height() as i32);
     for y in r.y.max(0)..(r.y + r.h).min(ih) {

@@ -96,7 +96,7 @@ These are new layer ops, each with `key()` and `bbox()` like the others:
 ## Open questions
 
 - ~~Should the prototype get these before the port?~~ No: the prototype
-  is frozen, and these come after parity (`TODO.md`).
+  is frozen, and these came after parity (built in milestone 10).
 - `v` for arrow, or `A`? (`a` itself is taken: lock and next.)
 - Should a text entry's chip default on? Screenshots are busy, and
   unreadable annotations are worse than slightly heavy ones.

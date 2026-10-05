@@ -170,6 +170,13 @@ fn a_drag_draws_the_censor_box_and_never_finishes() {
 }
 
 #[test]
+fn the_censor_box_drags_by_its_edges_too() {
+    let mut s = session();
+    s.keys("x drag:150,180:300,240 drag:300,210:350,210");
+    assert_eq!(censor(&s).sel.rect(), r(150.0, 180.0, 200.0, 60.0));
+}
+
+#[test]
 fn a_click_places_the_cursor_corner() {
     let mut s = session();
     s.keys("x click:400,240");

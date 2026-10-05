@@ -146,8 +146,9 @@ fn a_drag_draws_a_region() {
     s.keys("drag:150,180:300,240");
     assert_eq!(s.rect(), r(150.0, 180.0, 150.0, 60.0));
     assert_eq!(s.outcome(), None); // a drag never finishes anything
-    s.keys("drag:300,240:100,100"); // up and left: the cursor is top-left
-    assert_eq!(s.rect(), r(100.0, 100.0, 200.0, 140.0));
+    // Up and left, from off the box: the cursor is top-left.
+    s.keys("drag:300,300:100,100");
+    assert_eq!(s.rect(), r(100.0, 100.0, 200.0, 200.0));
     assert_eq!(s.cursor_pixel().unwrap(), PixelPoint::new(100, 100));
 }
 
@@ -419,4 +420,104 @@ fn dot_with_one_box_says_last() {
     s.keys("c period");
     assert_eq!(s.note(), Some("last"));
     assert!(!s.selection().is_centred()); // . leaves centre mode
+}
+
+// --- the box by its edges (docs/mouse.md) --------------------------------------------
+
+fn boxed() -> Session {
+    session_at(r(100.0, 100.0, 400.0, 300.0), vec![])
+}
+
+#[test]
+fn a_drag_from_an_edge_moves_only_that_edge() {
+    let mut s = boxed();
+    s.keys("drag:503,250:603,280"); // 3px outside the right edge
+    assert_eq!(s.rect(), r(100.0, 100.0, 500.0, 300.0));
+    let mut s = boxed();
+    s.keys("drag:300,104:300,50"); // just inside the top
+    assert_eq!(s.rect(), r(100.0, 46.0, 400.0, 354.0));
+}
+
+#[test]
+fn a_drag_from_a_corner_moves_it_and_the_opposite_stays() {
+    let mut s = boxed();
+    s.keys("drag:500,400:550,450");
+    assert_eq!(s.rect(), r(100.0, 100.0, 450.0, 350.0));
+    let mut s = boxed();
+    s.keys("drag:100,100:150,120");
+    assert_eq!(s.rect(), r(150.0, 120.0, 350.0, 280.0));
+}
+
+#[test]
+fn an_edge_crosses_the_opposite_one() {
+    let mut s = boxed();
+    s.keys("drag:100,250:600,250");
+    assert_eq!(s.rect(), r(500.0, 100.0, 100.0, 300.0));
+}
+
+#[test]
+fn alt_drag_inside_moves_the_box() {
+    let mut s = boxed();
+    s.handle(RawEvent::Modifiers { mods: Mods::ALT }, 0.0);
+    s.keys("drag:200,200:250,230");
+    s.handle(RawEvent::Modifiers { mods: Mods::NONE }, 0.0);
+    assert_eq!(s.rect(), r(150.0, 130.0, 400.0, 300.0));
+}
+
+#[test]
+fn centre_mode_makes_an_edge_drag_resize_about_the_centre() {
+    let mut s = boxed();
+    s.keys("c drag:500,250:520,250");
+    assert_eq!(s.rect(), r(80.0, 100.0, 440.0, 300.0));
+}
+
+#[test]
+fn an_edge_drag_is_one_undo_step() {
+    let mut s = boxed();
+    s.keys("drag:500,250:700,250");
+    assert_eq!(s.rect(), r(100.0, 100.0, 600.0, 300.0));
+    s.keys("u");
+    assert_eq!(s.rect(), r(100.0, 100.0, 400.0, 300.0));
+}
+
+#[test]
+fn away_from_the_edges_a_drag_still_draws_and_a_click_still_snaps() {
+    let mut s = boxed();
+    s.keys("drag:200,200:300,260"); // inside, no Alt: a new box
+    assert_eq!(s.rect(), r(200.0, 200.0, 100.0, 60.0));
+    let mut s = boxed();
+    let mut t = boxed();
+    s.keys("click:500,250"); // on an edge, but a click: the mode's
+    t.keys("click:700,250");
+    assert_eq!(s.rect(), t.rect());
+}
+
+// --- clickable palettes (docs/mouse.md) ----------------------------------------------
+
+#[test]
+fn a_palette_click_does_what_its_key_does_in_every_mode() {
+    // Select, and the modes it opens that have palettes.
+    for mode in ["", "x", "a", "a r", "f", "m"] {
+        let mut probe = session();
+        probe.keys(mode);
+        let items = probe.palette_items();
+        assert!(!items.is_empty(), "{mode:?} has a palette");
+        for (text, intent) in items.into_iter().flatten() {
+            let Some(intent) = intent else { continue };
+            let key = match text.split(' ').next().unwrap() {
+                "Enter" => "Return",
+                k => k,
+            };
+            let (mut clicked, mut pressed) = (session(), session());
+            clicked.keys(mode);
+            pressed.keys(mode);
+            clicked.act(intent);
+            pressed.keys(key);
+            assert_eq!(
+                (clicked.mode_name(), clicked.status(), clicked.outcome()),
+                (pressed.mode_name(), pressed.status(), pressed.outcome()),
+                "{mode:?}: {text}"
+            );
+        }
+    }
 }

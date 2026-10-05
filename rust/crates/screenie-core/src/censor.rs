@@ -33,7 +33,7 @@ pub struct CensorMode {
     /// Each kind's own amount, kept across `t` and `x`.
     pub pixelate: f64,
     pub shade: f64,
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
 }
 
 fn square_at(c: LogicalPoint, main: LogicalRect) -> AnchorCursor {
@@ -108,7 +108,8 @@ impl Session {
         if let Some(t) = self.lens_at(intent, c.sel.rect().centre()) {
             return t;
         }
-        match boxes::apply(&mut c.sel, &self.snap, &mut c.drag, intent) {
+        let mods = Some(self.input_mods());
+        match boxes::apply(&mut c.sel, &self.snap, &mut c.drag, intent, mods) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
                 c.sel.place_cursor(at); // the cursor corner, not the whole box

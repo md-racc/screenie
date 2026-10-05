@@ -191,7 +191,17 @@ fn the_status_line_shows_the_ink_and_no_cursor_for_the_pen() {
 #[test]
 fn the_palettes_show_what_the_keys_pick() {
     let mut s = session();
-    assert!(s.palette().is_empty());
+    // Select's: the modes it opens, and what it finishes with.
+    assert_eq!(
+        s.palette(),
+        [
+            "i insert  z loupe  e enhance  x censor  a annotate  f filter  m measure  1 layers",
+            "Enter image  y text  p colour  Q code  P pin"
+        ]
+    );
+    s.keys("x");
+    assert_eq!(s.palette(), ["t pixelate/bar  r find secrets"]);
+    s.keys("Escape");
     s.keys("a");
     assert_eq!(
         s.palette(),

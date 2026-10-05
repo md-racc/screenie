@@ -155,9 +155,21 @@ pub struct Naming {
     pub kind: String,
 }
 
-/// Whether `--save`'s argument is a template rather than a directory.
+/// The extensions a `--save` file name may give (its format still wins).
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "ppm"];
+
+/// Whether a name ends in one of `IMAGE_EXTENSIONS`.
+pub fn has_image_extension(s: &str) -> bool {
+    s.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty() && IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    })
+}
+
+/// Whether `--save`'s argument names the file (a template, or a plain
+/// file name like `out.png`) rather than a directory. A directory that
+/// exists is one, whatever its name.
 pub fn is_template(s: &str) -> bool {
-    s.contains('%') || s.contains('{')
+    s.contains('%') || s.contains('{') || (has_image_extension(s) && !expand(Path::new(s)).is_dir())
 }
 
 /// A `--save` template filled in: strftime fields (at `now`) and `{class}`
@@ -185,7 +197,10 @@ pub fn render_template(
         .replace("{kind}", &naming.kind.replace('%', "%%"));
     t = jiff::fmt::strtime::format(&t, now).map_err(|e| format!("--save template: {e}"))?;
     let path = expand(Path::new(&t));
-    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -197,7 +212,7 @@ pub fn render_template(
         name
     };
     let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) if ["png", "jpg", "jpeg", "webp", "ppm"].contains(&ext) => {
+        Some((stem, ext)) if IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) => {
             (stem.to_string(), Some(ext.to_string()))
         }
         _ => (name, None),
@@ -235,6 +250,18 @@ mod tests {
         let (_, stem, ext) = render_template("/tmp/{title}", &now, &naming).unwrap();
         assert_eq!((stem.as_str(), ext), ("a-b 100%", None));
         assert!(is_template("~/s/%Y.png") && is_template("{class}") && !is_template("~/shots"));
+        // A plain file name is one too, unless it's a directory already.
+        assert!(is_template("out.png") && is_template("/tmp/x/Shot.JPG"));
+        assert!(!is_template(".png") && !is_template("shots.d"));
+        let dir = std::env::temp_dir().join(format!("screenie-dir-{}.png", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!is_template(&dir.to_string_lossy()));
+        let _ = std::fs::remove_dir(&dir);
+        let (d, stem, ext) = render_template("out.png", &now, &naming).unwrap();
+        assert_eq!(
+            (d, stem.as_str(), ext.as_deref()),
+            (PathBuf::from("."), "out", Some("png"))
+        );
     }
 
     #[test]

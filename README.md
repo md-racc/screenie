@@ -8,9 +8,7 @@ The core idea is simple: learn how **Select** works, and the rest of the picker 
 
 ## Status
 
-screenie is currently a Python prototype for settling the UX. It is used daily on Hyprland.
-
-The production implementation is being rewritten in Rust. The Rust version will preserve the behavior specified here while replacing the prototype's implementation.
+screenie is a Rust program, used daily on Hyprland. It began as a Python prototype for settling the UX, which is now frozen and kept as a fallback.
 
 This README is the authoritative specification for picker behavior. When implementation and README disagree, the README wins.
 
@@ -149,12 +147,29 @@ The mouse exposes the same screenshot workflow without requiring keyboard comman
 | wheel        | `+` / `-`                              |
 | right click  | `Enter`                                |
 | middle click | `Esc`                                  |
+| click a palette item | What its key does                |
+| drag the box's edge or corner | Move that edge or corner (Select, Censor, Filter) |
+| `Alt`+drag inside the box | Move the box             |
 
 The basic mouse workflow is therefore:
 
 1. click a window or drag a region;
 2. scroll if a wider scope is wanted;
-3. right click.
+3. click a mode in the palette (censor, annotate…) and work in it;
+4. right click (or click a finish in Select's palette: text, colour, code, pin).
+
+Every palette item is clickable. Clicks on any chip are the chip's: they
+never reach the picture or the box, and a drag that starts on one does
+nothing. The item under the pointer is drawn inverted.
+
+A press within 6px of the box's edge, inside or out, takes hold of it,
+and near a corner, of the corner; the pointer shows a resize arrow there
+first. Dragging an edge moves only it, a corner moves while the opposite
+stays, and an edge can cross the opposite one. Centre mode (`c`) makes it
+resize about the centre. One drag is one undo step. Anywhere else a drag
+still draws a new box, and a click still does what the mode's click does.
+Annotate's shapes keep a plain drag for drawing anew, since their cursor
+corner is always under the pointer.
 
 Keyboard and mouse do not need identical physical event sequences. They must reach the same operations and editable model.
 
@@ -192,7 +207,7 @@ A status tag is intentionally dense and vim-like, for example:
 CENSOR  560×90  (659,259)  layer +1  pixelate 10px  20×20
 ```
 
-Palettes are always visible when a mode has directly selectable kinds. The full key legend is behind `?`.
+Palettes are always visible when a mode has directly selectable kinds, and in Select, whose palette holds the modes it opens and its finishes. The full key legend is behind `?`. Palette items are clickable (see Mouse).
 
 ---
 
@@ -989,9 +1004,7 @@ How to run and test it, its tuning constants, and where it differs from this REA
 
 # Rust port
 
-The Rust implementation will prioritize behavioral parity before expanding the feature set.
-
-Planned order:
+The Rust implementation reached behavioral parity before expanding the feature set. The order it was built in (milestones 1-11 are done; 12 is deferred):
 
 1. headless Select core and behavioral tests;
 2. Wayland capture + overlays + Select + image output;
@@ -1006,7 +1019,7 @@ Planned order:
 11. Measure and auto-redact;
 12. additional platform support such as X11.
 
-The Python prototype remains the behavioral reference until the Rust version reaches parity.
+The Python prototype was the behavioral reference until parity; this README is now the only one.
 
 ---
 

@@ -302,7 +302,10 @@ fn parse_last(s: &str) -> Result<usize, String> {
 }
 
 fn looks_like_a_path(s: &str) -> bool {
-    s.contains('/') || s.starts_with('~') || s.starts_with('.')
+    s.contains('/')
+        || s.starts_with('~')
+        || s.starts_with('.')
+        || crate::files::has_image_extension(s)
 }
 
 /// Parse the arguments (without the program name).
@@ -681,6 +684,10 @@ mod tests {
             panic!()
         };
         assert_eq!(p.output.save, Some(Some(PathBuf::from("pics"))));
+        let Command::Pick(p) = cmd("--save out.png").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.save, Some(Some(PathBuf::from("out.png"))));
     }
 
     #[test]

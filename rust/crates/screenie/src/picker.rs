@@ -1,12 +1,12 @@
 //! The interactive picker: a session on the overlays.
 
-use screenie_core::geometry::LogicalRect;
+use screenie_core::geometry::{LogicalPoint, LogicalRect};
 use std::sync::mpsc::Receiver;
 
 use screenie_core::session::{JobResult, RawEvent, Session};
 use screenie_image::ui::{Ui, View};
 use screenie_image::{Image, Picture};
-use screenie_platform::wayland::OverlayApp;
+use screenie_platform::wayland::{OverlayApp, Pointer};
 
 pub struct Picker {
     pub session: Session,
@@ -20,6 +20,11 @@ pub struct Picker {
     stale: bool,
     /// Finished analysis jobs, from the analyzer's threads.
     jobs: Option<Receiver<(u64, JobResult)>>,
+    /// Where the pointer is, for the palette item under it.
+    hover: Option<LogicalPoint>,
+    /// The left button went down on a chip: its drag and release are the
+    /// chip's too (they do nothing).
+    on_chip: bool,
 }
 
 impl Picker {
@@ -32,6 +37,8 @@ impl Picker {
             monitors,
             jobs: None,
             stale: true,
+            hover: None,
+            on_chip: false,
         };
         p.sync();
         p
@@ -74,8 +81,37 @@ impl screenie_core::session::CodeReader for Codes {
 
 impl OverlayApp for Picker {
     fn input(&mut self, ev: RawEvent, now: f64) {
-        self.session.handle(ev, now);
+        use screenie_core::session::Button;
+        use screenie_image::ui::Hit;
         self.stale = true;
+        // The chips take the left button: a palette item does what its key
+        // would, and the picture under a chip never sees the press.
+        match ev {
+            RawEvent::ButtonPress {
+                button: Button::Left,
+                at,
+            } => {
+                if let Some(hit) = self.ui.hit(at) {
+                    self.on_chip = true;
+                    if let Hit::Item(intent) = hit {
+                        self.session.act(intent);
+                    }
+                    return;
+                }
+            }
+            RawEvent::Motion { at } => {
+                self.hover = Some(at);
+                if self.on_chip {
+                    return;
+                }
+            }
+            RawEvent::ButtonRelease {
+                button: Button::Left,
+                ..
+            } if std::mem::take(&mut self.on_chip) => return,
+            _ => {}
+        }
+        self.session.handle(ev, now);
     }
 
     fn tick(&mut self, now: f64) -> bool {
@@ -100,9 +136,25 @@ impl OverlayApp for Picker {
         self.session.is_finished()
     }
 
+    fn pointer(&self) -> Pointer {
+        use screenie_core::boxes::Handle;
+        if self.on_chip || self.hover.is_some_and(|p| self.ui.hit(p).is_some()) {
+            return Pointer::Default;
+        }
+        match self.session.pointer_handle() {
+            Handle::None => Pointer::Default,
+            Handle::Box => Pointer::Move,
+            Handle::Edges([Some(_), None]) => Pointer::ResizeX,
+            Handle::Edges([None, Some(_)]) => Pointer::ResizeY,
+            Handle::Edges([Some(x), Some(y)]) if x == y => Pointer::ResizeNwse,
+            Handle::Edges(_) => Pointer::ResizeNesw,
+        }
+    }
+
     fn draw(&mut self, index: usize, into: &mut Image) {
         self.sync();
-        let view = View::of(&self.session);
+        let mut view = View::of(&self.session);
+        view.hover = self.hover;
         let monitor = self.monitors[index];
         self.ui.draw(&self.picture, index, monitor, &view, into);
     }
@@ -209,6 +261,75 @@ mod tests {
         );
         assert!(p.finished());
         assert!(matches!(p.session.outcome(), Some(Outcome::Done(_))));
+    }
+
+    fn left(p: &mut Picker, at: LogicalPoint, pressed: bool) {
+        let button = screenie_core::session::Button::Left;
+        let ev = if pressed {
+            RawEvent::ButtonPress { button, at }
+        } else {
+            RawEvent::ButtonRelease { button, at }
+        };
+        p.input(ev, 0.0);
+    }
+
+    #[test]
+    fn a_click_on_a_palette_item_does_what_its_key_does() {
+        let Some(mut p) = picker() else { return };
+        let mut img = Image::new(1920, 1080);
+        p.draw(0, &mut img);
+        let items = p.ui.items();
+        let censor = screenie_core::intent::Intent::Tool(screenie_core::intent::Tool::Censor);
+        let (r, _) = items
+            .iter()
+            .find(|(_, i)| *i == censor)
+            .expect("a censor item");
+        let at = r.centre();
+        left(&mut p, at, true);
+        left(&mut p, at, false);
+        assert_eq!(p.session.mode_name(), "censor");
+        // Hovered, it's drawn inverted: the frame differs, and only there.
+        let mut q = picker().unwrap();
+        let mut plain = Image::new(1920, 1080);
+        q.draw(0, &mut plain);
+        q.input(RawEvent::Motion { at }, 0.0);
+        q.draw(0, &mut img);
+        let changed = plain.damage(&img);
+        assert!(!changed.is_empty());
+        assert!(
+            changed.iter().all(|t| {
+                LogicalRect::new(
+                    f64::from(t.x),
+                    f64::from(t.y),
+                    f64::from(t.w),
+                    f64::from(t.h),
+                )
+                .intersects(r)
+            }),
+            "{changed:?}"
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_chip_never_reaches_the_picture() {
+        let Some(mut p) = picker() else { return };
+        let mut img = Image::new(1920, 1080);
+        p.draw(0, &mut img);
+        let before = p.session.rect();
+        // The status chip, below the box: a drag from it draws nothing.
+        let (r, _) = p.ui.items().into_iter().next().expect("drawn items");
+        let chip = LogicalPoint::new(r.x - 1.0, r.y + 1.0); // its line's padding
+        assert!(p.ui.hit(chip).is_some());
+        left(&mut p, chip, true);
+        p.input(
+            RawEvent::Motion {
+                at: LogicalPoint::new(900.0, 700.0),
+            },
+            0.0,
+        );
+        left(&mut p, LogicalPoint::new(900.0, 700.0), false);
+        assert_eq!(p.session.rect(), before);
+        assert_eq!(p.session.mode_name(), "select");
     }
 
     /// Frame costs, for the performance audit (docs/architecture-rust.md

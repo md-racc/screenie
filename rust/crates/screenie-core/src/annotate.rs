@@ -579,7 +579,9 @@ impl Session {
             s.sel.place_cursor(p);
             return Transition::Stay;
         }
-        match boxes::apply(&mut s.sel, &self.snap, &mut s.drag, intent) {
+        // No handles: the cursor corner is always under the pointer here,
+        // so a drag would only ever take hold of it.
+        match boxes::apply(&mut s.sel, &self.snap, &mut s.drag, intent, None) {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
                 s.sel.place_cursor(at);
