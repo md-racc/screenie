@@ -26,7 +26,7 @@ use smithay_client_toolkit::{
     shm::slot::{Buffer, SlotPool},
 };
 
-use screenie_core::geometry::LogicalPoint;
+use screenie_core::geometry::{LogicalPoint, PixelRect};
 use screenie_core::keys::Mods;
 use screenie_core::layout::Layout;
 use screenie_core::session::{Button, RawEvent};
@@ -73,7 +73,13 @@ struct Surf {
     frame_pending: bool,
     dirty: bool,
     buffer: Option<Buffer>,
+    /// Whether `buffer` holds `shown` (it was the last one drawn into), so
+    /// only what changed needs copying into it.
+    buffer_current: bool,
+    /// Drawn into each frame.
     scratch: Image,
+    /// The last frame committed, which the next is diffed against.
+    shown: Image,
 }
 
 pub(crate) struct Overlay {
@@ -232,9 +238,16 @@ impl Overlay {
             let (w, h) = (s.size.0 * s.scale as u32, s.size.1 * s.scale as u32);
             if (s.scratch.width(), s.scratch.height()) != (w, h) {
                 s.scratch = Image::new(w, h);
+                s.shown = Image::new(0, 0);
                 s.buffer = None;
             }
             app.draw(s.monitor, &mut s.scratch);
+            // Only what changed goes to the compositor; nothing, no commit.
+            let damage = s.scratch.damage(&s.shown);
+            s.dirty = false;
+            if damage.is_empty() {
+                continue;
+            }
             let stride = w as i32 * 4;
             if s.buffer.is_none() {
                 let (b, _) = self
@@ -242,6 +255,7 @@ impl Overlay {
                     .create_buffer(w as i32, h as i32, stride, format)
                     .map_err(|e| Error::Protocol(format!("shm buffer: {e}")))?;
                 s.buffer = Some(b);
+                s.buffer_current = false;
             }
             let buffer = s.buffer.as_mut().expect("just made");
             let canvas = match self.pool.canvas(buffer) {
@@ -253,27 +267,40 @@ impl Overlay {
                         .create_buffer(w as i32, h as i32, stride, format)
                         .map_err(|e| Error::Protocol(format!("shm buffer: {e}")))?;
                     *buffer = b;
+                    s.buffer_current = false;
                     c
                 }
             };
+            let full = [s.scratch.extent()];
+            let copy: &[PixelRect] = if s.buffer_current { &damage } else { &full };
             let src = s.scratch.data();
-            if self.rgbx {
-                canvas[..src.len()].copy_from_slice(src);
-            } else {
-                for (d, p) in canvas.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                    d.copy_from_slice(&[p[2], p[1], p[0], 255]);
+            let row = w as usize * 4;
+            for r in copy {
+                for y in r.y as usize..(r.y + r.h) as usize {
+                    let span = y * row + r.x as usize * 4..y * row + (r.x + r.w) as usize * 4;
+                    let (d, p) = (&mut canvas[span.clone()], &src[span]);
+                    if self.rgbx {
+                        d.copy_from_slice(p);
+                    } else {
+                        for (d, p) in d.chunks_exact_mut(4).zip(p.chunks_exact(4)) {
+                            d.copy_from_slice(&[p[2], p[1], p[0], 255]);
+                        }
+                    }
                 }
             }
             let surface = s.layer.wl_surface();
             surface.set_buffer_scale(s.scale);
-            surface.damage_buffer(0, 0, w as i32, h as i32);
+            for r in &damage {
+                surface.damage_buffer(r.x, r.y, r.w, r.h);
+            }
             surface.frame(qh, FrameCallbackData(surface.clone()));
             buffer
                 .attach_to(surface)
                 .map_err(|e| Error::Protocol(format!("attach: {e}")))?;
             s.layer.commit();
             s.frame_pending = true;
-            s.dirty = false;
+            s.buffer_current = true;
+            std::mem::swap(&mut s.scratch, &mut s.shown);
         }
         Ok(())
     }
@@ -336,7 +363,9 @@ impl Wayland {
                 frame_pending: false,
                 dirty: true,
                 buffer: None,
+                buffer_current: false,
                 scratch: Image::new(0, 0),
+                shown: Image::new(0, 0),
             });
         }
         if surfaces.is_empty() {

@@ -1014,7 +1014,7 @@ impl Session {
             (r.x + r.w).min(c.x + c.w) - r.x.max(c.x),
             (r.y + r.h).min(c.y + c.h) - r.y.max(c.y),
         );
-        match self.start_job(crate::session::JobKind::Ocr { rect }) {
+        match self.start_job(crate::session::JobKind::Ocr { rect, codes: false }) {
             (_, Some(result)) => fill_reading(&mut t, result, a, b),
             (id, None) => t.reading = Some((id, a, b)),
         }
@@ -1909,6 +1909,7 @@ mod scale_bar_tests {
                     line: 0,
                 })
                 .collect(),
+            codes: vec![],
         }
     }
 

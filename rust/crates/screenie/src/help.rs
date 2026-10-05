@@ -128,12 +128,18 @@ fn config() -> String {
             Kind::Save => "a directory, or true or false: --save".into(),
             Kind::Keep => "0: --no-history".into(),
             Kind::Redact => "off, suggest or auto: --redact".into(),
+            Kind::Only(what) => what.to_string(),
         };
         out.push_str(&format!("  {key:<14} {what}  ({})\n", verbs.join(", ")));
     }
+    let not_yet: Vec<&str> = NOT_YET
+        .iter()
+        .copied()
+        .chain(["[look]", "[keys.*]"])
+        .collect();
     out.push_str(&format!(
-        "\nNot built yet (warned about, skipped): {}, [look], [keys.*]\n",
-        NOT_YET.join(", ")
+        "\nNot built yet (warned about, skipped): {}\n",
+        not_yet.join(", ")
     ));
     out
 }

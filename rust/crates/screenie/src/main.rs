@@ -185,7 +185,7 @@ fn redact_shot(
         start: Some(rect),
         recall: vec![],
     });
-    s.set_redact_env(screenie_core::redact::Env::from_system());
+    s.set_redact_rules(redact_rules());
     s.set_analyzer(Box::new(analysis::Ocr::inline(
         Picture::new(frame.clone()),
         out.ocr_lang(),
@@ -682,7 +682,7 @@ fn run_picker(
         frame.clone(),
     )));
     session.set_code_reader(Box::new(picker::Codes(Picture::new(frame.clone()))));
-    session.set_redact_env(screenie_core::redact::Env::from_system());
+    session.set_redact_rules(redact_rules());
     session.set_edge_finder(Box::new(screenie_image::picture::PictureEdges::new(
         frame.clone(),
     )));
@@ -720,7 +720,15 @@ fn run_picker(
         }
         let font = font.ok_or_else(|| Failure::capture("no monospace font found"))?;
         let ui = Ui::new(&font).map_err(Failure::capture)?;
-        let (ocr, jobs) = analysis::Ocr::threaded(Picture::new(frame.clone()), lang);
+        let (mut ocr, jobs) = analysis::Ocr::threaded(Picture::new(frame.clone()), lang);
+        if redact_rules().prescan {
+            let monitors: Vec<_> = layout
+                .monitors
+                .iter()
+                .map(|m| frame.map().to_pixels(m.rect))
+                .collect();
+            ocr.prescan(&monitors);
+        }
         session.set_analyzer(Box::new(ocr));
         let mut app = picker::Picker::new(session, Picture::new(frame), ui);
         app.take_jobs(jobs);
@@ -949,7 +957,7 @@ fn finish(
 fn ocr(picture: &Picture, rect: LogicalRect, out: &cli::Output) -> Result<String, Failure> {
     let r = picture.committed().map().to_pixels(rect);
     let crop = analysis::Crop::of(picture, r).map_err(Failure::delivery)?;
-    let result = crop.recognize(&out.ocr_lang()).map_err(|e| {
+    let result = crop.recognize(&out.ocr_lang(), false).map_err(|e| {
         if deliver::notifies(out) {
             notify("OCR failed", &e);
         }
@@ -964,6 +972,18 @@ fn notify(title: &str, body: &str) {
 
 /// The command line with the config's options before it (none for the
 /// clipboard server, which is screenie talking to itself).
+/// `[redact]`'s rules from the config, which aren't options; unset, the
+/// defaults.
+static REDACT_RULES: std::sync::OnceLock<screenie_core::redact::Rules> = std::sync::OnceLock::new();
+
+/// Auto-redact's rules (config), and what it knows of this machine.
+fn redact_rules() -> screenie_core::redact::Rules {
+    screenie_core::redact::Rules {
+        env: screenie_core::redact::Env::from_system(),
+        ..REDACT_RULES.get().cloned().unwrap_or_default()
+    }
+}
+
 fn with_config() -> Result<Vec<std::ffi::OsString>, String> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| {
@@ -976,6 +996,7 @@ fn with_config() -> Result<Vec<std::ffi::OsString>, String> {
         return Ok(g.rest);
     };
     let (mut full, warnings) = config::options(&text, config::verb(&g.rest), &g.profiles)?;
+    let _ = REDACT_RULES.set(config::redact(&text, &g.profiles)?);
     for w in warnings {
         eprintln!("screenie: {w}");
     }

@@ -108,6 +108,8 @@ pub(crate) enum Kind {
     Keep,
     /// `redact.mode`: `off`, `suggest` or `auto`.
     Redact,
+    /// Not an option, read by `redact()`: what it takes.
+    Only(&'static str),
 }
 
 const ALL: &[&str] = &["pick", "shot", "edit"];
@@ -169,23 +171,47 @@ pub(crate) const KEYS: &[(&str, &str, Kind, &[&str])] = &[
     ("capture", "scale", Kind::Value("--scale"), ALL),
     ("history", "keep", Kind::Keep, ALL),
     ("redact", "mode", Kind::Redact, ALL),
+    ("redact", "kind", Kind::Only("bar or pixelate"), ALL),
+    (
+        "redact",
+        "detectors",
+        Kind::Only("the detectors that run (docs/auto-redact.md)"),
+        ALL,
+    ),
+    ("redact", "literal", Kind::Only("strings to find"), ALL),
+    (
+        "redact",
+        "domains",
+        Kind::Only("domains, with their subdomains"),
+        ALL,
+    ),
+    (
+        "redact",
+        "pad",
+        Kind::Only("a share of the line height"),
+        ALL,
+    ),
+    (
+        "redact",
+        "prescan",
+        Kind::Only("true: scan each monitor when the picker opens"),
+        PICKERS,
+    ),
+    (
+        "redact",
+        "custom",
+        Kind::Only("[[redact.custom]] name = \"…\", regex = \"…\""),
+        ALL,
+    ),
 ];
 
 /// Keys the design has that aren't built yet: warned about, not refused.
-pub(crate) const NOT_YET: &[&str] = &[
-    "redact.detectors",
-    "redact.literal",
-    "redact.custom",
-    "redact.prescan",
-];
+pub(crate) const NOT_YET: &[&str] = &[];
 
 /// The options a config (and its profiles, in order) stands for, for
 /// `verb`, and warnings about keys it skipped.
-pub fn options(
-    text: &str,
-    verb: &str,
-    profiles: &[String],
-) -> Result<(Vec<OsString>, Vec<String>), String> {
+/// The config with its profiles (in order) applied over it.
+fn merged(text: &str, profiles: &[String]) -> Result<toml::Table, String> {
     let mut table: toml::Table = text.parse().map_err(|e| format!("config: {e}"))?;
     let profile_table = match table.remove("profile") {
         None => toml::Table::new(),
@@ -199,6 +225,87 @@ pub fn options(
         };
         merge(&mut table, p);
     }
+    Ok(table)
+}
+
+/// `[redact]`'s detectors, lists and censor (the keys that aren't
+/// options), over the defaults.
+pub fn redact(text: &str, profiles: &[String]) -> Result<screenie_core::redact::Rules, String> {
+    use screenie_core::redact::{Category, Custom, Rules};
+    let mut rules = Rules::default();
+    let table = merged(text, profiles)?;
+    let Some(toml::Value::Table(r)) = table.get("redact") else {
+        return Ok(rules);
+    };
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        match r.get(key) {
+            None => Ok(vec![]),
+            Some(toml::Value::Array(a)) => a
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("config: redact.{key}: a list of strings"))
+                })
+                .collect(),
+            Some(_) => Err(format!("config: redact.{key}: a list of strings")),
+        }
+    };
+    if r.contains_key("detectors") {
+        rules.detectors.clear();
+        rules.codes = false;
+        for name in strings("detectors")? {
+            match (name.as_str(), Category::from_name(&name)) {
+                ("codes", _) => rules.codes = true,
+                (_, Some(c)) => rules.detectors.push(c),
+                _ => return Err(format!("config: redact.detectors: no detector {name:?}")),
+            }
+        }
+    }
+    if let Some(v) = r.get("prescan") {
+        rules.prescan = v.as_bool().ok_or("config: redact.prescan: true or false")?;
+    }
+    rules.literal = strings("literal")?;
+    rules.domains = strings("domains")?;
+    if let Some(v) = r.get("pad") {
+        rules.pad = v
+            .as_float()
+            .or_else(|| v.as_integer().map(|n| n as f64))
+            .filter(|p| (0.0..=2.0).contains(p))
+            .ok_or("config: redact.pad: a share of the line height, 0 to 2")?;
+    }
+    if let Some(v) = r.get("kind") {
+        use screenie_core::model::CensorKind;
+        rules.kind = match v.as_str() {
+            Some("bar") => CensorKind::Bar,
+            Some("pixelate") => CensorKind::Pixelate,
+            _ => return Err("config: redact.kind: bar or pixelate".into()),
+        };
+    }
+    match r.get("custom") {
+        None => {}
+        Some(toml::Value::Array(a)) => {
+            for c in a {
+                let field = |k: &str| c.get(k).and_then(toml::Value::as_str);
+                let (Some(name), Some(regex)) = (field("name"), field("regex")) else {
+                    return Err("config: [[redact.custom]] needs a name and a regex".into());
+                };
+                rules.custom.push(
+                    Custom::new(name, regex).map_err(|e| format!("config: redact.custom: {e}"))?,
+                );
+            }
+        }
+        Some(_) => return Err("config: redact.custom: [[redact.custom]] tables".into()),
+    }
+    Ok(rules)
+}
+
+pub fn options(
+    text: &str,
+    verb: &str,
+    profiles: &[String],
+) -> Result<(Vec<OsString>, Vec<String>), String> {
+    let table = merged(text, profiles)?;
     let mut args = Vec::new();
     let mut warnings = Vec::new();
     for (section, value) in &table {
@@ -272,6 +379,7 @@ fn option(name: &str, kind: Kind, v: &toml::Value, verb: &str) -> Result<Vec<Str
             Some(n) if n > 0 => vec![], // the default keeps 20; others aren't built
             _ => return Err(format!("config: {name}: a count, 0 for none")),
         },
+        Kind::Only(_) => vec![],
         Kind::Redact => match as_text()?.as_str() {
             "off" => vec![],
             // Suggesting needs the picker; shot only auto-redacts.
@@ -372,7 +480,7 @@ output.notify = true
         let (a, warnings) =
             options("[look]\ndim = 0.4\n[redact]\nprescan = true", "pick", &[]).unwrap();
         assert!(a.is_empty());
-        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(
             args("[output]\ncopy-uri = false", "pick", &[]).unwrap(),
             ["--no-copy-uri"]
@@ -406,5 +514,52 @@ output.notify = true
         assert_eq!(verb(&g.rest), "shot");
         assert!(split_globals(["--no-config", "-p", "x"].map(OsString::from).to_vec()).is_err());
         assert!(split_globals(["-p"].map(OsString::from).to_vec()).is_err());
+    }
+
+    #[test]
+    fn redact_lists_become_rules_not_options() {
+        use screenie_core::model::CensorKind;
+        use screenie_core::redact::Category;
+        let text = r#"
+[redact]
+kind = "pixelate"
+detectors = ["email", "phone", "codes"]
+literal = ["Acme Corp"]
+domains = ["corp.example.com"]
+pad = 0.5
+prescan = true
+
+[[redact.custom]]
+name = "ticket"
+regex = 'JIRA-\d+'
+
+[profile.loose]
+redact.detectors = ["email", "uuid"]
+"#;
+        assert!(args(text, "pick", &[]).unwrap().is_empty());
+        let r = redact(text, &[]).unwrap();
+        assert_eq!(r.detectors, [Category::Email, Category::Phone]);
+        assert!(r.codes);
+        assert_eq!(r.kind, CensorKind::Pixelate);
+        assert_eq!((r.literal.len(), r.domains.len(), r.pad), (1, 1, 0.5));
+        assert_eq!(r.custom[0].name, "ticket");
+        assert!(r.prescan);
+        let r = redact(text, &["loose".into()]).unwrap();
+        assert_eq!(r.detectors, [Category::Email, Category::Uuid]);
+        assert!(!r.codes);
+        // Unset, the defaults: phone and uuid off, codes on.
+        let d = redact("", &[]).unwrap();
+        assert!(!d.detectors.contains(&Category::Phone) && d.codes);
+        for bad in [
+            "[redact]\ndetectors = [\"emails\"]",
+            "[redact]\nkind = \"blur\"",
+            "[redact]\nprescan = 1",
+            "[redact]\npad = -1",
+            "[redact]\nliteral = \"Acme\"",
+            "[[redact.custom]]\nname = \"x\"\nregex = \"(\"",
+            "[[redact.custom]]\nregex = \"x\"",
+        ] {
+            assert!(redact(bad, &[]).is_err(), "{bad}");
+        }
     }
 }

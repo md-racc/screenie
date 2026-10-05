@@ -9,9 +9,6 @@ use crate::model::{CensorKind, CensorOp, OpData};
 use crate::redact::{Category, Proposal};
 use crate::session::{JobKind, JobResult, Mode, Session, Transition};
 
-/// Padding of a suggestion, as a share of its line's height.
-pub const PAD: f64 = 0.2;
-
 /// A suggestion, in logical coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Suggestion {
@@ -48,7 +45,10 @@ impl Session {
     pub(crate) fn scan(&mut self, m: &mut RedactMode) {
         let rect = self.pixels.to_pixels(self.sel.rect());
         m.failed = None;
-        match self.start_job(JobKind::Ocr { rect }) {
+        match self.start_job(JobKind::Ocr {
+            rect,
+            codes: self.redact_rules.codes,
+        }) {
             (id, None) => m.scanning = Some(id),
             (_, Some(result)) => {
                 m.scanning = None;
@@ -60,7 +60,7 @@ impl Session {
     pub(crate) fn take_scan(&mut self, m: &mut RedactMode, result: JobResult) {
         match result {
             JobResult::Ocr(Ok(ocr)) => {
-                let found: Vec<Proposal> = crate::redact::propose(&ocr, &self.redact_env, PAD);
+                let found: Vec<Proposal> = crate::redact::propose(&ocr, &self.redact_rules);
                 m.suggestions = found
                     .into_iter()
                     .map(|p| Suggestion {
@@ -110,15 +110,19 @@ impl Session {
         self.stack_mut().insert(i, Mode::Redact(m));
     }
 
-    /// Accept the ticked suggestions as black-bar censors: one undo step.
+    /// Accept the ticked suggestions as censors of the configured kind
+    /// (black bars by default): one undo step.
     fn accept(&mut self, m: &mut RedactMode) {
         let mut ids = Vec::new();
         for s in m.suggestions.iter().filter(|s| s.ticked) {
             let id = self.insert_op(
                 OpData::Censor(CensorOp {
                     rect: s.rect,
-                    kind: CensorKind::Bar,
-                    amount: 0.0,
+                    kind: self.redact_rules.kind,
+                    amount: match self.redact_rules.kind {
+                        CensorKind::Bar => 0.0,
+                        CensorKind::Pixelate => crate::redact::PIXELATE,
+                    },
                 }),
                 None,
             );

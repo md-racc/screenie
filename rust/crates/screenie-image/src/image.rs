@@ -30,6 +30,11 @@ impl std::fmt::Debug for Image {
     }
 }
 
+/// The side of a damage tile, px.
+pub const TILE: usize = 64;
+/// More damaged rectangles than this become their bounds.
+pub const MAX_DAMAGE: usize = 32;
+
 impl Image {
     /// A transparent image.
     pub fn new(width: u32, height: u32) -> Self {
@@ -104,6 +109,72 @@ impl Image {
         out
     }
 
+    /// Where this and `other` differ, as `TILE`-pixel tiles merged into
+    /// rectangles (runs along a band, then runs of the same span down
+    /// bands); at most `MAX_DAMAGE` of them, else their bounds. Empty where
+    /// nothing differs. Different sizes differ everywhere.
+    pub fn damage(&self, other: &Image) -> Vec<PixelRect> {
+        if (self.width, self.height) != (other.width, other.height) {
+            return vec![self.extent()];
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let row = w * 4;
+        let mut rects: Vec<PixelRect> = Vec::new();
+        // The runs of the band above, still open for growing down.
+        let mut open: Vec<usize> = Vec::new();
+        for band in (0..h).step_by(TILE) {
+            let rows = band..(band + TILE).min(h);
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            for tx in (0..w).step_by(TILE) {
+                let (x0, x1) = (tx * 4, (tx + TILE).min(w) * 4);
+                let differs = rows.clone().any(|y| {
+                    let r = y * row;
+                    self.data[r + x0..r + x1] != other.data[r + x0..r + x1]
+                });
+                if differs {
+                    match runs.last_mut() {
+                        Some(run) if run.1 == tx => run.1 = (tx + TILE).min(w),
+                        _ => runs.push((tx, (tx + TILE).min(w))),
+                    }
+                }
+            }
+            let y1 = rows.end as i32;
+            let mut next = Vec::new();
+            for (x0, x1) in runs {
+                let above = open.iter().copied().find(|&i| {
+                    let r = rects[i];
+                    (r.x, r.x + r.w, r.y + r.h) == (x0 as i32, x1 as i32, band as i32)
+                });
+                match above {
+                    Some(i) => {
+                        rects[i].h = y1 - rects[i].y;
+                        next.push(i);
+                    }
+                    None => {
+                        next.push(rects.len());
+                        rects.push(PixelRect::new(
+                            x0 as i32,
+                            band as i32,
+                            (x1 - x0) as i32,
+                            y1 - band as i32,
+                        ));
+                    }
+                }
+            }
+            open = next;
+        }
+        if rects.len() > MAX_DAMAGE {
+            let (x0, y0) = rects
+                .iter()
+                .fold((i32::MAX, i32::MAX), |(x, y), r| (x.min(r.x), y.min(r.y)));
+            let (x1, y1) = rects
+                .iter()
+                .fold((0, 0), |(x, y), r| (x.max(r.x + r.w), y.max(r.y + r.h)));
+            return vec![PixelRect::new(x0, y0, x1 - x0, y1 - y0)];
+        }
+        rects
+    }
+
     /// Copy `src`'s rectangle `from` to `(x, y)` here, clipped to both.
     pub fn blit(&mut self, src: &Image, from: PixelRect, x: i32, y: i32) {
         // Clip the source rectangle to the source image...
@@ -133,6 +204,40 @@ impl Image {
 
 #[cfg(test)]
 mod tests {
+
+    fn dot(img: &mut Image, x: i32, y: i32, w: u32, h: u32) {
+        let red = Image::filled(w, h, Rgb(255, 0, 0));
+        img.blit(&red, red.extent(), x, y);
+    }
+
+    #[test]
+    fn damage_is_the_changed_tiles_merged() {
+        let a = Image::filled(300, 200, Rgb(1, 2, 3));
+        let mut b = a.clone();
+        assert!(a.damage(&b).is_empty());
+        // A box's two edges, down three bands: two columns, not their span.
+        dot(&mut b, 10, 5, 1, 150);
+        dot(&mut b, 200, 5, 1, 150);
+        assert_eq!(
+            a.damage(&b),
+            [
+                PixelRect::new(0, 0, 64, 192),
+                PixelRect::new(192, 0, 64, 192)
+            ]
+        );
+        // The last tiles are cut to the image.
+        dot(&mut b, 299, 199, 1, 1);
+        assert!(a.damage(&b).contains(&PixelRect::new(256, 192, 44, 8)));
+        assert_eq!(a.damage(&Image::new(5, 5)), [a.extent()]);
+        // Too many become their bounds.
+        let other = Image::filled(8000, 64, Rgb(0, 0, 0));
+        let mut many = other.clone();
+        for i in 0..40 {
+            dot(&mut many, i * 200, 0, 1, 1);
+        }
+        assert_eq!(many.damage(&other), [PixelRect::new(0, 0, 7808, 64)]);
+    }
+
     use super::*;
 
     fn gradient(w: u32, h: u32) -> Image {

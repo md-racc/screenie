@@ -16,10 +16,21 @@ pub struct OcrWord {
     pub line: u32,
 }
 
+/// A QR code or barcode found with the words (an auto-redact scan).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OcrCode {
+    /// What it decodes to.
+    pub text: String,
+    /// Its outline's bounds, in frame pixels.
+    pub bbox: PixelRect,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OcrResult {
     pub text: String,
     pub words: Vec<OcrWord>,
+    /// Only when the job asked for them.
+    pub codes: Vec<OcrCode>,
 }
 
 impl OcrResult {

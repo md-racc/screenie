@@ -90,12 +90,15 @@ fn auto_redact_finds_secrets_in_real_ocr() {
     let Some(pic) = text_image("mail adi@example.org from 10.0.0.12", false) else {
         return;
     };
-    let env = screenie_core::redact::Env {
-        user: "adi".into(),
-        home: "/home/adi".into(),
-        hostname: "myhost".into(),
+    let rules = screenie_core::redact::Rules {
+        env: screenie_core::redact::Env {
+            user: "adi".into(),
+            home: "/home/adi".into(),
+            hostname: "myhost".into(),
+        },
+        ..Default::default()
     };
-    let found = screenie_core::redact::propose(&read(&pic), &env, 0.2);
+    let found = screenie_core::redact::propose(&read(&pic), &rules);
     let names: Vec<&str> = found.iter().map(|p| p.category.name()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(
@@ -121,7 +124,7 @@ fn auto_redact_finds_a_card_and_its_security_code_in_real_ocr() {
     let Some(pic) = text_image("4111 1111 1111 1111 CVV 123", false) else {
         return;
     };
-    let found = screenie_core::redact::propose(&read(&pic), &Default::default(), 0.2);
+    let found = screenie_core::redact::propose(&read(&pic), &Default::default());
     let names: Vec<&str> = found.iter().map(|p| p.category.name()).collect();
     assert_eq!(names, ["card", "security-code"], "{names:?}");
 }

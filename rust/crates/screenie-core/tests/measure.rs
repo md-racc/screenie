@@ -898,6 +898,7 @@ fn bar() -> screenie_core::ocr::OcrResult {
     OcrResult {
         text: "0 5 m".into(),
         words: vec![word("0", 655), word("5", 755), word("m", 775)],
+        codes: vec![],
     }
 }
 

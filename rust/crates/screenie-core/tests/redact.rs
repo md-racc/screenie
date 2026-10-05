@@ -32,6 +32,7 @@ fn words(ws: &[&str]) -> OcrResult {
     OcrResult {
         text: ws.join(" "),
         words,
+        codes: vec![],
     }
 }
 
@@ -40,7 +41,7 @@ struct Sync(OcrResult);
 
 impl Analyzer for Sync {
     fn start(&mut self, _: &Session, _: u64, job: JobKind) -> Option<JobResult> {
-        let JobKind::Ocr { rect } = job;
+        let JobKind::Ocr { rect, .. } = job;
         assert_eq!(rect, PixelRect::new(100, 170, 560, 90)); // the box
         Some(JobResult::Ocr(Ok(self.0.clone())))
     }

@@ -95,7 +95,11 @@ pub fn parse_tsv(tsv: &str, map: impl Fn(PixelRect) -> PixelRect) -> OcrResult {
             line: line_no,
         });
     }
-    OcrResult { text, words }
+    OcrResult {
+        text,
+        words,
+        codes: vec![],
+    }
 }
 
 #[cfg(test)]

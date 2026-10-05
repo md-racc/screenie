@@ -342,13 +342,15 @@ The config file is `$XDG_CONFIG_HOME/screenie/config.toml` (TOML).
 - **Built so far** (2026-10-03): `[output]` copy, notify, quiet, json,
   save, save-project, format, quality, png-level; `[ocr]` lang; `[pick]`
   region, mode, result, lock-box, measure-scale; `[capture]` delay,
-  cursor; `[history]` keep (0 only, for `--no-history`); `[redact]` mode;
+  cursor; `[history]` keep (0 only, for `--no-history`); `[redact]` mode,
+  kind, detectors, literal, domains, pad, prescan and `[[redact.custom]]`
+  (2026-10-05; the lists aren't options, so the command line can't
+  override them);
   and `[profile.NAME]` with `-p NAME` (repeatable, left to right). Each
   section applies to the verbs it means something for (`[pick]` not to
   `shot`; `[pick] region` not to `edit`'s image). `[output]` also takes
-  pin, colour-format and copy-uri, and `[capture]` scale. The `[redact]`
-  lists, `[look]` and `[keys.*]` are warned about and skipped until
-  they're built; any other
+  pin, colour-format and copy-uri, and `[capture]` scale. `[look]` and
+  `[keys.*]` are warned about and skipped until they're built; any other
   key is an error naming it. `--quality` is unused by formats other than
   JPEG (so a config's quality can sit under a profile's format).
 

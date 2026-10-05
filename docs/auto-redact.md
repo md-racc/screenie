@@ -1,10 +1,10 @@
 # Auto-redact: censor suggestions from OCR
 
-**Status:** in the Rust port: `r` in Censor, `--redact suggest|auto`, and
-`"redacted"` in `--json`, and card security codes (`security-code`, below).
-Not yet: codes (zbar outlines), the
-OCR-tolerant email, `phone`/`uuid`, `literal`/`custom`, config, prescan
-and the cache. It is not in the prototype. `README.md` (Auto-redact) and `docs/architecture-rust.md`
+**Status:** in the Rust port: `r` in Censor, `--redact suggest|auto`,
+`"redacted"` in `--json`, card security codes, the OCR-tolerant email,
+`phone`/`uuid`, `literal`/`domains`/`custom`, and `[redact]` config
+codes (zbar's outlines), and the scan cache and prescan (all
+2026-10-05). It is not in the prototype. `README.md` (Auto-redact) and `docs/architecture-rust.md`
 (§54–57) take precedence over this page.
 
 Screenshots leak things you didn't notice were in the box:
@@ -53,7 +53,8 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 3. **Codes.** zbar reports each code's outline. A QR or barcode is proposed
    whole, whatever it contains (a code can hold a URL with a token or
    WiFi credentials). The decoded text is also run through the detectors,
-   for the list's label.
+   for the list's label (`code url-secret http…`). zbarimg reads the
+   scan's own crop, in the same background job as the OCR.
 4. **Boxes.**
    - Merge the spans of one match into the union of their char boxes.
    - Pad by ~20% of the line height, so ascenders, descenders and
@@ -66,7 +67,7 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 
 | Detector | What | How |
 |---|---|---|
-| `email` | addresses | regex, tolerant of OCR's `rn`/`m` and `0`/`O` confusions |
+| `email` | addresses | regex; OCR's misreads (`©`/`®` for `@`, spaces round it, `,` for `.`) are proposed unticked |
 | `ip` | IPv4, IPv6, with or without port | regex, plus a parse check |
 | `mac` | MAC addresses | regex |
 | `token` | known key prefixes: `sk-`, `ghp_`/`gho_`/`github_pat_`, `glpat-`, `AKIA…`, `xox[bap]-`, JWTs (`eyJ…`) | prefix regexes |
@@ -75,13 +76,18 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 | `card` | card numbers | digits plus a Luhn check |
 | `security-code` | a card's CVV/CVC/CID | 3-4 isolated digits after a keyword (`CVV`, `CVC`, `CID`, `CSC`, "security code"), or within 4 line heights of a found card |
 | `iban` | IBANs | the mod-97 check |
-| `phone` | phone numbers | regex, off by default (too many false positives) |
+| `phone` | phone numbers | 8-15 digits in groups, not a date; off by default (too many false positives); ticked only with `+` or brackets |
 | `uuid` | UUIDs | regex, off by default |
 | `home-path` | `/home/<user>/…`, `~user` | `$USER` / `$HOME` |
-| `host` | this machine's hostname, and domains you list | literal match |
+| `host` | this machine's hostname, and domains you list (with subdomains) | match through OCR's confusions (below) |
 | `private-key` | `-----BEGIN … PRIVATE KEY-----` blocks | propose the whole block |
-| `literal` | strings from config (your name, your employer) | case-insensitive match |
+| `literal` | strings from config (your name, your employer) | match through OCR's confusions (below) |
 | `custom` | regexes from config | `[[redact.custom]] name = "…"`, `regex = "…"` |
+
+Names (`host`, `domains`, `literal`) are matched with both sides folded
+through OCR's usual confusions: any case, `rn` for `m`, `0` for `o`, `1`
+and `|` for `l`. A custom detector's chip and `--json` `what` are its
+`name`.
 
 Checksums (Luhn, mod-97) keep the number detectors precise. The entropy and
 OCR-tolerant detectors are for recall.
@@ -127,6 +133,16 @@ OCR-tolerant detectors are for recall.
     instantly. That spends CPU on every shot, so it's off by default.
 - Cache the OCR per frame version and region. Rescans after small box
   moves reuse the word boxes that are still inside.
+- As built: the last 8 scans are kept, by the committed picture's version
+  and rect. A scan of a rect inside a kept one (same pixels, and codes
+  only from a scan that looked for them) is its words and codes reaching
+  into the rect, at once; one inside a scan still running waits for it.
+  A box that grew, or pixels that changed, scan again. Prescan reads each
+  monitor (not the whole layout, so the box's monitor is enough), on its
+  own thread, with codes. Its light/dark choice is the monitor's, not the
+  box's, which may read a dark window on a light screen less well than
+  the box's own scan (tesseract retries inverted lines); so it stays off
+  by default.
 
 ## Honesty
 
@@ -144,13 +160,14 @@ OCR-tolerant detectors are for recall.
 ```toml
 [redact]
 mode = "off"              # off | suggest | auto (the default for --redact)
-kind = "bar"              # the censor kind used for suggestions
-detectors = ["email", "ip", "token", "entropy", "url-secret", "card",
-             "iban", "home-path", "host", "private-key", "codes"]
+kind = "bar"              # bar | pixelate (10px blocks), for accepted suggestions
+detectors = ["email", "ip", "mac", "token", "entropy", "url-secret", "card",
+             "security-code", "iban", "home-path", "host", "private-key",
+             "codes"]         # the default; add "phone", "uuid"
 literal = ["my-hostname", "Acme Corp"]
 domains = ["corp.example.com"]
 pad = 0.2                 # of the line height
-prescan = false
+prescan = false           # scan each monitor when the picker opens
 
 [[redact.custom]]
 name = "ticket"

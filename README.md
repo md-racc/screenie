@@ -764,7 +764,8 @@ picker stays live; the status tag shows `scanning…`, then
 `N found (M ticked)`.
 
 Suggestions draw as dashed boxes, each with its category in a chip.
-Ticked ones preview the black bar they become. The side list shows them
+Ticked ones preview the censor they become: a black bar, or pixelation
+with `[redact] kind = "pixelate"`. The side list shows them
 top to bottom, labels elided (`adi@…`), never whole:
 
 ```text
@@ -777,7 +778,7 @@ top to bottom, labels elided (`adi@…`), never whole:
 | ---------------- | --------------------------------------------------- |
 | `[` / `]`        | Select a suggestion (`[` down the list)             |
 | `Space`          | Tick / untick it                                    |
-| `a` / `Enter`    | Accept the ticked ones as black bars, one undo step |
+| `a` / `Enter`    | Accept the ticked ones as censors, one undo step    |
 | `d`              | Drop one                                            |
 | `r`              | Rescan (after moving the box)                       |
 | `Esc`            | Drop the suggestions, back to Censor                |
@@ -791,8 +792,16 @@ long random-looking strings; secret URL parameters (only the value is
 censored); card numbers (Luhn-checked) and their security codes (3-4 digits after
 CVV, CVC, CID or "security code", or on their own near a card number);
 IBANs (mod-97-checked); your home
-path; your hostname; and private-key blocks (proposed whole).
-Low-confidence matches, such as less random strings, are proposed
+path; your hostname; private-key blocks (proposed whole); and QR codes
+and barcodes, whatever they hold (proposed whole, labelled by what their
+contents look like, `code url-secret http…`). Off unless
+`[redact] detectors` names them: phone numbers and UUIDs. From the
+config: `literal` strings (your name, your employer), `domains` (with
+their subdomains), and `[[redact.custom]]` regexes, each its own category.
+Names and literals match through OCR's usual confusions (`rn` for `m`,
+`0` for `o`, `1` for `l`, any case).
+Low-confidence matches, such as less random strings, an email OCR misread
+(`©` for `@`), or digit groups that may be a phone number, are proposed
 unticked.
 
 It is best effort. OCR misses small, stylised, low-contrast and rotated

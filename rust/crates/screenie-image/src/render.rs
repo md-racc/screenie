@@ -139,6 +139,9 @@ fn filter(patch: &mut Patch, map: &PixelMap, clip: PixelRect, f: &FilterOp) {
 
 /// Three box-blur passes (close to a Gaussian), reading past `area` where
 /// the patch has pixels (edges are clamped), writing only inside it.
+/// Channels are 8.8 fixed point, and each pass a running sum, so a pixel
+/// costs the same whatever the radius, and the passes move half the bytes
+/// floats would.
 fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
     let r = ((radius / 2.0).round() as i32).max(1);
     let margin = 3 * r;
@@ -152,52 +155,83 @@ fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
         patch.extent(),
     );
     let (w, h) = (src.w as usize, src.h as usize);
-    let mut buf: Vec<[f32; 4]> = Vec::with_capacity(w * h);
-    for y in src.y..src.y + src.h {
+    let mut buf = vec![[0u16; 4]; w * h];
+    for (y, out) in (src.y..src.y + src.h).zip(buf.chunks_exact_mut(w)) {
         let i = patch.offset(src.x, y);
-        for px in patch.img.data()[i..i + w * 4].chunks_exact(4) {
-            buf.push([0, 1, 2, 3].map(|k| f32::from(px[k])));
+        for (o, px) in out
+            .iter_mut()
+            .zip(patch.img.data()[i..i + w * 4].chunks_exact(4))
+        {
+            *o = [0, 1, 2, 3].map(|k| u16::from(px[k]) << 8);
         }
     }
-    let mut tmp = buf.clone();
-    let pass = |from: &[[f32; 4]], to: &mut [[f32; 4]], horizontal: bool| {
-        let (n, lines) = if horizontal { (w, h) } else { (h, w) };
-        let at = |line: usize, i: usize| {
-            if horizontal {
-                line * w + i
-            } else {
-                i * w + line
-            }
-        };
-        let norm = 1.0 / (2 * r + 1) as f32;
-        for line in 0..lines {
-            for i in 0..n {
-                let mut acc = [0.0f32; 4];
-                for d in -r..=r {
-                    let j = (i as i32 + d).clamp(0, n as i32 - 1) as usize;
-                    let p = from[at(line, j)];
-                    for k in 0..4 {
-                        acc[k] += p[k];
-                    }
+    let mut tmp = vec![[0u16; 4]; w * h];
+    // A sum of 2r+1 values, divided: by a multiply and a shift.
+    let n = (2 * r + 1) as u64;
+    let mul = ((1u64 << 32) + n / 2) / n;
+    let div = |acc: u32| ((u64::from(acc) * mul) >> 32) as u16;
+    let clamp = |i: i32, n: usize| i.clamp(0, n as i32 - 1) as usize;
+    let ru = r as usize;
+    // Across each row (clamped only near its ends)...
+    let across = |from: &[[u16; 4]], to: &mut [[u16; 4]]| {
+        for (f, t) in from.chunks_exact(w).zip(to.chunks_exact_mut(w)) {
+            let mut acc = [0u32; 4];
+            for d in -r..=r {
+                let p = f[clamp(d, w)];
+                for k in 0..4 {
+                    acc[k] += u32::from(p[k]);
                 }
-                to[at(line, i)] = acc.map(|v| v * norm);
+            }
+            for i in 0..w {
+                t[i] = acc.map(div);
+                let (inn, out) = if i >= ru && i + ru + 1 < w {
+                    (f[i + ru + 1], f[i - ru])
+                } else {
+                    (f[clamp(i as i32 + r + 1, w)], f[clamp(i as i32 - r, w)])
+                };
+                for k in 0..4 {
+                    acc[k] = acc[k] + u32::from(inn[k]) - u32::from(out[k]);
+                }
+            }
+        }
+    };
+    // ...and down the columns, a row at a time (in memory order).
+    let down = |from: &[[u16; 4]], to: &mut [[u16; 4]]| {
+        let row = |y: usize| &from[y * w..(y + 1) * w];
+        let mut acc = vec![[0u32; 4]; w];
+        for d in -r..=r {
+            for (a, p) in acc.iter_mut().zip(row(clamp(d, h))) {
+                for k in 0..4 {
+                    a[k] += u32::from(p[k]);
+                }
+            }
+        }
+        for y in 0..h {
+            for (t, a) in to[y * w..(y + 1) * w].iter_mut().zip(&acc) {
+                *t = a.map(div);
+            }
+            let (inn, out) = (row(clamp(y as i32 + r + 1, h)), row(clamp(y as i32 - r, h)));
+            for ((a, i), o) in acc.iter_mut().zip(inn).zip(out) {
+                for k in 0..4 {
+                    a[k] = a[k] + u32::from(i[k]) - u32::from(o[k]);
+                }
             }
         }
     };
     for _ in 0..3 {
-        pass(&buf, &mut tmp, true);
-        pass(&tmp, &mut buf, false);
+        across(&buf, &mut tmp);
+        down(&tmp, &mut buf);
     }
     for y in area.y..area.y + area.h {
         let i = patch.offset(area.x, y);
         let row = (y - src.y) as usize * w + (area.x - src.x) as usize;
-        for (n, px) in patch.img.data_mut()[i..i + area.w as usize * 4]
+        for (px, v) in patch.img.data_mut()[i..i + area.w as usize * 4]
             .chunks_exact_mut(4)
-            .enumerate()
+            .zip(&buf[row..])
         {
-            let v = buf[row + n];
             for k in 0..4 {
-                px[k] = v[k].round().clamp(0.0, 255.0) as u8;
+                // Rounded to the nearest level.
+                px[k] = ((v[k] + 0x80) >> 8).min(255) as u8;
             }
         }
     }
@@ -1042,5 +1076,58 @@ mod tests {
         );
         assert_eq!(img.rgb(PixelPoint::new(5, 5)), Some(Rgb(255, 255, 255)));
         assert_eq!(img.rgb(PixelPoint::new(4, 5)), Some(Rgb(0, 0, 0)));
+    }
+
+    #[test]
+    fn blur_matches_a_direct_box_blur_to_a_level() {
+        let (w, h, r) = (37usize, 23usize, 3i32);
+        let mut img = Image::filled(w as u32, h as u32, Rgb3(0, 0, 0));
+        let mut seed = 7u32;
+        for v in img.data_mut().iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *v = (seed >> 24) as u8;
+        }
+        // The reference: three direct box passes each way, in f64.
+        let mut want: Vec<f64> = img.data().iter().map(|&v| f64::from(v)).collect();
+        let at = |x: i32, y: i32| {
+            (y.clamp(0, h as i32 - 1) as usize * w + x.clamp(0, w as i32 - 1) as usize) * 4
+        };
+        for _ in 0..3 {
+            for horizontal in [true, false] {
+                let from = want.clone();
+                for y in 0..h as i32 {
+                    for x in 0..w as i32 {
+                        for k in 0..4 {
+                            let sum: f64 = (-r..=r)
+                                .map(|d| {
+                                    from[if horizontal {
+                                        at(x + d, y)
+                                    } else {
+                                        at(x, y + d)
+                                    } + k]
+                                })
+                                .sum();
+                            want[at(x, y) + k] = sum / f64::from(2 * r + 1);
+                        }
+                    }
+                }
+            }
+        }
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        blur(
+            &mut p,
+            PixelRect::new(0, 0, w as i32, h as i32),
+            f64::from(2 * r),
+        );
+        let worst = img
+            .data()
+            .iter()
+            .zip(&want)
+            .map(|(&got, &want)| (f64::from(got) - want).abs())
+            .fold(0.0, f64::max);
+        assert!(worst <= 1.0, "off by {worst}");
     }
 }

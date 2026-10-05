@@ -29,7 +29,35 @@ pub enum Category {
     HomePath,
     Host,
     PrivateKey,
+    /// Off by default: too many false positives.
+    Phone,
+    /// Off by default.
+    Uuid,
+    /// A string from `[redact] literal`.
+    Literal,
+    /// A `[[redact.custom]]` regex, by its name.
+    Custom(&'static str),
+    /// A QR code or barcode, whatever it holds (`codes` in the config).
+    Code,
 }
+
+/// The built-in detectors, as `[redact] detectors` names them.
+pub const DETECTORS: &[Category] = &[
+    Category::Email,
+    Category::Ip,
+    Category::Mac,
+    Category::Token,
+    Category::Entropy,
+    Category::UrlSecret,
+    Category::Card,
+    Category::SecurityCode,
+    Category::Iban,
+    Category::HomePath,
+    Category::Host,
+    Category::PrivateKey,
+    Category::Phone,
+    Category::Uuid,
+];
 
 impl Category {
     pub fn name(self) -> &'static str {
@@ -46,7 +74,17 @@ impl Category {
             Category::HomePath => "home-path",
             Category::Host => "host",
             Category::PrivateKey => "private-key",
+            Category::Phone => "phone",
+            Category::Uuid => "uuid",
+            Category::Literal => "literal",
+            Category::Custom(name) => name,
+            Category::Code => "code",
         }
+    }
+
+    /// A built-in detector by its name.
+    pub fn from_name(name: &str) -> Option<Category> {
+        DETECTORS.iter().copied().find(|c| c.name() == name)
     }
 }
 
@@ -80,6 +118,76 @@ impl Env {
             home: var("HOME"),
             hostname,
         }
+    }
+}
+
+/// A `[[redact.custom]]` detector.
+#[derive(Clone, Debug)]
+pub struct Custom {
+    pub name: &'static str,
+    pub regex: Regex,
+}
+
+impl Custom {
+    /// The name lives for the run (custom detectors are made once, from
+    /// the config), so it can be a category like the built-in ones.
+    pub fn new(name: &str, pattern: &str) -> Result<Custom, String> {
+        let regex = Regex::new(pattern).map_err(|e| format!("{name}: {e}"))?;
+        Ok(Custom {
+            name: Box::leak(name.to_owned().into_boxed_str()),
+            regex,
+        })
+    }
+}
+
+/// What to look for, and how to censor it: `[redact]` config over the
+/// defaults.
+#[derive(Clone, Debug)]
+pub struct Rules {
+    pub env: Env,
+    /// The built-in detectors that run.
+    pub detectors: Vec<Category>,
+    /// Matched case-insensitively, tolerant of OCR's confusions.
+    pub literal: Vec<String>,
+    /// Matched with their subdomains, as `host`.
+    pub domains: Vec<String>,
+    pub custom: Vec<Custom>,
+    /// Whether QR codes and barcodes are proposed (`codes`).
+    pub codes: bool,
+    /// Of the line height, round each match.
+    pub pad: f64,
+    /// What accepted suggestions become.
+    pub kind: crate::model::CensorKind,
+    /// Scan every monitor when the picker opens (the host does it).
+    pub prescan: bool,
+}
+
+/// A pixelate suggestion's block size, logical px (Censor's default).
+pub const PIXELATE: f64 = 10.0;
+
+impl Default for Rules {
+    fn default() -> Rules {
+        Rules {
+            env: Env::default(),
+            detectors: DETECTORS
+                .iter()
+                .copied()
+                .filter(|c| !matches!(c, Category::Phone | Category::Uuid))
+                .collect(),
+            literal: vec![],
+            domains: vec![],
+            custom: vec![],
+            codes: true,
+            pad: 0.2,
+            kind: crate::model::CensorKind::Bar,
+            prescan: false,
+        }
+    }
+}
+
+impl Rules {
+    fn on(&self, c: Category) -> bool {
+        self.detectors.contains(&c)
     }
 }
 
@@ -139,8 +247,18 @@ fn re(s: &str) -> Regex {
     Regex::new(s).expect("a valid built-in pattern")
 }
 
-static EMAIL: LazyLock<Regex> =
-    LazyLock::new(|| re(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"));
+/// OCR reads `@` as `©` or `®`, puts spaces round it, and reads a dot as
+/// a comma: such matches are proposed, unticked.
+static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"[A-Za-z0-9._%+-]+ ?[@©®] ?[A-Za-z0-9-]+(?:[.,][A-Za-z0-9-]+)*[.,][A-Za-z]{2,}")
+});
+static PHONE: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?\d{2,4}(?:[ .-]?\d{2,4}){1,4}")
+});
+static ISO_DATE: LazyLock<Regex> = LazyLock::new(|| re(r"^\d{4}-\d{2}-\d{2}$"));
+static UUID: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b")
+});
 static IPV4: LazyLock<Regex> = LazyLock::new(|| re(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b"));
 static IPV6: LazyLock<Regex> =
     LazyLock::new(|| re(r"\b[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}\b"));
@@ -302,7 +420,51 @@ fn chars(text: &str, byte: usize) -> usize {
     text[..byte].chars().count()
 }
 
-fn detect_line(i: usize, text: &str, env: &Env) -> Vec<Found> {
+/// Text folded for matching names through OCR's confusions (case, `rn`
+/// for `m`, `0` for `o`, `1` and `|` for `l`), with each folded char's
+/// span in the original, in chars.
+fn fold(text: &str) -> (Vec<char>, Vec<(usize, usize)>) {
+    let cs: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let (mut out, mut spans) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < cs.len() {
+        let (c, n) = match (cs[i], cs.get(i + 1)) {
+            ('r', Some('n')) => ('m', 2),
+            ('0', _) => ('o', 1),
+            ('1' | '|', _) => ('l', 1),
+            (c, _) => (c, 1),
+        };
+        out.push(c);
+        spans.push((i, i + n));
+        i += n;
+    }
+    (out, spans)
+}
+
+/// Where `needle` occurs in `text` through OCR's confusions, as char
+/// spans of `text`. (Lowercasing keeps char counts for the scripts OCR
+/// reads here.)
+fn fuzzy_find(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let (hay, spans) = fold(text);
+    let (needle, _) = fold(needle);
+    if needle.is_empty() || needle.len() > hay.len() {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k + needle.len() <= hay.len() {
+        if hay[k..k + needle.len()] == needle[..] {
+            out.push((spans[k].0, spans[k + needle.len() - 1].1));
+            k += needle.len();
+        } else {
+            k += 1;
+        }
+    }
+    out
+}
+
+fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
+    let env = &rules.env;
     let mut found = Vec::new();
     let mut push = |start: usize, end: usize, category, sure| {
         found.push(Found {
@@ -313,16 +475,51 @@ fn detect_line(i: usize, text: &str, env: &Env) -> Vec<Found> {
             sure,
         });
     };
-    for m in EMAIL.find_iter(text) {
-        push(m.start(), m.end(), Category::Email, true);
+    let mut found_chars: Vec<Found> = Vec::new();
+    let mut push_chars = |start: usize, end: usize, category, sure| {
+        found_chars.push(Found {
+            line: i,
+            start,
+            end,
+            category,
+            sure,
+        });
+    };
+    let on = |c| rules.on(c);
+    for m in EMAIL.find_iter(text).filter(|_| on(Category::Email)) {
+        let s = m.as_str();
+        let clean = !s.contains([' ', '©', '®']) && !s.contains(',');
+        push(m.start(), m.end(), Category::Email, clean);
     }
-    for m in IPV4.find_iter(text) {
+    for m in UUID.find_iter(text).filter(|_| on(Category::Uuid)) {
+        push(m.start(), m.end(), Category::Uuid, true);
+    }
+    for m in PHONE.find_iter(text).filter(|_| on(Category::Phone)) {
+        let s = m.as_str();
+        let digits = s.chars().filter(char::is_ascii_digit).count();
+        let before = text[..m.start()].chars().next_back();
+        let after = text[m.end()..].chars().next();
+        let joined =
+            |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || ".:/".contains(c));
+        if (8..=15).contains(&digits) && !joined(before) && !joined(after) && !ISO_DATE.is_match(s)
+        {
+            // An international or bracketed number looks like one; a run of
+            // digit groups may be anything.
+            push(
+                m.start(),
+                m.end(),
+                Category::Phone,
+                s.starts_with('+') || s.contains('('),
+            );
+        }
+    }
+    for m in IPV4.find_iter(text).filter(|_| on(Category::Ip)) {
         let addr = m.as_str().split(':').next().unwrap_or("");
         if addr.parse::<std::net::Ipv4Addr>().is_ok() {
             push(m.start(), m.end(), Category::Ip, true);
         }
     }
-    for m in IPV6.find_iter(text) {
+    for m in IPV6.find_iter(text).filter(|_| on(Category::Ip)) {
         let s = m.as_str();
         if s.matches(':').count() >= 2
             && s.parse::<std::net::Ipv6Addr>().is_ok()
@@ -331,28 +528,31 @@ fn detect_line(i: usize, text: &str, env: &Env) -> Vec<Found> {
             push(m.start(), m.end(), Category::Ip, true);
         }
     }
-    for m in MAC.find_iter(text) {
+    for m in MAC.find_iter(text).filter(|_| on(Category::Mac)) {
         push(m.start(), m.end(), Category::Mac, true);
     }
-    for m in TOKEN.find_iter(text) {
+    for m in TOKEN.find_iter(text).filter(|_| on(Category::Token)) {
         push(m.start(), m.end(), Category::Token, true);
     }
-    for c in URL_SECRET.captures_iter(text) {
+    for c in URL_SECRET
+        .captures_iter(text)
+        .filter(|_| on(Category::UrlSecret))
+    {
         let v = c.get(1).expect("the value group");
         push(v.start(), v.end(), Category::UrlSecret, true);
     }
-    for m in CARD.find_iter(text) {
+    for m in CARD.find_iter(text).filter(|_| on(Category::Card)) {
         let d: Vec<u32> = m.as_str().chars().filter_map(|c| c.to_digit(10)).collect();
         if (13..=19).contains(&d.len()) && luhn(&d) {
             push(m.start(), m.end(), Category::Card, true);
         }
     }
-    for m in IBAN.find_iter(text) {
+    for m in IBAN.find_iter(text).filter(|_| on(Category::Iban)) {
         if iban_ok(m.as_str()) {
             push(m.start(), m.end(), Category::Iban, true);
         }
     }
-    for m in LONG.find_iter(text) {
+    for m in LONG.find_iter(text).filter(|_| on(Category::Entropy)) {
         let s = m.as_str();
         let mixed =
             s.chars().any(|c| c.is_ascii_digit()) && s.chars().any(|c| c.is_ascii_alphabetic());
@@ -361,7 +561,7 @@ fn detect_line(i: usize, text: &str, env: &Env) -> Vec<Found> {
             push(m.start(), m.end(), Category::Entropy, h >= 4.0);
         }
     }
-    if !env.user.is_empty() {
+    if !env.user.is_empty() && on(Category::HomePath) {
         for prefix in [format!("/home/{}", env.user), format!("~{}", env.user)] {
             let mut from = 0;
             while let Some(at) = text[from..].find(&prefix) {
@@ -374,16 +574,32 @@ fn detect_line(i: usize, text: &str, env: &Env) -> Vec<Found> {
             }
         }
     }
-    if env.hostname.len() >= 3 {
-        let lower = text.to_lowercase();
-        let host = env.hostname.to_lowercase();
-        let mut from = 0;
-        while let Some(at) = lower[from..].find(&host) {
-            let start = from + at;
-            push(start, start + host.len(), Category::Host, true);
-            from = start + host.len();
+    for c in &rules.custom {
+        for m in c.regex.find_iter(text).filter(|m| !m.is_empty()) {
+            push(m.start(), m.end(), Category::Custom(c.name), true);
         }
     }
+    if env.hostname.len() >= 3 && on(Category::Host) {
+        for (start, end) in fuzzy_find(text, &env.hostname) {
+            push_chars(start, end, Category::Host, true);
+        }
+    }
+    let cs: Vec<char> = text.chars().collect();
+    for d in rules.domains.iter().filter(|d| !d.is_empty()) {
+        for (mut start, end) in fuzzy_find(text, d) {
+            // With its subdomains.
+            while start > 0 && (cs[start - 1].is_alphanumeric() || "-.".contains(cs[start - 1])) {
+                start -= 1;
+            }
+            push_chars(start, end, Category::Host, true);
+        }
+    }
+    for l in rules.literal.iter().filter(|l| !l.trim().is_empty()) {
+        for (start, end) in fuzzy_find(text, l.trim()) {
+            push_chars(start, end, Category::Literal, true);
+        }
+    }
+    found.extend(found_chars);
     found
 }
 
@@ -442,15 +658,18 @@ fn elide(s: &str) -> String {
 /// overlapping ones merged (a sure match wins the tick and the label).
 /// Overlap is of the matched text, before padding, so matches on lines
 /// next to each other stay apart.
-pub fn propose(ocr: &OcrResult, env: &Env, pad: f64) -> Vec<Proposal> {
+pub fn propose(ocr: &OcrResult, rules: &Rules) -> Vec<Proposal> {
+    let pad = rules.pad;
     let lines = lines(ocr);
     let mut found: Vec<Found> = lines
         .iter()
         .enumerate()
-        .flat_map(|(i, l)| detect_line(i, &l.text, env))
+        .flat_map(|(i, l)| detect_line(i, &l.text, rules))
         .collect();
-    let codes = security_codes(&lines, &found);
-    found.extend(codes);
+    if rules.on(Category::SecurityCode) {
+        let codes = security_codes(&lines, &found);
+        found.extend(codes);
+    }
     // The surer, longer match first, so merges keep its label.
     found.sort_by_key(|f| {
         (
@@ -459,9 +678,27 @@ pub fn propose(ocr: &OcrResult, env: &Env, pad: f64) -> Vec<Proposal> {
         )
     });
     // Each proposal, with the unpadded box it merges by.
-    let mut out: Vec<(Proposal, PixelRect)> = private_keys(&lines)
-        .into_iter()
-        .map(|r| {
+    let keys = if rules.on(Category::PrivateKey) {
+        private_keys(&lines)
+    } else {
+        vec![]
+    };
+    // Codes, whole: what one decodes to says what it is, in the label.
+    let codes = ocr.codes.iter().filter(|_| rules.codes).map(|c| {
+        let what = detect_line(0, &c.text, rules)
+            .first()
+            .map(|f| format!("{} ", f.category.name()))
+            .unwrap_or_default();
+        let p = Proposal {
+            rect: c.bbox,
+            category: Category::Code,
+            label: format!("{what}{}", elide(&c.text)),
+            ticked: true,
+        };
+        (p, c.bbox)
+    });
+    let mut out: Vec<(Proposal, PixelRect)> = codes
+        .chain(keys.into_iter().map(|r| {
             let p = Proposal {
                 rect: r,
                 category: Category::PrivateKey,
@@ -469,7 +706,7 @@ pub fn propose(ocr: &OcrResult, env: &Env, pad: f64) -> Vec<Proposal> {
                 ticked: true,
             };
             (p, r)
-        })
+        }))
         .collect();
     for f in found {
         let l = &lines[f.line];
@@ -532,6 +769,7 @@ mod tests {
         OcrResult {
             text: String::new(),
             words,
+            codes: vec![],
         }
     }
 
@@ -543,8 +781,20 @@ mod tests {
         }
     }
 
+    fn rules(pad: f64) -> Rules {
+        Rules {
+            env: env(),
+            pad,
+            ..Rules::default()
+        }
+    }
+
     fn cats(lines: &[&[&str]]) -> Vec<(&'static str, bool)> {
-        propose(&ocr(lines), &env(), 0.0)
+        cats_with(lines, &rules(0.0))
+    }
+
+    fn cats_with(lines: &[&[&str]], rules: &Rules) -> Vec<(&'static str, bool)> {
+        propose(&ocr(lines), rules)
             .iter()
             .map(|p| (p.category.name(), p.ticked))
             .collect()
@@ -585,8 +835,7 @@ mod tests {
     fn a_url_secret_censors_only_its_value() {
         let p = propose(
             &ocr(&[&["https://x.io/a?id=7&token=abc123def"]]),
-            &env(),
-            0.0,
+            &rules(0.0),
         );
         assert_eq!(p.len(), 1);
         assert_eq!(p[0].category, Category::UrlSecret);
@@ -610,8 +859,7 @@ mod tests {
                 &["-----END", "OPENSSH", "PRIVATE", "KEY-----"],
                 &["after"],
             ]),
-            &env(),
-            0.0,
+            &rules(0.0),
         );
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!(p[0].rect.y, 0);
@@ -623,8 +871,7 @@ mod tests {
         // Lines 20px apart, 12px high: padded by 6, their boxes would meet.
         let p = propose(
             &ocr(&[&["/home/adi/a.txt"], &["/home/adi/b.txt"]]),
-            &env(),
-            0.5,
+            &rules(0.5),
         );
         assert_eq!(p.len(), 2, "{p:?}");
     }
@@ -691,7 +938,107 @@ mod tests {
 
     #[test]
     fn padding_grows_by_the_line_height() {
-        let p = propose(&ocr(&[&["adi@example.org"]]), &env(), 0.2);
+        let p = propose(&ocr(&[&["adi@example.org"]]), &rules(0.2));
         assert_eq!(p[0].rect, PixelRect::new(-3, -3, 156, 18));
+    }
+    #[test]
+    fn an_email_ocr_misread_is_proposed_unticked() {
+        assert_eq!(cats(&[&["adi©example.org"]]), [("email", false)]);
+        assert_eq!(cats(&[&["adi", "@", "example.org"]]), [("email", false)]);
+        assert_eq!(cats(&[&["adi@example,org"]]), [("email", false)]);
+    }
+
+    #[test]
+    fn phone_and_uuid_are_off_until_asked_for() {
+        let uuid = ["123e4567-e89b-12d3-a456-426614174000"];
+        let phone: &[&str] = &["call", "+44", "20", "7946", "0958"];
+        assert_eq!(cats(&[phone]), []);
+        // Random-looking, but not enough to be sure.
+        assert_eq!(cats(&[&uuid]), [("entropy", false)]);
+        let mut on = rules(0.0);
+        on.detectors.extend([Category::Phone, Category::Uuid]);
+        assert_eq!(cats_with(&[phone], &on), [("phone", true)]);
+        assert_eq!(cats_with(&[&uuid], &on), [("uuid", true)]);
+        // Bare digit groups are only maybe a phone; a date isn't one.
+        assert_eq!(
+            cats_with(&[&["0207", "946", "0958"]], &on),
+            [("phone", false)]
+        );
+        assert_eq!(cats_with(&[&["on", "2026-10-05"]], &on), []);
+    }
+
+    #[test]
+    fn a_detector_turned_off_finds_nothing() {
+        let mut r = rules(0.0);
+        r.detectors.retain(|c| *c != Category::Email);
+        assert_eq!(cats_with(&[&["adi@example.org"]], &r), []);
+    }
+
+    #[test]
+    fn literals_and_domains_match_through_ocr_confusions() {
+        let r = Rules {
+            literal: vec!["Acme Corp".into()],
+            domains: vec!["corp.example.com".into()],
+            ..rules(0.0)
+        };
+        // "rn" for "m", any case.
+        assert_eq!(
+            cats_with(&[&["at", "ACRNE", "corp", "today"]], &r),
+            [("literal", true)]
+        );
+        let p = propose(&ocr(&[&["see", "wiki.corp.exarnple.com"]]), &r);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].category, Category::Host);
+        assert_eq!(p[0].rect.x, 40); // the subdomain included
+        assert_eq!(p[0].rect.w, 22 * 10);
+    }
+
+    #[test]
+    fn a_custom_regex_is_its_own_category() {
+        let r = Rules {
+            custom: vec![Custom {
+                name: "ticket",
+                regex: Regex::new(r"JIRA-\d+").unwrap(),
+            }],
+            ..rules(0.0)
+        };
+        assert_eq!(
+            cats_with(&[&["fixes", "JIRA-1234"]], &r),
+            [("ticket", true)]
+        );
+    }
+
+    #[test]
+    fn detector_names_round_trip() {
+        for c in DETECTORS {
+            assert_eq!(Category::from_name(c.name()), Some(*c));
+        }
+        assert_eq!(Category::from_name("codes"), None);
+    }
+
+    #[test]
+    fn codes_are_proposed_whole_and_labelled_by_what_they_hold() {
+        let mut o = ocr(&[&["scan", "me"]]);
+        o.codes = vec![
+            crate::ocr::OcrCode {
+                text: "https://x.io/?token=abc123".into(),
+                bbox: PixelRect::new(100, 40, 80, 80),
+            },
+            crate::ocr::OcrCode {
+                text: "4006381333931".into(),
+                bbox: PixelRect::new(300, 40, 90, 50),
+            },
+        ];
+        let p = propose(&o, &rules(0.2));
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert!(p.iter().all(|p| p.category == Category::Code && p.ticked));
+        assert_eq!(p[0].rect, PixelRect::new(100, 40, 80, 80)); // unpadded
+        assert_eq!(p[0].label, "url-secret http…");
+        assert_eq!(p[1].label, "4006…");
+        let off = Rules {
+            codes: false,
+            ..rules(0.2)
+        };
+        assert!(propose(&o, &off).is_empty());
     }
 }

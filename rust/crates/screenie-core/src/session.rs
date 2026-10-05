@@ -154,8 +154,9 @@ pub enum Mode {
 /// An analysis to run off the input path (OCR, later edge detection).
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobKind {
-    /// OCR with word boxes over a rect of the committed picture.
-    Ocr { rect: PixelRect },
+    /// OCR with word boxes over a rect of the committed picture, and with
+    /// `codes`, the QR codes and barcodes in it too.
+    Ocr { rect: PixelRect, codes: bool },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -320,7 +321,7 @@ pub struct Session {
     /// Measure's scale: kept between visits, and from `--measure-scale`.
     pub(crate) measure_scale: Option<crate::units::Scale>,
     next_job: u64,
-    pub(crate) redact_env: crate::redact::Env,
+    pub(crate) redact_rules: crate::redact::Rules,
     /// Suggestions accepted as censors: category and where (for --json).
     pub(crate) redacted: Vec<(crate::model::OpId, &'static str, LogicalRect)>,
     stack: Vec<Mode>,
@@ -378,7 +379,7 @@ impl Session {
             box_locked: false,
             measure_scale: None,
             next_job: 1,
-            redact_env: crate::redact::Env::default(),
+            redact_rules: crate::redact::Rules::default(),
             redacted: Vec::new(),
             stack: Vec::new(),
             pending: None,
@@ -421,9 +422,10 @@ impl Session {
         self.measure_view()
     }
 
-    /// What auto-redact knows of this machine (user, home, hostname).
-    pub fn set_redact_env(&mut self, env: crate::redact::Env) {
-        self.redact_env = env;
+    /// What auto-redact looks for and makes (`[redact]` config, and the
+    /// machine).
+    pub fn set_redact_rules(&mut self, rules: crate::redact::Rules) {
+        self.redact_rules = rules;
     }
 
     /// Suggestions accepted as censors and still shown: category and rect.
