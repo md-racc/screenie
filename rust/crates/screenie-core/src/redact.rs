@@ -25,6 +25,8 @@ pub enum Category {
     Card,
     /// A card's CVV/CVC/CID: 3-4 digits after a keyword, or near a card.
     SecurityCode,
+    /// A card's expiry date: `MM/YY` after a keyword, or near a card.
+    CardExpiry,
     Iban,
     HomePath,
     Host,
@@ -51,6 +53,7 @@ pub const DETECTORS: &[Category] = &[
     Category::UrlSecret,
     Category::Card,
     Category::SecurityCode,
+    Category::CardExpiry,
     Category::Iban,
     Category::HomePath,
     Category::Host,
@@ -70,6 +73,7 @@ impl Category {
             Category::UrlSecret => "url-secret",
             Category::Card => "card",
             Category::SecurityCode => "security-code",
+            Category::CardExpiry => "card-expiry",
             Category::Iban => "iban",
             Category::HomePath => "home-path",
             Category::Host => "host",
@@ -308,11 +312,9 @@ const CODE_NEAR: i32 = 4;
 /// A keyword this many characters before a code, or less, labels it.
 const CODE_AFTER: usize = 6;
 
-/// Security codes, which only mean something next to a card or a label:
-/// isolated 3-4 digit numbers after a keyword on their line, or within
-/// `CODE_NEAR` line heights of a card that was found.
-fn security_codes(lines: &[Line], found: &[Found]) -> Vec<Found> {
-    let cards: Vec<(PixelRect, i32)> = found
+/// The cards found, each with its line's height.
+fn cards(lines: &[Line], found: &[Found]) -> Vec<(PixelRect, i32)> {
+    found
         .iter()
         .filter(|f| f.category == Category::Card)
         .filter_map(|f| {
@@ -320,7 +322,66 @@ fn security_codes(lines: &[Line], found: &[Found]) -> Vec<Found> {
             let r = union(&l.boxes[f.start..f.end.min(l.boxes.len())])?;
             Some((r, l.boxes.iter().map(|b| b.h).max().unwrap_or(r.h)))
         })
-        .collect();
+        .collect()
+}
+
+/// Whether `r` is within `CODE_NEAR` line heights of one of `cards` (and
+/// not far off to the side).
+fn near_card(r: PixelRect, cards: &[(PixelRect, i32)]) -> bool {
+    cards.iter().any(|&(card, lh)| {
+        let gap_y = (r.y - (card.y + card.h)).max(card.y - (r.y + r.h)).max(0);
+        let gap_x = (r.x - (card.x + card.w)).max(card.x - (r.x + r.w)).max(0);
+        gap_y <= CODE_NEAR * lh && gap_x <= card.w.max(10 * lh)
+    })
+}
+
+/// `MM/YY` or `MM/YYYY`, a real month, not part of a longer date or number.
+static EXPIRY: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?:^|[^0-9/])((?:0?[1-9]|1[0-2]) ?/ ?(?:[0-9]{4}|[0-9]{2}))(?:$|[^0-9/])")
+});
+/// What an expiry date is labelled. OCR runs labels into dates
+/// (`Thru:12/30`, `EXP12/27`).
+static EXPIRY_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    re(r"(?i)\b(?:exp(?:iry|ires|iration|\.)?|valid\s*(?:thru|through|until)|good\s*thru)")
+});
+
+/// Card expiry dates, which only mean something next to a card or a label
+/// (dates are everywhere): `MM/YY` after a keyword on its line, or within
+/// `CODE_NEAR` line heights of a card that was found.
+fn card_expiries(lines: &[Line], found: &[Found]) -> Vec<Found> {
+    let cards = cards(lines, found);
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let words: Vec<usize> = EXPIRY_WORD
+            .find_iter(&l.text)
+            .map(|m| chars(&l.text, m.end()))
+            .collect();
+        for m in EXPIRY.captures_iter(&l.text).filter_map(|c| c.get(1)) {
+            let (start, end) = (chars(&l.text, m.start()), chars(&l.text, m.end()));
+            let labelled = words
+                .iter()
+                .any(|&w_end| w_end <= start && start - w_end <= CODE_AFTER + 2);
+            let near = union(&l.boxes[start..end.min(l.boxes.len())])
+                .is_some_and(|r| near_card(r, &cards));
+            if labelled || near {
+                out.push(Found {
+                    line: i,
+                    start,
+                    end,
+                    category: Category::CardExpiry,
+                    sure: true,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Security codes, which only mean something next to a card or a label:
+/// isolated 3-4 digit numbers after a keyword on their line, or within
+/// `CODE_NEAR` line heights of a card that was found.
+fn security_codes(lines: &[Line], found: &[Found]) -> Vec<Found> {
+    let cards = cards(lines, found);
     let mut out = Vec::new();
     for (i, l) in lines.iter().enumerate() {
         let words: Vec<(usize, usize)> = CODE_WORD
@@ -338,14 +399,8 @@ fn security_codes(lines: &[Line], found: &[Found]) -> Vec<Found> {
             let labelled = words
                 .iter()
                 .any(|&(_, w_end)| w_end <= start + 1 && start + 1 - w_end <= CODE_AFTER + 1);
-            let near_card = union(&l.boxes[start..end]).is_some_and(|r| {
-                cards.iter().any(|&(card, lh)| {
-                    let gap_y = (r.y - (card.y + card.h)).max(card.y - (r.y + r.h)).max(0);
-                    let gap_x = (r.x - (card.x + card.w)).max(card.x - (r.x + r.w)).max(0);
-                    gap_y <= CODE_NEAR * lh && gap_x <= card.w.max(10 * lh)
-                })
-            });
-            if labelled || near_card {
+            let near = union(&l.boxes[start..end]).is_some_and(|r| near_card(r, &cards));
+            if labelled || near {
                 out.push(Found {
                     line: i,
                     start,
@@ -666,10 +721,19 @@ pub fn propose(ocr: &OcrResult, rules: &Rules) -> Vec<Proposal> {
         .enumerate()
         .flat_map(|(i, l)| detect_line(i, &l.text, rules))
         .collect();
-    if rules.on(Category::SecurityCode) {
-        let codes = security_codes(&lines, &found);
-        found.extend(codes);
-    }
+    // Both read the cards, so before either is added.
+    let codes = rules
+        .on(Category::SecurityCode)
+        .then(|| security_codes(&lines, &found));
+    let expiries = rules
+        .on(Category::CardExpiry)
+        .then(|| card_expiries(&lines, &found));
+    found.extend(
+        codes
+            .into_iter()
+            .flatten()
+            .chain(expiries.into_iter().flatten()),
+    );
     // The surer, longer match first, so merges keep its label.
     found.sort_by_key(|f| {
         (
@@ -879,9 +943,16 @@ mod tests {
     #[test]
     fn a_security_code_near_a_card_is_found_and_the_card_groups_are_not() {
         let card = ["4111", "1111", "1111", "1111"];
-        // Below the card, after a keyword, with an expiry date that isn't one.
+        // Below the card, after a keyword; the expiry date is its own.
         let got = cats(&[&card, &["Exp", "12/27", "CVV", "123"]]);
-        assert_eq!(got, [("card", true), ("security-code", true)]);
+        assert_eq!(
+            got,
+            [
+                ("card", true),
+                ("card-expiry", true),
+                ("security-code", true)
+            ]
+        );
         // Below the card, no keyword: an isolated 3-digit number nearby.
         let got = cats(&[&card, &["Name", "on", "card"], &["737"]]);
         assert_eq!(got, [("card", true), ("security-code", true)]);
@@ -895,7 +966,14 @@ mod tests {
         // What tesseract made of "CVV: 123" on a card.
         let card = ["4111", "1111", "1111", "1111"];
         let got = cats(&[&card, &["cvv:123", "Valid", "Thru:", "12/30"]]);
-        assert_eq!(got, [("card", true), ("security-code", true)]);
+        assert_eq!(
+            got,
+            [
+                ("card", true),
+                ("card-expiry", true),
+                ("security-code", true)
+            ]
+        );
         assert_eq!(cats(&[&["CVV123"]]), [("security-code", true)]);
         assert_eq!(cats(&[&["CVC#123"]]), [("security-code", true)]);
         // A time still isn't one, nor a code with a colon after it.
@@ -1040,5 +1118,37 @@ mod tests {
             ..rules(0.2)
         };
         assert!(propose(&o, &off).is_empty());
+    }
+
+    #[test]
+    fn a_card_expiry_is_found_by_its_label_or_its_card() {
+        let card = ["4111", "1111", "1111", "1111"];
+        // A label, with or without a card; OCR running it in.
+        assert_eq!(cats(&[&["Expires", "09/2029"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["EXP12/27"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Good", "thru", "1/26"]]), [("card-expiry", true)]);
+        // Near a card, no label.
+        assert_eq!(
+            cats(&[&card, &["MR", "J", "Q", "PUBLIC", "03/28"]]),
+            [("card", true), ("card-expiry", true)]
+        );
+        // The box covers only the date, not its label.
+        let p = propose(&ocr(&[&["exp", "05/31"]]), &rules(0.0));
+        assert_eq!((p.len(), p[0].rect.x), (1, 40));
+    }
+
+    #[test]
+    fn other_dates_are_left_alone() {
+        // No card and no label: dates are everywhere.
+        assert_eq!(cats(&[&["due", "12/27"]]), []);
+        // Not a month, nor part of a longer date, even by a card.
+        let card: &[&str] = &["4111", "1111", "1111", "1111"];
+        assert_eq!(cats(&[card, &["13/27"]]), [("card", true)]);
+        assert_eq!(cats(&[card, &["12/27/2024"]]), [("card", true)]);
+        assert_eq!(cats(&[card, &["2024/12/27"]]), [("card", true)]);
+        // Turned off in the config: none.
+        let mut r = rules(0.0);
+        r.detectors.retain(|c| *c != Category::CardExpiry);
+        assert_eq!(cats_with(&[&["exp", "12/27"]], &r), []);
     }
 }

@@ -8,7 +8,7 @@ The core idea is simple: learn how **Select** works, and the rest of the picker 
 
 ## Status
 
-screenie is a Rust program, used daily on Hyprland. It began as a Python prototype for settling the UX, which is now frozen and kept as a fallback.
+screenie is a Rust program, used daily on Hyprland. It began as a Python prototype for settling the UX, which is now frozen and kept only as a historical reference (no longer a fallback, since 2026-10-08).
 
 This README is the authoritative specification for picker behavior. When implementation and README disagree, the README wins.
 
@@ -88,6 +88,7 @@ Held directions repeat with acceleration and combine, so holding `k` and `l` mov
 | `Ctrl+Shift+hjkl` | Slide or jump the whole box to the next meaningful boundary |
 | `Alt+hjkl`        | Halve or scale toward that side                             |
 | `Alt+Shift+hjkl`  | Double or scale outward toward that side                    |
+| `Ctrl+Alt+hjkl`   | Jump to the next edge in the picture (boxes)                |
 
 The target of a jump depends on the mode.
 
@@ -297,6 +298,7 @@ The cursor may cross the anchor naturally.
 | `o` / `Space`       | Move the cursor to the opposite corner               |
 | `O` / `Shift+Space` | Move the cursor to the sideways corner               |
 | `w b } {`           | Next nearby window or monitor edge                   |
+| `Ctrl+Alt+hjkl`     | Next edge in the picture: the cursor's edge moves to the next boundary that way (also in Censor and Filter) |
 | `0 $ g G`           | Far left / right / top / bottom                      |
 | `c`                 | Centre mode: resize symmetrically around the centre  |
 | `+` / `-`           | Change selection scope                               |
@@ -345,6 +347,13 @@ The history contains the last ten accepted regions and keeps them associated wit
 
 Repeated `.` walks backward through the ring.
 
+
+The picture-edge jump treats the box's edge as a line between pixels: it
+looks from the pixel just ahead of it, along the cursor corner's row or
+column, and stops just before the first one that differs. So each press
+stops at a boundary (up to a thing, then past it), the same stops come
+back the other way, and it stays on the corner's monitor. With none that
+way, the box stays and the status says so.
 ---
 
 # Insert
@@ -804,8 +813,10 @@ undoes the acceptance. They need no special project representation.
 Detectors: email addresses; IPv4 and IPv6 addresses; MAC addresses;
 known token prefixes (`sk-`, `ghp_`, `glpat-`, `AKIA`, `xox?-`, JWTs);
 long random-looking strings; secret URL parameters (only the value is
-censored); card numbers (Luhn-checked) and their security codes (3-4 digits after
-CVV, CVC, CID or "security code", or on their own near a card number);
+censored); card numbers (Luhn-checked), their security codes (3-4 digits after
+CVV, CVC, CID or "security code", or on their own near a card number)
+and their expiry dates (`MM/YY` after "exp", "valid thru" and the like,
+or near a card number);
 IBANs (mod-97-checked); your home
 path; your hostname; private-key blocks (proposed whole); and QR codes
 and barcodes, whatever they hold (proposed whole, labelled by what their

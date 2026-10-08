@@ -109,7 +109,14 @@ impl Session {
             return t;
         }
         let mods = Some(self.input_mods());
-        match boxes::apply(&mut c.sel, &self.snap, &mut c.drag, intent, mods) {
+        let outcome = match intent {
+            Intent::PictureEdge(d) => {
+                self.picture_edge(&mut c.sel, d);
+                BoxOutcome::Done
+            }
+            _ => boxes::apply(&mut c.sel, &self.snap, &mut c.drag, intent, mods),
+        };
+        match outcome {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
                 c.sel.place_cursor(at); // the cursor corner, not the whole box

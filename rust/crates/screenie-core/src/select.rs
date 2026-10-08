@@ -1,7 +1,8 @@
 //! Select: the base mode. Edit the box, open tools, finish.
 
+use crate::anchor_cursor::AnchorCursor;
 use crate::boxes::{self, BoxOutcome, Drag};
-use crate::geometry::LogicalRect;
+use crate::geometry::{Axis, Dir, End, LogicalRect, PixelPoint, PixelRect};
 use crate::intent::Intent;
 use crate::session::{FinishedAction, Outcome, Session, Transition};
 
@@ -81,6 +82,61 @@ pub(crate) struct SelectState {
 }
 
 impl Session {
+    /// Ctrl+Alt+hjkl: move `sel`'s cursor edge that way to the next
+    /// boundary in the picture. The edge is a line between pixels: the
+    /// search starts at the pixel just ahead of it, and the edge stops just
+    /// before the first pixel that differs, so every stop is a boundary
+    /// (going right: up to a thing, then past it; and the same stops back).
+    /// It stays on the corner's monitor and in `sel`'s bounds.
+    pub(crate) fn picture_edge(&mut self, sel: &mut AnchorCursor, d: Dir) {
+        let corner = crate::session::corner_pixel(&self.pixels, sel);
+        let at = self.pixels.to_logical(corner);
+        let monitor = self
+            .layout
+            .monitors
+            .iter()
+            .find(|m| m.rect.contains(at))
+            .map_or(self.layout.bounds, |m| m.rect);
+        let (a, b) = (
+            self.pixels.to_pixels(monitor),
+            self.pixels.to_pixels(sel.bounds()),
+        );
+        let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+        let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
+        let bounds = PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
+        let axis = d.axis();
+        let forward = matches!(d, Dir::Right | Dir::Down);
+        // The edge's line, in pixel coordinates along the axis.
+        let (c, high) = match axis {
+            Axis::X => (corner.x, sel.cursor_end(Axis::X) == End::High),
+            Axis::Y => (corner.y, sel.cursor_end(Axis::Y) == End::High),
+        };
+        let line = if high { c + 1 } else { c };
+        let ahead = if forward { line } else { line - 1 };
+        let from = match axis {
+            Axis::X => PixelPoint::new(ahead, corner.y),
+            Axis::Y => PixelPoint::new(corner.x, ahead),
+        };
+        let found = self.find_edge(from, d, bounds);
+        let Some(e) = found else {
+            self.note = Some("no edge in the picture that way".into());
+            return;
+        };
+        let e = match axis {
+            Axis::X => e.x,
+            Axis::Y => e.y,
+        };
+        let to = if forward { e } else { e + 1 };
+        let p = self.pixels.from_device(f64::from(to), f64::from(to));
+        sel.cursor_to(
+            axis,
+            match axis {
+                Axis::X => p.x,
+                Axis::Y => p.y,
+            },
+        );
+    }
+
     /// Whether the box covers at least one output pixel each way.
     pub(crate) fn capturable(&self) -> bool {
         !self.pixels.to_pixels(self.sel.rect()).is_empty()
@@ -104,13 +160,22 @@ impl Session {
             self.remember();
         }
         let mods = Some(self.input_mods());
-        match boxes::apply(
-            &mut self.sel,
-            &self.snap,
-            &mut self.select.drag,
-            intent,
-            mods,
-        ) {
+        let outcome = match intent {
+            Intent::PictureEdge(d) => {
+                let mut sel = self.sel;
+                self.picture_edge(&mut sel, d);
+                self.sel = sel;
+                BoxOutcome::Done
+            }
+            _ => boxes::apply(
+                &mut self.sel,
+                &self.snap,
+                &mut self.select.drag,
+                intent,
+                mods,
+            ),
+        };
+        match outcome {
             BoxOutcome::Done => return Transition::Stay,
             BoxOutcome::Click(at) => {
                 // A click snaps to the window under the pointer, or the

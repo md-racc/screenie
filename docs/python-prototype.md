@@ -5,8 +5,9 @@ This is the reference implementation. It is **not** a design for Rust:
 the rewrite. This page is for running, testing and comparing against the
 prototype during the port.
 
-The prototype is frozen: it gets no new features and no CLI growth. It is
-still in daily use until the Rust port reaches parity.
+The prototype is frozen: it gets no new features and no CLI growth. It
+was in daily use until the Rust cutover (2026-10-02) and the fallback
+until 2026-10-08; now it's only a reference.
 
 ## Running
 
@@ -24,9 +25,10 @@ bin/screenie [--save-dir DIR] [--window] [--lang LANG]
 `bin/screenie` runs the package straight from the checkout. `pip install
 -e .` also provides a `screenie` script.
 
-The user's Hyprland Print binds call
+The user's Hyprland Print binds called
 `bin/screenie` (with `--window`, and with
-`--save-dir ~/Pictures/Screenshots`). Pins are swayimg windows
+`--save-dir ~/Pictures/Screenshots`) until the cutover; they run
+the Rust binary now. Pins are swayimg windows
 with app id `screenie-pin`, which a Hyprland window rule pins.
 
 **Dependencies (Arch):**

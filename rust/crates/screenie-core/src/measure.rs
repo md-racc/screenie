@@ -1649,7 +1649,12 @@ impl Session {
         r
     }
 
-    fn find_edge(&mut self, from: PixelPoint, d: Dir, bounds: PixelRect) -> Option<PixelPoint> {
+    pub(crate) fn find_edge(
+        &mut self,
+        from: PixelPoint,
+        d: Dir,
+        bounds: PixelRect,
+    ) -> Option<PixelPoint> {
         let mut f = self.edge_finder.take()?;
         let r = f.edge(self, from, d, bounds);
         self.edge_finder = Some(f);

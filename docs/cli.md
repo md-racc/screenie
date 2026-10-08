@@ -28,7 +28,7 @@ The remaining open questions are at the end.
 ```
 screenie [pick] [--from SOURCE] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
 screenie shot [REGION] [--from SOURCE] [CAPTURE OPTIONS] [OUTPUT OPTIONS]
-screenie edit FILE|last[:N]|- [PICK OPTIONS] [OUTPUT OPTIONS]
+screenie edit [FILE|clipboard|recent|last[:N]|-] [PICK OPTIONS] [OUTPUT OPTIONS]
 screenie history [-n N] [--json]
 screenie pin [FILE|last[:N]|-] [--at X,Y]
 screenie pin list [--json]
@@ -57,9 +57,11 @@ Global options: `-p, --profile NAME` (repeatable), `--config PATH`,
   `shot active` replaces the prototype's `--window`, and `shot --from last`
   delivers the last shot again.
 
-`edit FILE|last[:N]|-`
-: The picker over an existing image, for annotating or censoring an old
-  shot. This is `pick --from … --region all`.
+`edit [FILE|clipboard|recent|last[:N]|-]`
+: The picker over an existing image, for annotating, censoring, OCR or
+  pinning an old shot. This is `pick --from … --region all`. With no
+  argument, `recent`: the most recent image (the clipboard's, else the
+  last shot), which replaces textgrab (`SUPER+G`).
   - `last` (or `last:2` for the one before it) restores the shot's project
     (see FILES), so its layers are still editable: a censor can be moved,
     and a filter deleted.
@@ -101,6 +103,8 @@ usage error (exit 2).
 | `screen` | the frozen screen (the default) |
 | `FILE` | an image file (PNG, JPEG, WebP, PPM) |
 | `last`, `last:N` | a past shot, with its project (layers, layout) |
+| `clipboard` | the image on the clipboard; a screenie shot there (its copies say which, as `application/x-screenie-shot`) reopens with its project, like `last` |
+| `recent` | the clipboard's image if it holds one, else `last` |
 | `-` | an image on stdin |
 
 `--region REGION` (and `shot`'s positional REGION)

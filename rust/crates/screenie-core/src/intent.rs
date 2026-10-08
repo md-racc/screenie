@@ -98,6 +98,9 @@ pub enum Intent {
     EdgeJump(Dir),
     /// `0 $ g G`: the far edge that way.
     FarEdge(Dir),
+    /// Ctrl+Alt+hjkl: the cursor corner to the next edge in the picture
+    /// that way (the host finds it).
+    PictureEdge(Dir),
     /// `c`: centre mode.
     ToggleCentre,
 

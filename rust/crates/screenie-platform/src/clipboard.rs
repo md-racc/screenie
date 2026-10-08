@@ -5,9 +5,9 @@
 //! until something else is copied (as wl-copy does). The parent hands it
 //! the data on stdin and waits until it has taken the selection.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
@@ -17,6 +17,62 @@ use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
 pub struct Offer {
     pub mime: String,
     pub data: Vec<u8>,
+}
+
+/// What screenie's own shots also offer: the shot's path, so opening the
+/// clipboard reopens the shot (its layers too), not just its pixels.
+pub const SHOT_MIME: &str = "application/x-screenie-shot";
+
+/// The image types read off the clipboard, in order of preference (the
+/// ones screenie decodes).
+const IMAGE_MIMES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/x-portable-pixmap",
+];
+
+/// An image on the clipboard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pasted {
+    /// One of screenie's shots, still in the runtime directory.
+    Shot(PathBuf),
+    /// Any other image, encoded.
+    Image(Vec<u8>),
+}
+
+/// The image on the clipboard, if it holds one.
+pub fn paste_image() -> Result<Option<Pasted>, String> {
+    use wl_clipboard_rs::paste::{self, ClipboardType, Error, MimeType, Seat};
+    let types = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(t) => t,
+        Err(Error::ClipboardEmpty | Error::NoMimeType) => return Ok(None),
+        Err(e) => return Err(format!("the clipboard: {e}")),
+    };
+    let read = |mime: &str| -> Result<Vec<u8>, String> {
+        let (mut pipe, _) = paste::get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific(mime),
+        )
+        .map_err(|e| format!("the clipboard: {e}"))?;
+        let mut out = Vec::new();
+        pipe.read_to_end(&mut out)
+            .map_err(|e| format!("the clipboard: {e}"))?;
+        Ok(out)
+    };
+    if types.contains(SHOT_MIME) {
+        let path = PathBuf::from(String::from_utf8_lossy(&read(SHOT_MIME)?).trim());
+        if path.is_file() {
+            return Ok(Some(Pasted::Shot(path)));
+        }
+    }
+    for mime in IMAGE_MIMES {
+        if types.contains(*mime) {
+            return Ok(Some(Pasted::Image(read(mime)?)));
+        }
+    }
+    Ok(None)
 }
 
 /// The hidden argument that makes the executable a clipboard server.

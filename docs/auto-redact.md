@@ -75,6 +75,7 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 | `url-secret` | secret-looking query params in URLs (`token=`, `key=`, `sig=`, `code=`) | URL parse, param names |
 | `card` | card numbers | digits plus a Luhn check |
 | `security-code` | a card's CVV/CVC/CID | 3-4 isolated digits after a keyword (`CVV`, `CVC`, `CID`, `CSC`, "security code"), or within 4 line heights of a found card |
+| `card-expiry` | a card's expiry date | `MM/YY` or `MM/YYYY` (a real month) after a keyword (`exp`, `expiry`, `expires`, `valid thru`, `good thru`), or within 4 line heights of a found card; never a lone date elsewhere |
 | `iban` | IBANs | the mod-97 check |
 | `phone` | phone numbers | 8-15 digits in groups, not a date; off by default (too many false positives); ticked only with `+` or brackets |
 | `uuid` | UUIDs | regex, off by default |
@@ -162,7 +163,8 @@ OCR-tolerant detectors are for recall.
 mode = "off"              # off | suggest | auto (the default for --redact)
 kind = "bar"              # bar | pixelate (10px blocks), for accepted suggestions
 detectors = ["email", "ip", "mac", "token", "entropy", "url-secret", "card",
-             "security-code", "iban", "home-path", "host", "private-key",
+             "security-code", "card-expiry", "iban", "home-path", "host",
+             "private-key",
              "codes"]         # the default; add "phone", "uuid"
 literal = ["my-hostname", "Acme Corp"]
 domains = ["corp.example.com"]

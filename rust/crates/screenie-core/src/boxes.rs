@@ -107,6 +107,7 @@ pub fn starts_change(intent: Intent) -> bool {
             | Scale(..)
             | EdgeJump(_)
             | FarEdge(_)
+            | PictureEdge(_)
             | Press(_)
     )
 }

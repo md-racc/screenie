@@ -26,6 +26,15 @@ pub const SELECT: &[&[Item]] = &[
             ],
         ),
         (
+            "picture edges",
+            &[
+                Intent::PictureEdge(Dir::Right),
+                Intent::PictureEdge(Dir::Left),
+                Intent::PictureEdge(Dir::Down),
+                Intent::PictureEdge(Dir::Up),
+            ],
+        ),
+        (
             "far",
             &[
                 Intent::FarEdge(Dir::Left),
@@ -478,7 +487,7 @@ mod tests {
         assert_eq!(
             render(&keymap::SELECT, SELECT),
             [
-                "o/Space O/S-Space corner  w b } { edges  0 $ g G far  c centre  + - scope  . last  u undo",
+                "o/Space O/S-Space corner  w b } { edges  C-A-l C-A-h C-A-j C-A-k picture edges  0 $ g G far  c centre  + - scope  . last  u undo",
                 "x censor  a annotate  f filter  1-9 layers",
                 "i insert  m measure  z loupe  e enhance",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",

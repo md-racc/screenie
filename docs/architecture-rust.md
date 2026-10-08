@@ -65,7 +65,7 @@ The Python prototype remains available during the port for:
 - behavioral comparison;
 - test reference;
 - UX validation;
-- fallback daily use.
+- fallback daily use (until 2026-10-08, when it was retired).
 
 ---
 
@@ -2103,7 +2103,8 @@ Acceptance:
 Rust picker can replace Python for basic region screenshots
 ```
 
-Do not remove Python fallback yet.
+Do not remove Python fallback yet. (It was retired on 2026-10-08, after
+milestone 11.)
 
 ---
 

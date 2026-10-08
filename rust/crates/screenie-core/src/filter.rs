@@ -167,7 +167,14 @@ impl Session {
             return t;
         }
         let mods = Some(self.input_mods());
-        match boxes::apply(&mut f.sel, &self.snap, &mut f.drag, intent, mods) {
+        let outcome = match intent {
+            Intent::PictureEdge(d) => {
+                self.picture_edge(&mut f.sel, d);
+                BoxOutcome::Done
+            }
+            _ => boxes::apply(&mut f.sel, &self.snap, &mut f.drag, intent, mods),
+        };
+        match outcome {
             BoxOutcome::NotMine => {}
             outcome => {
                 if let BoxOutcome::Click(at) = outcome {

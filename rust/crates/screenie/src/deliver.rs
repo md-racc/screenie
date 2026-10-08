@@ -139,6 +139,12 @@ pub fn image(
                 data: png,
             });
         }
+        if let Some(shot) = &d.shot {
+            offers.push(Offer {
+                mime: clipboard::SHOT_MIME.into(),
+                data: shot.display().to_string().into_bytes(),
+            });
+        }
         if let (Some(p), false) = (&d.saved, out.no_copy_uri) {
             offers.push(Offer {
                 mime: "text/uri-list".into(),

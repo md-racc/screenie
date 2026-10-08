@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use screenie_core::geometry::PixelPoint;
+use screenie_core::geometry::{PixelPoint, PixelRect};
 use screenie_core::input::{DELAY, RAMP};
 use screenie_core::keys::Mods;
 use screenie_core::session::{Button, FinishedAction, Outcome, RawEvent, Session};
@@ -519,5 +519,82 @@ fn a_palette_click_does_what_its_key_does_in_every_mode() {
                 "{mode:?}: {text}"
             );
         }
+    }
+}
+
+// --- Ctrl+Alt+hjkl: the cursor corner to edges in the picture ---------------------
+
+/// What a finder was asked: from where, within what.
+type Asked = std::rc::Rc<std::cell::RefCell<Vec<(PixelPoint, PixelRect)>>>;
+
+/// Edges 50px from wherever it's asked, any way but up; what it was asked.
+struct Every50(Asked);
+
+impl screenie_core::measure::EdgeFinder for Every50 {
+    fn edge(
+        &mut self,
+        _: &Session,
+        from: PixelPoint,
+        d: screenie_core::geometry::Dir,
+        bounds: PixelRect,
+    ) -> Option<PixelPoint> {
+        self.0.borrow_mut().push((from, bounds));
+        let (dx, dy) = d.vec();
+        (dy >= 0.0).then(|| PixelPoint::new(from.x + 50 * dx as i32, from.y + 50 * dy as i32))
+    }
+}
+
+fn with_edges() -> (Session, Asked) {
+    let asked = std::rc::Rc::default();
+    let mut s = boxed();
+    s.set_edge_finder(Box::new(Every50(std::rc::Rc::clone(&asked))));
+    (s, asked)
+}
+
+#[test]
+fn ctrl_alt_hjkl_takes_the_cursor_corner_to_the_next_picture_edge() {
+    let (mut s, asked) = with_edges();
+    s.keys("<C-A-l>");
+    // From the pixel just ahead of the edge, within its monitor; the edge
+    // stops just before the change.
+    assert_eq!(
+        asked.borrow()[0],
+        (PixelPoint::new(500, 399), PixelRect::new(0, 0, 1920, 1080))
+    );
+    assert_eq!(s.rect(), r(100.0, 100.0, 450.0, 300.0));
+    // Again: on from there.
+    s.keys("<C-A-l>");
+    assert_eq!(asked.borrow()[1].0, PixelPoint::new(550, 399));
+    assert_eq!(s.rect(), r(100.0, 100.0, 500.0, 300.0));
+    // Back the other way, and down.
+    s.keys("<C-A-h> <C-A-j>");
+    assert_eq!(s.rect(), r(100.0, 100.0, 450.0, 350.0));
+    // One undo step each.
+    s.keys("u");
+    assert_eq!(s.rect(), r(100.0, 100.0, 450.0, 300.0));
+}
+
+#[test]
+fn with_no_edge_that_way_the_box_stays_and_says_so() {
+    let (mut s, _) = with_edges();
+    s.keys("<C-A-k>");
+    assert_eq!(s.rect(), r(100.0, 100.0, 400.0, 300.0));
+    assert!(s.status().contains("no edge"), "{}", s.status());
+}
+
+#[test]
+fn the_low_corner_lands_on_the_edge_too() {
+    let (mut s, asked) = with_edges();
+    s.keys("o <C-A-h>"); // the cursor to the top-left; then left
+    assert_eq!(asked.borrow()[0].0, PixelPoint::new(99, 100));
+    assert_eq!(s.rect(), r(50.0, 100.0, 450.0, 300.0));
+}
+
+#[test]
+fn censor_and_filter_boxes_jump_to_picture_edges_too() {
+    for tool in ["x", "f"] {
+        let (mut s, asked) = with_edges();
+        s.keys(&format!("{tool} <C-A-h>"));
+        assert_eq!(asked.borrow().len(), 1, "{tool}");
     }
 }

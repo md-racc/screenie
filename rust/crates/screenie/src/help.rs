@@ -17,7 +17,10 @@ pub const VERBS: &[&str] = &[
 /// Every long option, and the values it completes to (empty: a free
 /// value; `None`: a flag).
 pub const OPTIONS: &[(&str, Option<&[&str]>)] = &[
-    ("--from", Some(&["screen", "-", "last"])),
+    (
+        "--from",
+        Some(&["screen", "-", "clipboard", "recent", "last"]),
+    ),
     (
         "--region",
         Some(&["all", "monitor", "active", "last-region"]),

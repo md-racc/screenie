@@ -105,7 +105,7 @@ fn mods(shift: bool, ctrl: bool, alt: bool) -> Mods {
 }
 
 /// The modifier grammar on `hjkl` and the arrows, shared by every box.
-/// Ctrl+Alt is meaningless, so it's left unbound.
+/// Ctrl+Alt is left unbound here; the box modes give it to picture edges.
 pub fn direction_grammar() -> Keymap {
     let mut m = Keymap::default();
     for (c, arrow, d) in DIR_KEYS {
@@ -143,6 +143,12 @@ pub fn box_grammar() -> Keymap {
         .bind(Chord::ch('c'), Intent::ToggleCentre)
         .bind(Chord::ch('u'), Intent::Undo)
         .extend(&lens_keys());
+    // Ctrl jumps; with Alt, to what's in the picture rather than the layout.
+    let ctrl_alt = mods(false, true, true);
+    for (c, arrow, d) in DIR_KEYS {
+        m.bind(Chord::with(Key::Char(c), ctrl_alt), Intent::PictureEdge(d))
+            .alias(Chord::with(arrow, ctrl_alt), Intent::PictureEdge(d));
+    }
     m
 }
 
@@ -528,12 +534,22 @@ mod tests {
 
     #[test]
     fn a_meaningless_modifier_does_not_fall_through() {
-        let ctrl_alt = Mods {
+        let all = Mods {
             ctrl: true,
             alt: true,
-            shift: false,
+            shift: true,
         };
-        assert_eq!(SELECT.lookup(Chord::with(Key::Char('l'), ctrl_alt)), None);
+        assert_eq!(SELECT.lookup(Chord::with(Key::Char('l'), all)), None);
+        // Ctrl+Alt means something only in the box modes: picture edges.
+        let ctrl_alt = Mods {
+            shift: false,
+            ..all
+        };
+        assert_eq!(
+            SELECT.lookup(Chord::with(Key::Char('l'), ctrl_alt)),
+            Some(Intent::PictureEdge(Dir::Right))
+        );
+        assert_eq!(INSERT.lookup(Chord::with(Key::Char('l'), ctrl_alt)), None);
         assert_eq!(SELECT.lookup(Chord::with(Key::Char('o'), Mods::CTRL)), None);
         assert_eq!(SELECT.lookup(Chord::with(Key::Return, Mods::ALT)), None);
         assert_eq!(

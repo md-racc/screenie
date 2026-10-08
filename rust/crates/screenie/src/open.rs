@@ -16,6 +16,7 @@ pub const BACKGROUND: Rgb = Rgb(24, 24, 28);
 
 /// The bytes of an image source.
 pub fn read(source: &Source) -> Result<Vec<u8>, String> {
+    use screenie_platform::clipboard::Pasted;
     match source {
         Source::File(path) => std::fs::read(path).map_err(|e| format!("{}: {e}", path.display())),
         Source::Stdin => {
@@ -28,7 +29,17 @@ pub fn read(source: &Source) -> Result<Vec<u8>, String> {
             }
             Ok(bytes)
         }
-        Source::Screen | Source::Last(_) => Err("not an image source".into()),
+        Source::Clipboard => match screenie_platform::clipboard::paste_image()? {
+            // A shot's project, so it reopens with its layers.
+            Some(Pasted::Shot(shot)) => {
+                let project = crate::files::project_of(&shot);
+                std::fs::read(if project.is_file() { &project } else { &shot })
+                    .map_err(|e| format!("{}: {e}", shot.display()))
+            }
+            Some(Pasted::Image(bytes)) => Ok(bytes),
+            None => Err("no image on the clipboard".into()),
+        },
+        Source::Screen | Source::Last(_) | Source::Recent => Err("not an image source".into()),
     }
 }
 

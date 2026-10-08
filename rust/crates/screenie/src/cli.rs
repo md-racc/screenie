@@ -157,6 +157,11 @@ pub enum Source {
     Stdin,
     /// A past shot, with its project: `last` (1) or `last:N`.
     Last(usize),
+    /// The image on the clipboard (a screenie shot reopens with its
+    /// project).
+    Clipboard,
+    /// The most recent image: the clipboard's, else the last shot.
+    Recent,
 }
 
 impl Source {
@@ -164,6 +169,8 @@ impl Source {
         Ok(match s {
             "screen" => Source::Screen,
             "-" => Source::Stdin,
+            "clipboard" => Source::Clipboard,
+            "recent" => Source::Recent,
             _ if s == "last" || s.starts_with("last:") => Source::Last(parse_last(s)?),
             _ => Source::File(PathBuf::from(s)),
         })
@@ -172,7 +179,7 @@ impl Source {
     /// An image rather than the screen or a shot: only `all` and `X,Y WxH`
     /// (in its pixels) mean anything there.
     pub fn is_image(&self) -> bool {
-        matches!(self, Source::File(_) | Source::Stdin)
+        matches!(self, Source::File(_) | Source::Stdin | Source::Clipboard)
     }
 }
 
@@ -222,7 +229,7 @@ pub struct Shot {
 pub enum Command {
     Pick(Pick),
     Shot(Shot),
-    /// `edit FILE|-|last[:N]`: the picker over an image, or a past shot's
+    /// `edit [FILE|-|clipboard|recent|last[:N]]`: the picker over an image, or a past shot's
     /// project (`pick --from SOURCE --region all`).
     Edit {
         source: Source,
@@ -263,7 +270,7 @@ pub enum Command {
 pub const USAGE: &str = "\
 usage: screenie [pick] [--from SOURCE] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie shot [REGION] [OUTPUT OPTIONS]
-       screenie edit FILE|-|last[:N] [PICK OPTIONS] [OUTPUT OPTIONS]
+       screenie edit [FILE|-|clipboard|recent|last[:N]] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
        screenie help [keys|regions|config]
        screenie completions bash|zsh|fish
@@ -600,11 +607,11 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             let source = match positional.as_slice() {
                 [w] => Source::parse(w)?,
-                [] => return Err("edit what? (a file, -, last or last:N)".into()),
+                [] => Source::Recent,
                 _ => return Err("edit takes one image".into()),
             };
             if source == Source::Screen {
-                return Err("edit what? (a file, -, last or last:N)".into());
+                return Err("edit what? (a file, -, clipboard, recent, last or last:N)".into());
             }
             if source.is_image() {
                 check_image_region(&source, pick.region.as_deref())?;
@@ -947,7 +954,23 @@ mod tests {
                 ..
             }
         ));
-        assert!(cmd("edit").is_err());
+        // Bare, the most recent image; or the clipboard's, by name.
+        for (line, want) in [
+            ("edit", Source::Recent),
+            ("edit recent", Source::Recent),
+            ("edit clipboard", Source::Clipboard),
+        ] {
+            let Command::Edit { source, .. } = cmd(line).unwrap() else {
+                panic!("{line}")
+            };
+            assert_eq!(source, want, "{line}");
+        }
+        // The clipboard is an image: regions are its pixels.
+        assert!(cmd("edit clipboard --region monitor").is_err());
+        let Command::Pick(p) = cmd("--from clipboard").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.from, Some(Source::Clipboard));
         assert_eq!(
             cmd("history -n 5 --json").unwrap(),
             Command::History { n: 5, json: true }
