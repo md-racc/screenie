@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use screenie_core::geometry::PixelRect;
+use screenie_core::ocr::OcrCode;
 
 /// The code in a PNG, if any. `scratch` is a private directory for the
 /// temporary file zbarimg reads.
@@ -18,24 +19,25 @@ fn decode_with(bin: &str, png: &[u8], scratch: &Path) -> Result<Option<String>, 
     Ok(text.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()))
 }
 
-/// A code and where it is.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Code {
-    pub text: String,
-    /// Its outline's bounds, in the PNG's pixels.
-    pub bbox: PixelRect,
-}
-
-/// Every code in a PNG, with its outline.
-pub fn find(png: &[u8], scratch: &Path) -> Result<Vec<Code>, String> {
-    Ok(run("zbarimg", &["-q", "--xml"], png, scratch)?
+/// Every code in a PNG, with its outline's bounds. `map` turns the PNG's
+/// pixel boxes back into frame pixels, as in `ocr::recognize`.
+pub fn find(
+    png: &[u8],
+    scratch: &Path,
+    map: impl Fn(PixelRect) -> PixelRect,
+) -> Result<Vec<OcrCode>, String> {
+    let mut codes = run("zbarimg", &["-q", "--xml"], png, scratch)?
         .map(|xml| parse_xml(&xml))
-        .unwrap_or_default())
+        .unwrap_or_default();
+    for c in &mut codes {
+        c.bbox = map(c.bbox);
+    }
+    Ok(codes)
 }
 
 /// zbarimg's output, or `None` when it found nothing.
 fn run(bin: &str, args: &[&str], png: &[u8], scratch: &Path) -> Result<Option<String>, String> {
-    // Unique a call: scans on threads may overlap.
+    // A file per call: scans on threads may overlap.
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let path = scratch.join(format!("code-{}-{n}.png", std::process::id()));
@@ -57,8 +59,9 @@ fn run(bin: &str, args: &[&str], png: &[u8], scratch: &Path) -> Result<Option<St
     }
 }
 
-/// `--xml`'s symbols: each one's polygon (bounded) and data.
-fn parse_xml(xml: &str) -> Vec<Code> {
+/// `--xml`'s symbols: each one's polygon (bounded, in the PNG's pixels)
+/// and data.
+fn parse_xml(xml: &str) -> Vec<OcrCode> {
     xml.split("<symbol ")
         .skip(1)
         .filter_map(|sym| {
@@ -73,7 +76,7 @@ fn parse_xml(xml: &str) -> Vec<Code> {
                 return None;
             }
             let data = sym.split("<![CDATA[").nth(1)?.split("]]>").next()?;
-            Some(Code {
+            Some(OcrCode {
                 text: data.to_string(),
                 bbox: PixelRect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1),
             })

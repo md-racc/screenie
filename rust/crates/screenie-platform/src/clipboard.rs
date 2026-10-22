@@ -5,6 +5,7 @@
 //! until something else is copied (as wl-copy does). The parent hands it
 //! the data on stdin and waits until it has taken the selection.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -43,36 +44,67 @@ pub enum Pasted {
 
 /// The image on the clipboard, if it holds one.
 pub fn paste_image() -> Result<Option<Pasted>, String> {
-    use wl_clipboard_rs::paste::{self, ClipboardType, Error, MimeType, Seat};
-    let types = match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
-        Ok(t) => t,
-        Err(Error::ClipboardEmpty | Error::NoMimeType) => return Ok(None),
-        Err(e) => return Err(format!("the clipboard: {e}")),
+    let Some(types) = offered()? else {
+        return Ok(None);
     };
-    let read = |mime: &str| -> Result<Vec<u8>, String> {
-        let (mut pipe, _) = paste::get_contents(
-            ClipboardType::Regular,
-            Seat::Unspecified,
-            MimeType::Specific(mime),
-        )
+    let mut shot = None;
+    let mime = choose(&types, || {
+        shot = shot_path().ok().flatten();
+        shot.is_some()
+    });
+    match mime {
+        None => Ok(None),
+        Some(SHOT_MIME) => Ok(shot.map(Pasted::Shot)),
+        Some(mime) => Ok(Some(Pasted::Image(read(mime)?))),
+    }
+}
+
+/// Whether the clipboard holds an image `paste_image` would take, without
+/// transferring it.
+pub fn holds_image() -> bool {
+    offered()
+        .ok()
+        .flatten()
+        .is_some_and(|types| choose(&types, || shot_path().is_ok_and(|p| p.is_some())).is_some())
+}
+
+/// The types the clipboard offers; `None` when it's empty.
+fn offered() -> Result<Option<HashSet<String>>, String> {
+    use wl_clipboard_rs::paste::{self, ClipboardType, Error, Seat};
+    match paste::get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(t) => Ok(Some(t)),
+        Err(Error::ClipboardEmpty | Error::NoMimeType) => Ok(None),
+        Err(e) => Err(format!("the clipboard: {e}")),
+    }
+}
+
+/// Which type to paste: a shot, if one is offered and `shot_ok` (its file
+/// is still there), else the preferred image type.
+fn choose(types: &HashSet<String>, shot_ok: impl FnOnce() -> bool) -> Option<&'static str> {
+    if types.contains(SHOT_MIME) && shot_ok() {
+        return Some(SHOT_MIME);
+    }
+    IMAGE_MIMES.iter().copied().find(|m| types.contains(*m))
+}
+
+/// The offered shot's path, if its file is still there.
+fn shot_path() -> Result<Option<PathBuf>, String> {
+    let path = PathBuf::from(String::from_utf8_lossy(&read(SHOT_MIME)?).trim());
+    Ok(path.is_file().then_some(path))
+}
+
+fn read(mime: &str) -> Result<Vec<u8>, String> {
+    use wl_clipboard_rs::paste::{self, ClipboardType, MimeType, Seat};
+    let (mut pipe, _) = paste::get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        MimeType::Specific(mime),
+    )
+    .map_err(|e| format!("the clipboard: {e}"))?;
+    let mut out = Vec::new();
+    pipe.read_to_end(&mut out)
         .map_err(|e| format!("the clipboard: {e}"))?;
-        let mut out = Vec::new();
-        pipe.read_to_end(&mut out)
-            .map_err(|e| format!("the clipboard: {e}"))?;
-        Ok(out)
-    };
-    if types.contains(SHOT_MIME) {
-        let path = PathBuf::from(String::from_utf8_lossy(&read(SHOT_MIME)?).trim());
-        if path.is_file() {
-            return Ok(Some(Pasted::Shot(path)));
-        }
-    }
-    for mime in IMAGE_MIMES {
-        if types.contains(*mime) {
-            return Ok(Some(Pasted::Image(read(mime)?)));
-        }
-    }
-    Ok(None)
+    Ok(out)
 }
 
 /// The hidden argument that makes the executable a clipboard server.
@@ -115,7 +147,10 @@ pub fn copy(exe: &Path, offers: &[Offer]) -> io::Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0) // outlive the parent, apart from its terminal
+        // Outlive the parent, apart from its terminal and its directory
+        // (which it would keep busy).
+        .process_group(0)
+        .current_dir("/")
         .spawn()?;
     {
         let mut stdin = child.stdin.take().expect("piped");
@@ -123,11 +158,19 @@ pub fn copy(exe: &Path, offers: &[Offer]) -> io::Result<()> {
     } // closed: the child has it all
     let mut line = String::new();
     BufReader::new(child.stdout.take().expect("piped")).read_line(&mut line)?;
-    if line.trim() == "ready" {
-        Ok(())
-    } else {
-        Err(io::Error::other("the clipboard server didn't start"))
+    started(&line)
+}
+
+/// The server's first line: `ready`, or `error: why`.
+fn started(line: &str) -> io::Result<()> {
+    let line = line.trim();
+    if line == "ready" {
+        return Ok(());
     }
+    let why = line
+        .strip_prefix("error: ")
+        .unwrap_or("the clipboard server didn't start");
+    Err(io::Error::other(why.to_owned()))
 }
 
 /// The child's side: read the offers, take the selection, say so, then
@@ -143,8 +186,15 @@ pub fn serve() -> io::Result<()> {
         .collect();
     let mut opts = Options::new();
     opts.foreground(true);
-    let prepared = opts.prepare_copy_multi(sources).map_err(io::Error::other)?;
     let mut out = io::stdout().lock();
+    let prepared = match opts.prepare_copy_multi(sources) {
+        Ok(p) => p,
+        Err(e) => {
+            writeln!(out, "error: {e}")?;
+            out.flush()?;
+            return Err(io::Error::other(e));
+        }
+    };
     writeln!(out, "ready")?;
     out.flush()?;
     drop(out);
@@ -168,5 +218,31 @@ mod tests {
             },
         ];
         assert_eq!(decode(&encode(&offers)[..]).unwrap(), offers);
+    }
+
+    #[test]
+    fn a_live_shot_wins_then_images_by_preference() {
+        let types = |ms: &[&str]| ms.iter().map(|m| m.to_string()).collect::<HashSet<_>>();
+        let both = types(&[SHOT_MIME, "image/png"]);
+        assert_eq!(choose(&both, || true), Some(SHOT_MIME));
+        assert_eq!(choose(&both, || false), Some("image/png"));
+        assert_eq!(
+            choose(&types(&["image/webp", "image/jpeg"]), || true),
+            Some("image/jpeg")
+        );
+        assert_eq!(choose(&types(&["text/plain"]), || true), None);
+    }
+
+    #[test]
+    fn started_reports_the_servers_error() {
+        assert!(started("ready\n").is_ok());
+        assert_eq!(
+            started("error: no seat\n").unwrap_err().to_string(),
+            "no seat"
+        );
+        assert_eq!(
+            started("").unwrap_err().to_string(),
+            "the clipboard server didn't start"
+        );
     }
 }

@@ -65,15 +65,19 @@ fn capture(out: &cli::Output) -> Result<(Wayland, Layout, Frame), Failure> {
 }
 
 /// `--delay`: wait before capturing, saying so (anything on screen would
-/// be in the capture, so there's no countdown to look at).
+/// be in the capture, so there's no countdown to look at, and the
+/// notification closes before the capture).
 fn wait(out: &cli::Output) {
     let Some(secs) = out.delay.filter(|&s| s > 0.0) else {
         return;
     };
+    let wait = Duration::from_secs_f64(secs);
     if deliver::notifies(out) {
-        notify("screenie", &format!("Capturing in {secs}s"));
+        let body = format!("Capturing in {secs}s");
+        screenie_platform::notify::notify_during("screenie", &body, wait);
+    } else {
+        std::thread::sleep(wait);
     }
-    std::thread::sleep(Duration::from_secs_f64(secs));
 }
 
 /// A REGION, where `-` means one read from stdin (`slurp | screenie shot -`).
@@ -208,10 +212,10 @@ type RedactedShot = (Picture, Project, Vec<(String, LogicalRect)>);
 /// `recent`: the clipboard's image if it holds one, else the last shot.
 fn resolve(source: cli::Source) -> cli::Source {
     match source {
-        cli::Source::Recent => match screenie_platform::clipboard::paste_image() {
-            Ok(Some(_)) => cli::Source::Clipboard,
-            _ => cli::Source::Last(1),
-        },
+        cli::Source::Recent if screenie_platform::clipboard::holds_image() => {
+            cli::Source::Clipboard
+        }
+        cli::Source::Recent => cli::Source::Last(1),
         other => other,
     }
 }

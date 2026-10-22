@@ -123,11 +123,34 @@ impl WindowHandler for State {
     }
 }
 
+/// `image` grown to a multiple of `scale` each way, repeating its last
+/// column and row: a buffer must be a whole number of logical pixels
+/// (wl_surface's invalid_size).
+fn padded(image: Image, scale: u32) -> Image {
+    let (w, h) = (image.width(), image.height());
+    let (pw, ph) = (w.div_ceil(scale) * scale, h.div_ceil(scale) * scale);
+    if (pw, ph) == (w, h) {
+        return image;
+    }
+    let src = image.data();
+    let mut data = Vec::with_capacity((pw * ph * 4) as usize);
+    for y in 0..ph {
+        let row = &src[(y.min(h - 1) * w * 4) as usize..][..(w * 4) as usize];
+        data.extend_from_slice(row);
+        let last = &row[row.len() - 4..];
+        for _ in w..pw {
+            data.extend_from_slice(last);
+        }
+    }
+    Image::from_rgba(pw, ph, data).expect("sized to fit")
+}
+
 impl Wayland {
     /// Float `image` in a window until it's closed (by the user, the
     /// compositor, or `stop`). `scale` is device pixels a logical pixel, so
-    /// it shows at the size it was on screen. `shown` is called once, when
-    /// it's on screen (to place it).
+    /// it shows at the size it was on screen (padded to a multiple of it,
+    /// by less than a logical pixel). `shown` is called once, when it's on
+    /// screen (to place it).
     pub fn run_pin(
         &mut self,
         image: Image,
@@ -139,6 +162,8 @@ impl Wayland {
         let qh = self.qh();
         let xdg = XdgShell::bind(&self.globals, &qh)
             .map_err(|_| Error::Unavailable("the compositor has no xdg-shell".into()))?;
+        let scale = scale.max(1);
+        let image = padded(image, scale as u32);
         let pool = SlotPool::new(
             (image.width() * image.height() * 4) as usize,
             &self.state.shm,
@@ -149,7 +174,6 @@ impl Wayland {
         let window = xdg.create_window(surface, WindowDecorations::None, &qh);
         window.set_title(title);
         window.set_app_id(crate::pins::APP_ID);
-        let scale = scale.max(1);
         let size = (
             (image.width() as i32 / scale).max(1) as u32,
             (image.height() as i32 / scale).max(1) as u32,
@@ -188,5 +212,23 @@ impl Wayland {
         self.state.pin = None; // the window goes with it
         let _ = self.conn.flush();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_buffer_is_padded_to_its_scale_with_its_edges() {
+        let data: Vec<u8> = (1..=3).flat_map(|v| [v, v, v, 255]).collect();
+        let img = Image::from_rgba(3, 1, data).unwrap();
+        let p = padded(img.clone(), 2);
+        assert_eq!((p.width(), p.height()), (4, 2));
+        let px = |x: usize, y: usize| p.data()[(y * 4 + x) * 4];
+        assert_eq!([px(0, 0), px(1, 0), px(2, 0), px(3, 0)], [1, 2, 3, 3]);
+        assert_eq!([px(0, 1), px(3, 1)], [1, 3]);
+        assert_eq!(padded(img.clone(), 1), img);
+        assert_eq!(padded(img, 3).width(), 3);
     }
 }

@@ -30,12 +30,9 @@ fn recognize_with(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("can't run {bin} (is tesseract installed?): {e}"))?;
-    child
-        .stdin
-        .take()
-        .expect("piped")
-        .write_all(png)
-        .map_err(|e| format!("sending the image to {bin}: {e}"))?;
+    // Tesseract loads its language before it reads the image, and exits
+    // at once if that fails; its own message beats the broken pipe.
+    let sent = child.stdin.take().expect("piped").write_all(png);
     let out = child
         .wait_with_output()
         .map_err(|e| format!("reading {bin}: {e}"))?;
@@ -46,6 +43,7 @@ fn recognize_with(
             err.trim().chars().take(200).collect::<String>()
         ));
     }
+    sent.map_err(|e| format!("sending the image to {bin}: {e}"))?;
     Ok(parse_tsv(&String::from_utf8_lossy(&out.stdout), map))
 }
 
@@ -137,5 +135,12 @@ mod tests {
     #[test]
     fn a_missing_engine_is_an_error() {
         assert!(recognize_with("screenie-test-no-such-binary", b"", "eng", |b| b).is_err());
+    }
+
+    #[test]
+    fn an_engine_that_exits_early_reports_its_failure_not_the_pipe() {
+        // `false` exits 1 without reading; 1 MiB overflows the pipe.
+        let err = recognize_with("false", &vec![0u8; 1 << 20], "eng", |b| b).unwrap_err();
+        assert!(err.starts_with("false failed"), "{err}");
     }
 }

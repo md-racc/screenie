@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use smithay_client_toolkit::{
     compositor::FrameCallbackData,
     reexports::client::{
-        Connection, QueueHandle,
+        QueueHandle,
         protocol::{wl_pointer, wl_shm, wl_surface},
     },
     reexports::protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
@@ -42,9 +42,12 @@ use crate::{Error, Result};
 pub trait OverlayApp {
     /// One raw event, at `now` seconds on the host's monotonic clock.
     fn input(&mut self, ev: RawEvent, now: f64);
-    /// Advance held-key repeat. Returns whether the picture changed.
+    /// Advance time: held-key repeat, and anything the app is waiting on
+    /// (such as background job results). Returns whether the picture
+    /// changed.
     fn tick(&mut self, now: f64) -> bool;
-    /// Whether `tick` should be called (a key is held).
+    /// Whether `tick` should be called soon: a key is held, or work is
+    /// pending.
     fn wants_ticks(&self) -> bool;
     /// Whether the session is over: the host then takes the overlays down.
     fn finished(&self) -> bool;
@@ -87,17 +90,6 @@ impl Pointer {
     }
 }
 
-/// How the overlay run ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OverlayEnd {
-    /// The app finished.
-    Finished,
-    /// The compositor closed an overlay.
-    Closed,
-    /// The deadline passed (a safety net for test runs).
-    Deadline,
-}
-
 struct Surf {
     layer: LayerSurface,
     monitor: usize,
@@ -130,9 +122,9 @@ pub(crate) struct Overlay {
     /// Wheel motion from continuous sources, toward the next step.
     wheel: f64,
     closed: bool,
-    /// The pointer's shape device, the serial of its last enter, and the
-    /// shape it was given.
+    /// The pointer's shape device and the serial of its last enter.
     shape: Option<(WpCursorShapeDeviceV1, u32)>,
+    /// The shape the pointer was last given.
     shown_pointer: Pointer,
 }
 
@@ -170,7 +162,8 @@ impl Overlay {
         }
     }
 
-    pub(crate) fn closed(&mut self, _layer: &LayerSurface) {
+    /// Any overlay closing ends the run.
+    pub(crate) fn closed(&mut self) {
         self.closed = true;
     }
 
@@ -204,7 +197,6 @@ impl Overlay {
 
     pub(crate) fn pointer(
         &mut self,
-        _conn: &Connection,
         qh: &QueueHandle<State>,
         pointer: &wl_pointer::WlPointer,
         shapes: Option<&CursorShapeManager>,
@@ -359,7 +351,7 @@ impl Wayland {
         layout: &Layout,
         app: &mut dyn OverlayApp,
         deadline: Option<Duration>,
-    ) -> Result<OverlayEnd> {
+    ) -> Result<()> {
         let qh = self.qh();
         let shell =
             self.state.layer_shell.as_ref().ok_or_else(|| {
@@ -436,7 +428,7 @@ impl Wayland {
                 .key_repeat(r);
         }
 
-        let end = loop {
+        loop {
             let timeout = if app.wants_ticks() {
                 Some(TICK)
             } else {
@@ -452,14 +444,9 @@ impl Wayland {
             if app.wants_ticks() {
                 changed |= app.tick(overlay.now());
             }
-            if app.finished() {
-                break OverlayEnd::Finished;
-            }
-            if overlay.closed {
-                break OverlayEnd::Closed;
-            }
-            if deadline.is_some_and(|d| start.elapsed() >= d) {
-                break OverlayEnd::Deadline;
+            // The deadline is a safety net for test runs.
+            if app.finished() || overlay.closed || deadline.is_some_and(|d| start.elapsed() >= d) {
+                break;
             }
             if changed {
                 overlay.mark_dirty();
@@ -472,13 +459,13 @@ impl Wayland {
                 }
             }
             overlay.draw_due(app, &qh)?;
-        };
+        }
 
         // Take the overlays down, and make sure the compositor has.
         self.state.overlay = None;
         self.queue
             .roundtrip(&mut self.state)
             .map_err(|e| Error::Protocol(format!("roundtrip: {e}")))?;
-        Ok(end)
+        Ok(())
     }
 }

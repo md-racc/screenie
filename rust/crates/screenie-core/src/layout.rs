@@ -38,7 +38,7 @@ pub struct Window {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub monitors: Vec<Monitor>,
-    /// The windows you can see, topmost (most recently focused) first.
+    /// The windows you can see, topmost first.
     pub windows: Vec<Window>,
     pub active: Option<WindowId>,
     pub focused: MonitorId,

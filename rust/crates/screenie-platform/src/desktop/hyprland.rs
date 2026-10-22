@@ -7,7 +7,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -66,6 +67,9 @@ pub struct HyprClient {
     pub stable_id: String,
     #[serde(default)]
     pub pid: i64,
+    /// Shown on every workspace, above everything else.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl HyprMonitor {
@@ -92,15 +96,33 @@ pub fn window_id(address: &str) -> WindowId {
     WindowId(u64::from_str_radix(address.trim_start_matches("0x"), 16).unwrap_or(0))
 }
 
-/// The address Hyprland knows a window by.
-pub fn address(id: WindowId) -> String {
-    format!("0x{:x}", id.0)
+/// Focus history counts up from the latest (0); -1 is never focused, and
+/// goes last.
+fn focus_order(c: &HyprClient) -> i64 {
+    if c.focus_history_id < 0 {
+        i64::MAX
+    } else {
+        c.focus_history_id
+    }
+}
+
+/// Where a client is drawn: pinned windows above floating ones, floating
+/// above tiled.
+fn stacking_layer(c: &HyprClient) -> u8 {
+    if c.floating && c.pinned {
+        0
+    } else if c.floating || c.fullscreen >= 2 {
+        1
+    } else {
+        2
+    }
 }
 
 /// The clients you can actually see on the workspaces shown, topmost
-/// first. A fullscreen window hides everything else on its workspace; a
-/// maximised one hides the other tiled windows, but floating ones stay
-/// above it.
+/// first: pinned windows, then floating, then tiled, each layer in focus
+/// order. A fullscreen window hides everything else on its workspace but
+/// pinned floating windows; a maximised one hides the other tiled
+/// windows, but floating ones stay above it.
 pub fn visible_clients(clients: &[HyprClient], shown: &HashSet<i64>) -> Vec<HyprClient> {
     let on: Vec<&HyprClient> = clients
         .iter()
@@ -116,13 +138,14 @@ pub fn visible_clients(clients: &[HyprClient], shown: &HashSet<i64>) -> Vec<Hypr
                 on.iter()
                     .filter(|o| !std::ptr::eq(**o, **c) && o.workspace.id == c.workspace.id)
             };
-            let behind_fullscreen = others().any(|o| o.fullscreen >= 2);
+            let behind_fullscreen =
+                !(c.floating && c.pinned) && others().any(|o| o.fullscreen >= 2);
             let behind_maximised = !c.floating && others().any(|o| o.fullscreen == 1);
             !behind_fullscreen && !behind_maximised
         })
         .map(|c| (*c).clone())
         .collect();
-    visible.sort_by_key(|c| c.focus_history_id);
+    visible.sort_by_key(|c| (stacking_layer(c), focus_order(c)));
     visible
 }
 
@@ -181,12 +204,30 @@ fn socket() -> Result<PathBuf> {
     }
 }
 
+/// How long Hyprland gets to take a request or answer it.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// One request (`j/monitors`) and its whole answer.
 pub fn request(cmd: &str) -> Result<String> {
-    let mut s = UnixStream::connect(socket()?)?;
-    s.write_all(cmd.as_bytes())?;
+    request_at(&socket()?, cmd, ANSWER_TIMEOUT)
+}
+
+/// A request to the socket at `path`. A Hyprland that stops answering is
+/// an error after `timeout`, not a hang.
+fn request_at(path: &Path, cmd: &str, timeout: Duration) -> Result<String> {
+    let mut s = UnixStream::connect(path)
+        .map_err(|e| Error::Unavailable(format!("Hyprland's socket {}: {e}", path.display())))?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
+    let failed = |e: std::io::Error| match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+            Error::Unavailable(format!("Hyprland didn't answer {cmd}"))
+        }
+        _ => Error::Io(e),
+    };
+    s.write_all(cmd.as_bytes()).map_err(failed)?;
     let mut out = String::new();
-    s.read_to_string(&mut out)?;
+    s.read_to_string(&mut out).map_err(failed)?;
     Ok(out)
 }
 
@@ -242,18 +283,10 @@ pub fn find_window<'a>(
         }
         _ => return Err(format!("window:{key}: class, title, address or pid")),
     };
-    // Focus history counts up from the latest (0); -1 is never focused.
-    let order = |c: &HyprClient| {
-        if c.focus_history_id < 0 {
-            i64::MAX
-        } else {
-            c.focus_history_id
-        }
-    };
     Ok(clients
         .iter()
         .filter(|c| c.mapped && matches(c))
-        .min_by_key(|c| order(c)))
+        .min_by_key(|c| focus_order(c)))
 }
 
 /// The live Hyprland session.
@@ -304,6 +337,7 @@ mod tests {
             focus_history_id: focus,
             stable_id: String::new(),
             pid: 100 + focus,
+            pinned: false,
         }
     }
 
@@ -359,7 +393,39 @@ mod tests {
             client("max", 1, 1, false, 0),
             client("float", 1, 0, true, 2),
         ];
-        assert_eq!(names(visible_clients(&cs, &ws(&[1]))), ["max", "float"]);
+        assert_eq!(names(visible_clients(&cs, &ws(&[1]))), ["float", "max"]);
+    }
+
+    #[test]
+    fn a_float_stays_above_a_more_recently_focused_tiled_window() {
+        let cs = [
+            client("browser", 1, 0, false, 0),
+            client("float", 1, 0, true, 1),
+        ];
+        assert_eq!(names(visible_clients(&cs, &ws(&[1]))), ["float", "browser"]);
+    }
+
+    #[test]
+    fn a_never_focused_window_goes_last_in_its_layer() {
+        let cs = [
+            client("a", 1, 0, true, -1),
+            client("b", 1, 0, true, 0),
+            client("tiled", 1, 0, false, 1),
+        ];
+        assert_eq!(names(visible_clients(&cs, &ws(&[1]))), ["b", "a", "tiled"]);
+    }
+
+    #[test]
+    fn a_pinned_float_stays_above_fullscreen() {
+        let mut pin = client("pin", 1, 0, true, 3);
+        pin.pinned = true;
+        let cs = [
+            client("full", 1, 2, false, 0),
+            client("float", 1, 0, true, 1),
+            pin,
+            client("tiled", 1, 0, false, 2),
+        ];
+        assert_eq!(names(visible_clients(&cs, &ws(&[1]))), ["pin", "full"]);
     }
 
     #[test]
@@ -430,7 +496,35 @@ mod tests {
         a.size = [955.0, 1074.0];
         let l = layout_from(&ms, std::slice::from_ref(&a), Some(&a)).unwrap();
         assert_eq!(l.start_rect(), LogicalRect::new(3.0, 3.0, 955.0, 1074.0));
-        assert_eq!(address(l.active.unwrap()), a.address);
+        assert_eq!(l.active, Some(window_id(&a.address)));
+    }
+
+    #[test]
+    fn a_missing_socket_names_hyprland() {
+        let path = Path::new("/nonexistent/hypr/x/.socket.sock");
+        let err = request_at(path, "j/monitors", ANSWER_TIMEOUT).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Hyprland") && msg.contains(".socket.sock"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn a_silent_hyprland_times_out() {
+        let dir = std::env::temp_dir().join(format!("screenie-hypr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".socket.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let held = std::thread::spawn(move || listener.accept().map(|(s, _)| s));
+        let err = request_at(&path, "j/monitors", Duration::from_millis(50)).unwrap_err();
+        drop(held.join());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            err.to_string().contains("didn't answer j/monitors"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -438,9 +532,10 @@ mod tests {
         let json = r#"{"address": "0x558311a31620", "mapped": true, "hidden": false, "at": [962, 3],
           "size": [955, 535], "workspace": {"id": 1, "name": "1"}, "floating": false, "monitor": 0,
           "class": "kitty", "title": "~", "pid": 20063, "fullscreen": 0, "focusHistoryID": 2,
-          "stableId": "18000008"}"#;
+          "stableId": "18000008", "pinned": true}"#;
         let c: HyprClient = serde_json::from_str(json).unwrap();
         assert_eq!(window_id(&c.address), WindowId(0x558311a31620));
         assert_eq!(c.stable_id, "18000008");
+        assert!(c.pinned);
     }
 }

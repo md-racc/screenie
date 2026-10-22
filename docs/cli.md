@@ -213,8 +213,9 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 
 `--delay SECONDS`
 : Wait before capturing (up to an hour), with a notification saying how
-  long. There's no countdown on screen: anything drawn there would be in
-  the capture.
+  long that closes half a second before the capture (a delay under a
+  second has none). There's no countdown on screen: anything drawn there
+  would be in the capture.
 
 `--cursor`
 : Include the mouse pointer in the capture.

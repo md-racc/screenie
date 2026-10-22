@@ -1,5 +1,7 @@
-//! Wayland: one connection for capture (wlr-screencopy) and the overlays
-//! (wlr-layer-shell), so the frame is taken before any overlay exists.
+//! Wayland: one connection for everything screenie captures or shows:
+//! wlr-screencopy for the frame (taken before any overlay exists),
+//! ext-image-copy-capture for one window, wlr-layer-shell for the
+//! overlays, and xdg-shell toplevels for pins.
 
 mod capture;
 mod keys;
@@ -12,11 +14,19 @@ pub use overlay::{OverlayApp, Pointer};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_dispatch2, delegate_registry,
+    dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
     reexports::client::{
-        Connection, EventQueue, QueueHandle,
+        Connection, EventQueue, Proxy, QueueHandle,
         globals::{GlobalList, registry_queue_init},
-        protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
+        protocol::{wl_buffer::WlBuffer, wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
+    },
+    reexports::protocols::ext::{
+        image_capture_source::v1::client::{
+            ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
+            ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+        },
+        image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
     },
     reexports::protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     registry::{ProvidesRegistryState, RegistryState},
@@ -71,15 +81,24 @@ pub(crate) struct State {
     seat_handle: Option<wl_seat::WlSeat>,
 }
 
-/// The empty user data for globals with no events of interest.
+/// The empty user data for objects whose events screenie ignores.
 pub(crate) struct NoEvents;
 
-impl Wayland {
-    /// Whether captures from here on include the pointer.
-    pub fn set_cursor(&mut self, on: bool) {
-        self.state.cursor = on;
-    }
+macro_rules! no_events {
+    ($($t:ty),*) => {$(
+        impl Dispatch2<$t, State> for NoEvents {
+            fn event(&self, _: &mut State, _: &$t, _: <$t as Proxy>::Event, _: &Connection, _: &QueueHandle<State>) {}
+        }
+    )*};
 }
+
+no_events!(
+    ZwlrScreencopyManagerV1,
+    WlBuffer,
+    ExtImageCopyCaptureManagerV1,
+    ExtForeignToplevelImageCaptureSourceManagerV1,
+    ExtImageCaptureSourceV1
+);
 
 impl Wayland {
     /// Connect and bind everything screenie might use. Outputs are known
@@ -124,6 +143,11 @@ impl Wayland {
             state,
             globals,
         })
+    }
+
+    /// Whether captures from here on include the pointer.
+    pub fn set_cursor(&mut self, on: bool) {
+        self.state.cursor = on;
     }
 
     fn qh(&self) -> QueueHandle<State> {
@@ -249,9 +273,9 @@ impl ShmHandler for State {
 }
 
 impl LayerShellHandler for State {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
         if let Some(o) = &mut self.overlay {
-            o.closed(layer);
+            o.closed();
         }
     }
 
@@ -424,7 +448,7 @@ impl State {
 impl PointerHandler for State {
     fn pointer_frame(
         &mut self,
-        conn: &Connection,
+        _: &Connection,
         qh: &QueueHandle<Self>,
         pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
@@ -436,7 +460,7 @@ impl PointerHandler for State {
         }
         if let Some(o) = &mut self.overlay {
             for ev in events {
-                o.pointer(conn, qh, pointer, self.cursor_shape.as_ref(), ev);
+                o.pointer(qh, pointer, self.cursor_shape.as_ref(), ev);
             }
         }
     }

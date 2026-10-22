@@ -1,6 +1,6 @@
 [package]
 name = "screenie-platform"
-description = "screenie's desktop integration: capture, desktop layout, overlays, clipboard"
+description = "screenie's desktop integration: capture, desktop layout, overlays, clipboard, pins, notifications, and OCR and codes through tesseract and zbar"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

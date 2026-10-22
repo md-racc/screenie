@@ -2404,8 +2404,9 @@ says what was chosen and why. Smaller judgement calls live in
 - **One Wayland connection** (smithay-client-toolkit 0.21) for capture and
   overlays: wlr-screencopy for the frame, composed at the highest scale;
   ext-image-copy-capture with a foreign-toplevel source for a window's own
-  pixels; layer-shell overlays drawn into shm. A capture that gets no
-  frame fails after 2 s rather than hanging (monitors asleep).
+  pixels; layer-shell overlays drawn into shm. A capture waits at most
+  2 s: a monitor that sends no frame by then (asleep) is left blank, and
+  the capture fails only when no monitor sent one.
 - **The clipboard is served by a detached copy of screenie**
   (`__serve-clipboard`, wl-clipboard-rs in the foreground): Wayland's
   clipboard dies with its owner, and this needs no `unsafe` fork.

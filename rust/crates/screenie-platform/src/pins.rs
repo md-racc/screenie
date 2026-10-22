@@ -79,26 +79,29 @@ pub fn pin(
 ) -> Result<u32, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let id = free_id(dir);
+    let at = at.map(|r| [r.x.round(), r.y.round()]);
     let mut cmd = Command::new(exe);
     cmd.arg(SERVE_ARG)
         .arg(id.to_string())
         .arg(path)
         .arg(scale.to_string());
-    if let Some(r) = at {
-        cmd.arg(format!("{},{}", r.x.round(), r.y.round()));
+    if let Some([x, y]) = at {
+        cmd.arg(format!("{x},{y}"));
     }
     let child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Outlive the parent, apart from its terminal and its directory.
         .process_group(0)
+        .current_dir("/")
         .spawn()
         .map_err(|e| format!("starting the pin: {e}"))?;
     let pin = Pin {
         id,
         pid: child.id(),
         path: path.to_path_buf(),
-        at: at.map(|r| [r.x, r.y]),
+        at,
         size,
     };
     write(dir, &pin)?;
@@ -107,7 +110,8 @@ pub fn pin(
 
 fn write(dir: &Path, pin: &Pin) -> Result<(), String> {
     let json = serde_json::to_vec(pin).map_err(|e| e.to_string())?;
-    std::fs::write(record(dir, pin.id), json).map_err(|e| format!("{}: {e}", dir.display()))
+    let file = record(dir, pin.id);
+    std::fs::write(&file, json).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 /// End the pins with these ids (all of them for `None`): the ids closed.
@@ -157,5 +161,24 @@ mod tests {
         assert_eq!(free_id(&dir), 1);
         assert!(close(&dir, None).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_record_has_the_position_the_pin_was_moved_to() {
+        let dir = std::env::temp_dir().join(format!("screenie-pin-at-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let at = LogicalRect::new(909.5, 3.2, 10.0, 10.0);
+        let id = pin(
+            Path::new("/bin/true"),
+            &dir,
+            &dir.join("a.png"),
+            [10, 10],
+            1.0,
+            Some(at),
+        )
+        .unwrap();
+        let rec: Pin = serde_json::from_slice(&std::fs::read(record(&dir, id)).unwrap()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rec.at, Some([910.0, 3.0]));
     }
 }

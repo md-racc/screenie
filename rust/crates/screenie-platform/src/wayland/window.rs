@@ -9,17 +9,14 @@ use smithay_client_toolkit::{
     dispatch2::Dispatch2,
     foreign_toplevel_list::{ForeignToplevelList, ForeignToplevelListHandler},
     reexports::client::{
-        Connection, Proxy, QueueHandle, WEnum,
+        Connection, QueueHandle, WEnum,
         protocol::{wl_buffer::WlBuffer, wl_shm},
     },
     reexports::protocols::ext::{
         foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
-        image_capture_source::v1::client::{
-            ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
-            ext_image_capture_source_v1::ExtImageCaptureSourceV1,
-        },
+        image_capture_source::v1::client::ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
         image_copy_capture::v1::client::{
-            ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
+            ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1, FailureReason},
             ext_image_copy_capture_manager_v1::{ExtImageCopyCaptureManagerV1, Options},
             ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
         },
@@ -28,8 +25,9 @@ use smithay_client_toolkit::{
 };
 
 use screenie_image::Image;
-use screenie_image::compose::{self, SourceFormat, Transform};
+use screenie_image::compose::{self, Transform};
 
+use super::capture::source_format;
 use super::{NoEvents, State, Wayland};
 use crate::{Error, Result};
 
@@ -76,20 +74,6 @@ impl ForeignToplevelListHandler for State {
     }
 }
 
-macro_rules! no_events {
-    ($($t:ty),*) => {$(
-        impl Dispatch2<$t, State> for NoEvents {
-            fn event(&self, _: &mut State, _: &$t, _: <$t as Proxy>::Event, _: &Connection, _: &QueueHandle<State>) {}
-        }
-    )*};
-}
-
-no_events!(
-    ExtImageCopyCaptureManagerV1,
-    ExtForeignToplevelImageCaptureSourceManagerV1,
-    ExtImageCaptureSourceV1
-);
-
 impl Dispatch2<ExtImageCopyCaptureSessionV1, State> for WindowData {
     fn event(
         &self,
@@ -129,21 +113,20 @@ impl Dispatch2<ExtImageCopyCaptureFrameV1, State> for WindowData {
                 transform: WEnum::Value(t),
             } => w.transform = u32::from(t) as u8,
             E::Ready => w.ready = true,
-            E::Failed { reason } => w.failed = Some(format!("the capture failed ({reason:?})")),
+            E::Failed { reason } => {
+                w.failed = Some(format!("the capture failed: {}", failure_text(reason)));
+            }
             _ => {}
         }
     }
 }
 
-fn readable(f: wl_shm::Format) -> Option<SourceFormat> {
-    use wl_shm::Format as F;
-    Some(match f {
-        F::Argb8888 | F::Xrgb8888 => SourceFormat::Bgra8,
-        F::Abgr8888 | F::Xbgr8888 => SourceFormat::Rgba8,
-        F::Xrgb2101010 | F::Argb2101010 => SourceFormat::Xrgb2101010,
-        F::Xbgr2101010 | F::Abgr2101010 => SourceFormat::Xbgr2101010,
-        _ => return None,
-    })
+fn failure_text(reason: WEnum<FailureReason>) -> &'static str {
+    match reason {
+        WEnum::Value(FailureReason::Stopped) => "the window went away",
+        WEnum::Value(FailureReason::BufferConstraints) => "the window changed size",
+        _ => "the compositor gave no reason",
+    }
 }
 
 impl Wayland {
@@ -210,7 +193,7 @@ impl Wayland {
         let (wl_format, format) = w
             .formats
             .iter()
-            .find_map(|&f| readable(f).map(|sf| (f, sf)))
+            .find_map(|&f| source_format(f).map(|sf| (f, sf)))
             .ok_or_else(|| Error::Protocol("no shm format we can read".into()))?;
         let stride = width * 4;
         let mut pool = RawPool::new((stride * height) as usize, &self.state.shm)
@@ -252,5 +235,22 @@ impl Wayland {
         )
         .ok_or_else(|| Error::Protocol("the buffer is too small".into()))?;
         Ok(compose::orient(img, Transform(w.transform)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_read_as_words() {
+        assert_eq!(
+            failure_text(WEnum::Value(FailureReason::Stopped)),
+            "the window went away"
+        );
+        assert_eq!(
+            failure_text(WEnum::Unknown(9)),
+            "the compositor gave no reason"
+        );
     }
 }

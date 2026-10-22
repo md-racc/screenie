@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use screenie_core::geometry::PixelRect;
-use screenie_core::ocr::{OcrCode, OcrResult};
+use screenie_core::ocr::OcrResult;
 use screenie_core::session::{Analyzer, JobKind, JobResult, Session};
 use screenie_image::Picture;
 
@@ -42,13 +42,7 @@ impl Crop {
         let mut result = screenie_platform::ocr::recognize(&self.png, lang, map)?;
         if codes {
             let scratch = crate::files::runtime_dir().map_err(|e| format!("runtime dir: {e}"))?;
-            result.codes = screenie_platform::codes::find(&self.png, &scratch)?
-                .into_iter()
-                .map(|c| OcrCode {
-                    text: c.text,
-                    bbox: map(c.bbox),
-                })
-                .collect();
+            result.codes = screenie_platform::codes::find(&self.png, &scratch, map)?;
         }
         Ok(result)
     }
@@ -262,7 +256,7 @@ impl Analyzer for Ocr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use screenie_core::ocr::OcrWord;
+    use screenie_core::ocr::{OcrCode, OcrWord};
 
     fn word(text: &str, x: i32, line: u32) -> OcrWord {
         OcrWord {
