@@ -1,0 +1,818 @@
+//! The config file (docs/cli.md, CONFIG): `$XDG_CONFIG_HOME/screenie/
+//! config.toml`, its keys named as the long options they stand for, and
+//! named profiles (`-p NAME`) over it. It becomes options put before the
+//! command line's own, so the command line's parser checks it, and the
+//! command line wins: later options override earlier ones, and a config
+//! option that would clash with one typed gives way to it.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use crate::cli::{Command, Pick};
+
+/// The options that pick the config, taken off the command line.
+#[derive(Debug, Default, PartialEq)]
+pub struct Global {
+    /// `--config PATH`.
+    pub config: Option<PathBuf>,
+    /// `--no-config`.
+    pub no_config: bool,
+    /// `-p NAME` / `--profile NAME`, in order.
+    pub profiles: Vec<String>,
+    /// Everything else, for the command line's parser.
+    pub rest: Vec<OsString>,
+}
+
+/// Take `--config`, `--no-config` and `-p`/`--profile` off the arguments
+/// (those before a `--`).
+pub fn split_globals(args: Vec<OsString>) -> Result<Global, String> {
+    let mut g = Global::default();
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            g.rest.push(a);
+            g.rest.extend(it);
+            break;
+        }
+        let s = a.to_string_lossy().to_string();
+        let mut value = |name: &str| {
+            it.next()
+                .map(|v| v.to_string_lossy().to_string())
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match s.as_str() {
+            "--no-config" => g.no_config = true,
+            "--config" => g.config = Some(PathBuf::from(value("--config")?)),
+            "-p" | "--profile" => g.profiles.push(value(&s)?),
+            _ if s.starts_with("--config=") => g.config = Some(PathBuf::from(&s[9..])),
+            _ if s.starts_with("--profile=") => g.profiles.push(s[10..].to_string()),
+            _ if s.starts_with("-p") && s.len() > 2 && !s.starts_with("--") => {
+                g.profiles.push(s[2..].to_string());
+            }
+            _ => g.rest.push(a),
+        }
+    }
+    if g.no_config && (g.config.is_some() || !g.profiles.is_empty()) {
+        return Err("--no-config, and a config or a profile too?".into());
+    }
+    Ok(g)
+}
+
+/// What the typed command line settles for itself, so that a config
+/// option clashing with it gives way rather than making it an error.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Typed {
+    /// The verb, for which keys apply.
+    verb: &'static str,
+    /// A picture other than the screen (`--from`, `edit`): no screen
+    /// region, delay or pointer.
+    image: bool,
+    no_ui: bool,
+    redact: bool,
+    mode: bool,
+    select_only: bool,
+    stdout: bool,
+}
+
+impl Typed {
+    /// `None` for a command the config is nothing to (help, completions,
+    /// `--version`, the servers).
+    pub fn of(command: &Command) -> Option<Typed> {
+        let picker = |verb, p: &Pick, image| Typed {
+            verb,
+            image,
+            no_ui: p.no_ui,
+            redact: p.output.redact.is_some(),
+            mode: p.mode.is_some(),
+            select_only: p.select_only,
+            // --select-only's own stdout isn't one typed; --stdout with
+            // it is.
+            stdout: p.stdout_typed,
+        };
+        let verb = |verb| Typed {
+            verb,
+            ..Typed::default()
+        };
+        Some(match command {
+            Command::Pick(p) => picker("pick", p, p.from.is_some()),
+            Command::Edit { pick, .. } => picker("edit", pick, true),
+            Command::Shot(s) => Typed {
+                verb: "shot",
+                image: s.from.is_some(),
+                redact: s.output.redact.is_some(),
+                stdout: s.output.stdout,
+                ..Typed::default()
+            },
+            Command::History { .. } => verb("history"),
+            Command::Pin { .. } | Command::PinList { .. } | Command::PinClose { .. } => verb("pin"),
+            Command::Help
+            | Command::HelpTopic(_)
+            | Command::Completions(_)
+            | Command::Version
+            | Command::ServeClipboard
+            | Command::ServePin(_) => return None,
+        })
+    }
+
+    /// Whether the command line already decides what config key `name`
+    /// would.
+    fn overrides(&self, name: &str) -> bool {
+        match name {
+            "pick.region" | "capture.delay" | "capture.cursor" => self.image,
+            "pick.mode" => self.redact,
+            "pick.result" => self.select_only,
+            "output.json" => self.stdout,
+            "redact.mode" => self.mode,
+            _ => false,
+        }
+    }
+}
+
+/// The default config file.
+pub fn default_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("screenie/config.toml"))
+}
+
+/// The config file's text, if there's one to read: a `--config` file must
+/// exist, the default one needn't.
+pub fn read(g: &Global) -> Result<Option<String>, String> {
+    if g.no_config {
+        return Ok(None);
+    }
+    match &g.config {
+        Some(p) => std::fs::read_to_string(p)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", p.display())),
+        None => match default_path() {
+            Some(p) if p.exists() => std::fs::read_to_string(&p)
+                .map(Some)
+                .map_err(|e| format!("{}: {e}", p.display())),
+            _ if !g.profiles.is_empty() => {
+                Err("-p: there's no config file to have profiles".into())
+            }
+            _ => Ok(None),
+        },
+    }
+}
+
+/// How a key becomes an option.
+#[derive(Clone, Copy)]
+pub(crate) enum Kind {
+    /// `true` gives the flag; `false`, its negation.
+    Bool(&'static str, &'static str),
+    /// A value: `--option VALUE`.
+    Value(&'static str),
+    /// `save`: a path, `true` (the default directory) or `false` (none).
+    Save,
+    /// `history.keep`: 0 is `--no-history`.
+    Keep,
+    /// `redact.mode`: `off`, `suggest` or `auto`.
+    Redact,
+    /// Not an option, read by `redact()`: what it takes.
+    Only(&'static str),
+}
+
+const ALL: &[&str] = &["pick", "shot", "edit"];
+const PICKERS: &[&str] = &["pick", "edit"];
+const CAPTURES: &[&str] = &["pick", "shot"];
+
+/// Every key: section, name, how, and for which verbs.
+pub(crate) const KEYS: &[(&str, &str, Kind, &[&str])] = &[
+    ("output", "copy", Kind::Bool("--copy", "--no-copy"), ALL),
+    (
+        "output",
+        "notify",
+        Kind::Bool("--notify", "--no-notify"),
+        ALL,
+    ),
+    ("output", "quiet", Kind::Bool("--quiet", "--no-quiet"), ALL),
+    ("output", "json", Kind::Bool("--json", "--no-json"), ALL),
+    ("output", "save", Kind::Save, ALL),
+    (
+        "output",
+        "save-project",
+        Kind::Bool("--save-project", "--no-save-project"),
+        ALL,
+    ),
+    ("output", "format", Kind::Value("--format"), ALL),
+    ("output", "quality", Kind::Value("--quality"), ALL),
+    ("output", "png-level", Kind::Value("--png-level"), ALL),
+    ("output", "pin", Kind::Bool("--pin", "--no-pin"), ALL),
+    (
+        "output",
+        "colour-format",
+        Kind::Value("--colour-format"),
+        ALL,
+    ),
+    (
+        "output",
+        "copy-uri",
+        Kind::Bool("--copy-uri", "--no-copy-uri"),
+        ALL,
+    ),
+    ("ocr", "lang", Kind::Value("--ocr-lang"), ALL),
+    ("pick", "region", Kind::Value("--region"), &["pick"]),
+    ("pick", "mode", Kind::Value("--mode"), PICKERS),
+    ("pick", "result", Kind::Value("--result"), PICKERS),
+    (
+        "pick",
+        "lock-box",
+        Kind::Bool("--lock-box", "--no-lock-box"),
+        PICKERS,
+    ),
+    (
+        "pick",
+        "measure-scale",
+        Kind::Value("--measure-scale"),
+        PICKERS,
+    ),
+    ("capture", "delay", Kind::Value("--delay"), CAPTURES),
+    (
+        "capture",
+        "cursor",
+        Kind::Bool("--cursor", "--no-cursor"),
+        CAPTURES,
+    ),
+    ("capture", "scale", Kind::Value("--scale"), ALL),
+    ("history", "keep", Kind::Keep, ALL),
+    ("redact", "mode", Kind::Redact, ALL),
+    ("redact", "kind", Kind::Only("bar or pixelate"), ALL),
+    (
+        "redact",
+        "detectors",
+        Kind::Only("the detectors that run (docs/auto-redact.md)"),
+        ALL,
+    ),
+    ("redact", "literal", Kind::Only("strings to find"), ALL),
+    (
+        "redact",
+        "domains",
+        Kind::Only("domains, with their subdomains"),
+        ALL,
+    ),
+    (
+        "redact",
+        "pad",
+        Kind::Only("a share of the line height"),
+        ALL,
+    ),
+    (
+        "redact",
+        "prescan",
+        Kind::Only("true: scan each monitor when the picker opens"),
+        PICKERS,
+    ),
+    (
+        "redact",
+        "custom",
+        Kind::Only("[[redact.custom]] name = \"…\", regex = \"…\""),
+        ALL,
+    ),
+];
+
+/// Sections the design has that aren't built yet: warned about, not
+/// refused.
+pub(crate) const NOT_YET: &[&str] = &["look", "keys"];
+
+/// The config with its profiles (in order) applied over it.
+fn merged(text: &str, profiles: &[String]) -> Result<toml::Table, String> {
+    let mut table: toml::Table = text.parse().map_err(|e| format!("config: {e}"))?;
+    let profile_table = match table.remove("profile") {
+        None => toml::Table::new(),
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => return Err("config: [profile.NAME] sections, please".into()),
+    };
+    for name in profiles {
+        let p = match profile_table.get(name) {
+            Some(toml::Value::Table(t)) => t,
+            _ => return Err(format!("config: no profile {name:?}")),
+        };
+        // --redact opens Censor itself, so a profile's mode or redact
+        // replaces the other one from below it.
+        let sets = |section: &str| p.get(section).and_then(|s| s.get("mode")).is_some();
+        let unset = |table: &mut toml::Table, section: &str| {
+            if let Some(toml::Value::Table(s)) = table.get_mut(section) {
+                s.remove("mode");
+            }
+        };
+        let redacts = p
+            .get("redact")
+            .and_then(|s| s.get("mode"))
+            .is_some_and(|m| m.as_str() != Some("off"));
+        if redacts && !sets("pick") {
+            unset(&mut table, "pick");
+        }
+        if sets("pick") && !sets("redact") {
+            unset(&mut table, "redact");
+        }
+        merge(&mut table, p);
+    }
+    Ok(table)
+}
+
+/// `[redact]`'s detectors, lists and censor (the keys that aren't
+/// options), over the defaults.
+pub fn redact(text: &str, profiles: &[String]) -> Result<screenie_core::redact::Rules, String> {
+    use screenie_core::redact::{Category, Custom, Rules};
+    let mut rules = Rules::default();
+    let table = merged(text, profiles)?;
+    let Some(toml::Value::Table(r)) = table.get("redact") else {
+        return Ok(rules);
+    };
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        match r.get(key) {
+            None => Ok(vec![]),
+            Some(toml::Value::Array(a)) => a
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("config: redact.{key}: a list of strings"))
+                })
+                .collect(),
+            Some(_) => Err(format!("config: redact.{key}: a list of strings")),
+        }
+    };
+    if r.contains_key("detectors") {
+        rules.detectors.clear();
+        rules.codes = false;
+        for name in strings("detectors")? {
+            match (name.as_str(), Category::from_name(&name)) {
+                ("codes", _) => rules.codes = true,
+                (_, Some(c)) => rules.detectors.push(c),
+                _ => return Err(format!("config: redact.detectors: no detector {name:?}")),
+            }
+        }
+    }
+    if let Some(v) = r.get("prescan") {
+        rules.prescan = v.as_bool().ok_or("config: redact.prescan: true or false")?;
+    }
+    rules.literal = strings("literal")?;
+    rules.domains = strings("domains")?;
+    if let Some(v) = r.get("pad") {
+        rules.pad = v
+            .as_float()
+            .or_else(|| v.as_integer().map(|n| n as f64))
+            .filter(|p| (0.0..=2.0).contains(p))
+            .ok_or("config: redact.pad: a share of the line height, 0 to 2")?;
+    }
+    if let Some(v) = r.get("kind") {
+        use screenie_core::model::CensorKind;
+        rules.kind = match v.as_str() {
+            Some("bar") => CensorKind::Bar,
+            Some("pixelate") => CensorKind::Pixelate,
+            _ => return Err("config: redact.kind: bar or pixelate".into()),
+        };
+    }
+    match r.get("custom") {
+        None => {}
+        Some(toml::Value::Array(a)) => {
+            for c in a {
+                let field = |k: &str| c.get(k).and_then(toml::Value::as_str);
+                let (Some(name), Some(regex)) = (field("name"), field("regex")) else {
+                    return Err("config: [[redact.custom]] needs a name and a regex".into());
+                };
+                rules.custom.push(
+                    Custom::new(name, regex).map_err(|e| format!("config: redact.custom: {e}"))?,
+                );
+            }
+        }
+        Some(_) => return Err("config: redact.custom: [[redact.custom]] tables".into()),
+    }
+    Ok(rules)
+}
+
+/// The options a config (and its profiles, in order) stands for, for the
+/// typed command line, and warnings about what it skipped.
+pub fn options(
+    text: &str,
+    profiles: &[String],
+    typed: &Typed,
+) -> Result<(Vec<OsString>, Vec<String>), String> {
+    let table = merged(text, profiles)?;
+    let mut args = Vec::new();
+    let mut warnings = Vec::new();
+    for (section, value) in &table {
+        let toml::Value::Table(keys) = value else {
+            return Err(format!("config: {section} should be a [section]"));
+        };
+        if NOT_YET.contains(&section.as_str()) {
+            warnings.push(format!(
+                "config: [{section}] isn't built yet, so it's skipped"
+            ));
+            continue;
+        }
+        for (key, v) in keys {
+            let name = format!("{section}.{key}");
+            let Some(&(_, _, kind, verbs)) =
+                KEYS.iter().find(|(s, k, ..)| *s == section && *k == key)
+            else {
+                return Err(format!("config: unknown key {name}"));
+            };
+            if !verbs.contains(&typed.verb) || typed.overrides(&name) {
+                continue;
+            }
+            args.extend(option(&name, kind, v, typed)?);
+        }
+    }
+    Ok((args.into_iter().map(OsString::from).collect(), warnings))
+}
+
+/// The typed command line `g.rest` (parsed: `typed`) with the options of
+/// the config `text` before it, and warnings about what the config
+/// skipped.
+pub fn with_options(
+    text: Option<&str>,
+    g: Global,
+    typed: &Command,
+) -> Result<(Vec<OsString>, Vec<String>), String> {
+    let (Some(text), Some(typed)) = (text, Typed::of(typed)) else {
+        return Ok((g.rest, vec![]));
+    };
+    let (mut line, warnings) = options(text, &g.profiles, &typed)?;
+    line.extend(g.rest);
+    Ok((line, warnings))
+}
+
+/// A profile's keys over the base's, section by section.
+fn merge(base: &mut toml::Table, over: &toml::Table) {
+    for (k, v) in over {
+        match (base.get_mut(k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => merge(b, o),
+            _ => {
+                base.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
+fn option(name: &str, kind: Kind, v: &toml::Value, typed: &Typed) -> Result<Vec<String>, String> {
+    let as_bool = || {
+        v.as_bool()
+            .ok_or_else(|| format!("config: {name}: true or false"))
+    };
+    let as_text = || match v {
+        toml::Value::String(s) => Ok(s.clone()),
+        toml::Value::Integer(n) => Ok(n.to_string()),
+        toml::Value::Float(x) => Ok(x.to_string()),
+        _ => Err(format!("config: {name}: a value, like the option takes")),
+    };
+    Ok(match kind {
+        Kind::Bool(on, off) => match as_bool()? {
+            // On is copy's default, which --stdout and --select-only turn
+            // off; only a typed --copy overrides them.
+            true if name == "output.copy" => vec![],
+            true => vec![on.into()],
+            false => vec![off.into()],
+        },
+        Kind::Value(opt) => vec![opt.into(), as_text()?],
+        Kind::Save => match v {
+            toml::Value::Boolean(true) => vec!["--save".into()],
+            toml::Value::Boolean(false) => vec![],
+            toml::Value::String(s) => vec![format!("--save={s}")],
+            _ => return Err(format!("config: {name}: a directory, or true or false")),
+        },
+        Kind::Keep => match v.as_integer() {
+            Some(0) => vec!["--no-history".into()],
+            Some(n) if n > 0 => vec![], // the default keeps 20; others aren't built
+            _ => return Err(format!("config: {name}: a count, 0 for none")),
+        },
+        Kind::Only(_) => vec![],
+        Kind::Redact => match as_text()?.as_str() {
+            "off" => vec![],
+            // Suggesting needs the picker; shot and --no-ui only
+            // auto-redact.
+            "suggest" if typed.verb == "shot" || typed.no_ui => vec![],
+            m @ ("suggest" | "auto") => vec!["--redact".into(), m.into()],
+            m => return Err(format!("config: {name}: off, suggest or auto, not {m:?}")),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(text: &str, verb: &'static str, profiles: &[&str]) -> Result<Vec<String>, String> {
+        let p: Vec<String> = profiles.iter().map(|s| s.to_string()).collect();
+        let typed = Typed {
+            verb,
+            image: verb == "edit",
+            ..Typed::default()
+        };
+        options(text, &p, &typed)
+            .map(|(a, _)| a.iter().map(|s| s.to_string_lossy().to_string()).collect())
+    }
+
+    /// A command line as main runs it: the config's options before the
+    /// typed ones, parsed together.
+    fn line(text: &str, typed: &str) -> Result<Command, String> {
+        let g = split_globals(typed.split_whitespace().map(OsString::from).collect())?;
+        let command = crate::cli::parse(g.rest.clone())?;
+        let (line, _) = with_options(Some(text), g, &command)?;
+        crate::cli::parse(line)
+    }
+
+    const CONFIG: &str = r#"
+[output]
+copy = false
+save = "~/pics"
+format = "png"
+png-level = 1
+
+[pick]
+region = "active"
+mode = "censor"
+
+[capture]
+delay = 2
+
+[profile.share]
+output.format = "webp"
+output.save = false
+redact.mode = "suggest"
+
+[profile.loud]
+output.notify = true
+"#;
+
+    #[test]
+    fn keys_become_their_options_for_the_verb() {
+        let a = args(CONFIG, "pick", &[]).unwrap();
+        for want in [
+            "--no-copy",
+            "--save=~/pics",
+            "--format",
+            "png",
+            "--region",
+            "active",
+            "--mode",
+            "censor",
+            "--delay",
+            "2",
+        ] {
+            assert!(a.contains(&want.to_string()), "{want}: {a:?}");
+        }
+        // shot has no picker, and edit's regions are its image's.
+        let a = args(CONFIG, "shot", &[]).unwrap();
+        assert!(!a.contains(&"--mode".to_string()) && a.contains(&"--delay".to_string()));
+        let a = args(CONFIG, "edit", &[]).unwrap();
+        assert!(!a.contains(&"--region".to_string()) && !a.contains(&"--delay".to_string()));
+    }
+
+    #[test]
+    fn profiles_apply_over_the_base_in_order() {
+        let a = args(CONFIG, "pick", &["share", "loud"]).unwrap();
+        assert!(a.windows(2).any(|w| w == ["--format", "webp"]), "{a:?}");
+        assert!(
+            !a.iter().any(|s| s.starts_with("--save")),
+            "save = false: {a:?}"
+        );
+        assert!(a.windows(2).any(|w| w == ["--redact", "suggest"]));
+        assert!(a.contains(&"--notify".to_string()));
+        // On shot, suggesting means nothing (it has no picker).
+        let a = args(CONFIG, "shot", &["share"]).unwrap();
+        assert!(!a.contains(&"--redact".to_string()));
+        assert!(
+            args(CONFIG, "pick", &["nope"])
+                .unwrap_err()
+                .contains("no profile")
+        );
+    }
+
+    #[test]
+    fn bad_and_unbuilt_keys() {
+        assert!(
+            args("[output]\ncolour = 1", "pick", &[])
+                .unwrap_err()
+                .contains("unknown key output.colour")
+        );
+        assert!(args("[output]\ncopy = \"yes\"", "pick", &[]).is_err());
+        assert!(args("[redact]\nmode = \"maybe\"", "pick", &[]).is_err());
+        assert!(args("not toml [", "pick", &[]).is_err());
+        let pick = Typed {
+            verb: "pick",
+            ..Typed::default()
+        };
+        let (a, warnings) = options(
+            "[look]\ndim = 0.4\n[keys.select]\ncapture = [\"y\"]\n[redact]\nprescan = true",
+            &[],
+            &pick,
+        )
+        .unwrap();
+        assert!(a.is_empty());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert_eq!(
+            args("[output]\ncopy-uri = false", "pick", &[]).unwrap(),
+            ["--no-copy-uri"]
+        );
+        assert_eq!(
+            args("[output]\njson = false\npin = false", "pick", &[]).unwrap(),
+            ["--no-json", "--no-pin"]
+        );
+        assert_eq!(
+            args("[history]\nkeep = 0", "shot", &[]).unwrap(),
+            ["--no-history"]
+        );
+    }
+
+    #[test]
+    fn copy_true_is_the_default_so_stdout_still_turns_it_off() {
+        assert!(
+            args("[output]\ncopy = true", "shot", &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            args("[output]\ncopy = false", "shot", &[]).unwrap(),
+            ["--no-copy"]
+        );
+    }
+
+    #[test]
+    fn the_globals_come_off_the_command_line() {
+        let g = split_globals(
+            [
+                "shot",
+                "-p",
+                "share",
+                "--profile=docs",
+                "-pwork",
+                "--config",
+                "/c.toml",
+                "all",
+            ]
+            .map(OsString::from)
+            .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(g.profiles, ["share", "docs", "work"]);
+        assert_eq!(g.config, Some(PathBuf::from("/c.toml")));
+        assert_eq!(g.rest, ["shot", "all"].map(OsString::from));
+        assert!(split_globals(["--no-config", "-p", "x"].map(OsString::from).to_vec()).is_err());
+        assert!(split_globals(["-p"].map(OsString::from).to_vec()).is_err());
+        // After --, everything is the command line's: -photo.png is a file.
+        let line = ["edit", "--", "-photo.png", "--profile", "x"].map(OsString::from);
+        let g = split_globals(line.to_vec()).unwrap();
+        assert!(g.profiles.is_empty());
+        assert_eq!(g.rest, line);
+        let Ok(crate::cli::Command::Edit { source, .. }) =
+            crate::cli::parse(["edit", "--", "-photo.png"].map(OsString::from))
+        else {
+            panic!()
+        };
+        assert_eq!(
+            source,
+            crate::cli::Source::File(PathBuf::from("-photo.png"))
+        );
+    }
+
+    #[test]
+    fn the_command_line_wins_over_a_clashing_config() {
+        use crate::cli::Source;
+        let config = CONFIG.replace("copy = false", "copy = true\njson = true");
+        // Each parses, though the config alone would clash with it.
+        for typed in [
+            "--stdout",
+            "shot --stdout",
+            "--from pic.png",
+            "--from clipboard",
+            "shot --from pic.png",
+            "shot --from last",
+            "--redact suggest",
+            "--select-only",
+            "--select-only --stdout",
+            "edit pic.png --select-only --stdout",
+            "--keys Return --no-ui -p share",
+            "--mode annotate -p share",
+            "edit pic.png",
+        ] {
+            assert!(
+                line(&config, typed).is_ok(),
+                "{typed}: {:?}",
+                line(&config, typed)
+            );
+        }
+        let Command::Shot(s) = line(&config, "shot --stdout").unwrap() else {
+            panic!()
+        };
+        assert!(
+            !s.output.json && !s.output.copies(),
+            "config's copy = true is the default"
+        );
+        let Command::Pick(p) = line(&config, "--select-only --stdout").unwrap() else {
+            panic!()
+        };
+        assert!(p.select_only && p.output.stdout && !p.output.json);
+        let Command::Pick(p) = line(&config, "--select-only").unwrap() else {
+            panic!()
+        };
+        assert!(
+            p.output.json && !p.output.stdout,
+            "the config's json describes the geometry"
+        );
+        let Command::Pick(p) = line(&config, "--from pic.png").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.from, Some(Source::File(PathBuf::from("pic.png"))));
+        assert_eq!((p.region, p.output.delay), (None, None));
+        assert!(p.mode.is_some(), "what doesn't clash still applies");
+        let Command::Pick(p) = line(&config, "--keys Return --no-ui -p share").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.redact, None, "suggest needs the picker");
+        // On the screen, the config's region and delay hold.
+        let Command::Pick(p) = line(&config, "").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (p.region.as_deref(), p.output.delay),
+            (Some("active"), Some(2.0))
+        );
+        // What's typed still clashes with itself.
+        assert!(line(&config, "--stdout --json").is_err());
+        assert!(line(&config, "--from pic.png --region active").is_err());
+    }
+
+    #[test]
+    fn a_profiles_mode_or_redact_replaces_the_other_below_it() {
+        // The base's [pick] mode gives way to share's redact.mode.
+        let Command::Pick(p) = line(CONFIG, "-p share").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (p.mode, p.output.redact),
+            (None, Some(crate::cli::Redact::Suggest))
+        );
+        let config = format!("{CONFIG}\n[profile.docs]\npick.mode = \"annotate\"\n");
+        let Command::Pick(p) = line(&config, "-p share -p docs").unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (p.mode, p.output.redact),
+            (Some(screenie_core::select::StartMode::Annotate), None)
+        );
+        // Within one layer, the clash is the config's own mistake.
+        assert!(line("[pick]\nmode = \"censor\"\n[redact]\nmode = \"auto\"", "").is_err());
+    }
+
+    #[test]
+    fn help_and_its_kin_take_no_config() {
+        let help = crate::cli::parse(["help".into()]).unwrap();
+        assert!(Typed::of(&help).is_none());
+        let g = split_globals(vec!["help".into()]).unwrap();
+        let (l, _) = with_options(Some("not toml ["), g, &help).unwrap();
+        assert_eq!(l, ["help"]);
+    }
+
+    #[test]
+    fn redact_lists_become_rules_not_options() {
+        use screenie_core::model::CensorKind;
+        use screenie_core::redact::Category;
+        let text = r#"
+[redact]
+kind = "pixelate"
+detectors = ["email", "phone", "codes"]
+literal = ["Acme Corp"]
+domains = ["corp.example.com"]
+pad = 0.5
+prescan = true
+
+[[redact.custom]]
+name = "ticket"
+regex = 'JIRA-\d+'
+
+[profile.loose]
+redact.detectors = ["email", "uuid"]
+"#;
+        assert!(args(text, "pick", &[]).unwrap().is_empty());
+        let r = redact(text, &[]).unwrap();
+        assert_eq!(r.detectors, [Category::Email, Category::Phone]);
+        assert!(r.codes);
+        assert_eq!(r.kind, CensorKind::Pixelate);
+        assert_eq!((r.literal.len(), r.domains.len(), r.pad), (1, 1, 0.5));
+        assert_eq!(r.custom[0].name, "ticket");
+        assert!(r.prescan);
+        let r = redact(text, &["loose".into()]).unwrap();
+        assert_eq!(r.detectors, [Category::Email, Category::Uuid]);
+        assert!(!r.codes);
+        // Unset, the defaults: phone and uuid off, codes on.
+        let d = redact("", &[]).unwrap();
+        assert!(!d.detectors.contains(&Category::Phone) && d.codes);
+        for bad in [
+            "[redact]\ndetectors = [\"emails\"]",
+            "[redact]\nkind = \"blur\"",
+            "[redact]\nprescan = 1",
+            "[redact]\npad = -1",
+            "[redact]\nliteral = \"Acme\"",
+            "[[redact.custom]]\nname = \"x\"\nregex = \"(\"",
+            "[[redact.custom]]\nregex = \"x\"",
+        ] {
+            assert!(redact(bad, &[]).is_err(), "{bad}");
+        }
+    }
+}

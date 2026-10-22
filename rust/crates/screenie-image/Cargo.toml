@@ -1,0 +1,21 @@
+[package]
+name = "screenie-image"
+description = "screenie's pixels: frame composition, decoding, layer rendering, view filters, overlay drawing and encoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+fontdue = "0.9"
+image-webp = "0.2.4"
+jpeg-encoder = "0.6.1"
+png = "0.18"
+screenie-core.workspace = true
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
+
+[lints]
+workspace = true

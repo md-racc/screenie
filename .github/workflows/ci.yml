@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  gate:
+    name: test, clippy, fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # libxkbcommon to build; a monospace font, tesseract and zbar so the
+      # rendering, OCR and code tests run instead of skipping.
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev tzdata \
+            fontconfig fonts-dejavu-core \
+            tesseract-ocr tesseract-ocr-eng zbar-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+        env:
+          SCREENIE_REQUIRE_FONTS: "1"
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+  msrv:
+    name: rust-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev
+
+      # Keep in step with rust-version in rust/Cargo.toml.
+      - uses: dtolnay/rust-toolchain@1.86
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked

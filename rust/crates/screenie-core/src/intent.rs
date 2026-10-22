@@ -1,0 +1,234 @@
+//! Semantic intents: what the user means, not which key they pressed.
+//!
+//! The keymap turns chords into intents, the pointer mapping turns buttons
+//! and the wheel into the same intents, and the top mode resolves them.
+
+use crate::geometry::{Dir, LogicalPoint};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Scale {
+    Half,
+    Double,
+}
+
+/// A set of held directions (`k` + `l` is diagonal).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct DirSet(u8);
+
+impl DirSet {
+    fn bit(d: Dir) -> u8 {
+        match d {
+            Dir::Left => 1,
+            Dir::Right => 2,
+            Dir::Up => 4,
+            Dir::Down => 8,
+        }
+    }
+
+    pub fn insert(&mut self, d: Dir) {
+        self.0 |= Self::bit(d);
+    }
+
+    pub fn contains(self, d: Dir) -> bool {
+        self.0 & Self::bit(d) != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Dir> {
+        Dir::ALL.into_iter().filter(move |&d| self.contains(d))
+    }
+
+    /// The held directions as one vector: opposite keys cancel.
+    pub fn vector(self) -> (f64, f64) {
+        self.iter().fold((0.0, 0.0), |(x, y), d| {
+            let (dx, dy) = d.vec();
+            (x + dx, y + dy)
+        })
+    }
+}
+
+impl FromIterator<Dir> for DirSet {
+    fn from_iter<I: IntoIterator<Item = Dir>>(iter: I) -> Self {
+        let mut s = DirSet::default();
+        for d in iter {
+            s.insert(d);
+        }
+        s
+    }
+}
+
+/// The build tools, by the key that opens them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tool {
+    /// `x`
+    Censor,
+    /// `a`
+    Annotate,
+    /// `f`
+    Filter,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Intent {
+    // The box grammar on hjkl and its modifiers.
+    /// `hjkl`: steer the active thing (the cursor corner).
+    Steer(Dir),
+    /// `Shift+hjkl`: move the whole box.
+    Translate(Dir),
+    /// `Ctrl+hjkl`: jump to the next meaningful target.
+    Jump(Dir),
+    /// `Ctrl+Shift+hjkl`: slide the box to the next meaningful boundary.
+    Slide(Dir),
+    /// `Alt+hjkl` (half) and `Alt+Shift+hjkl` (double).
+    Scale(Dir, Scale),
+    /// Held directions repeating: `steps` more steps of steering.
+    HeldSteer(DirSet, u32),
+    /// Held directions repeating with Shift: `steps` more steps of moving.
+    HeldTranslate(DirSet, u32),
+
+    // Box keys.
+    /// `o` / `Space`.
+    SwapOpposite,
+    /// `O` / `Shift+Space`.
+    SwapSideways,
+    /// `w b } {`: the next nearby edge that way.
+    EdgeJump(Dir),
+    /// `0 $ g G`: the far edge that way.
+    FarEdge(Dir),
+    /// Ctrl+Alt+hjkl: the cursor corner to the next edge in the picture
+    /// that way (the host finds it).
+    PictureEdge(Dir),
+    /// `c`: centre mode.
+    ToggleCentre,
+
+    // Common.
+    /// `+` / `-` and the wheel: the current amount.
+    Adjust(i32),
+    Undo,
+    Confirm,
+    Back,
+    Quit,
+    ToggleHelp,
+
+    // Build tools.
+    /// A build tool's key: from Select it opens the tool (and a layer);
+    /// in that tool it locks the item and begins another.
+    Tool(Tool),
+    /// `t`: the next kind (censor type, shape).
+    CycleKind,
+    /// `1`-`9`: pick that option (an ink, a filter kind, a layer, a text
+    /// style).
+    Choose(u8),
+    /// `p` in Annotate and Shape: the colour under the pointer becomes the
+    /// ink.
+    Eyedropper,
+    /// `r` / `c` / `v` in Annotate: a shape (rectangle, circle, arrow), as
+    /// a box of its own.
+    Shape(crate::annotate::ShapeTool),
+    /// `V` in an arrow: a head at both ends, or just the cursor's.
+    ToggleHeads,
+    /// `m` in Annotate: the pen draws ink, or highlights.
+    ToggleHighlighter,
+    /// `Space` in Annotate: the keyboard pen down (drawing) or up (the line
+    /// is locked).
+    PenToggle,
+    /// Ctrl+`+`/`-` or Ctrl+wheel in Annotate: the arc's bulge, 2px a step.
+    Bulge(i32),
+    /// `n` in Annotate: a numbered callout at the pen.
+    Callout,
+    /// `N` in Annotate: set the next callout's number (typed).
+    CalloutNumber,
+
+    /// `r` in Censor: scan for secrets (in Redact: rescan).
+    Redact,
+    /// `a` in Redact: accept the ticked suggestions.
+    Accept,
+
+    // Measure.
+    /// `m` in Select: Measure; in Measure, the primitive's key.
+    Measure(crate::measure::Prim),
+    /// `Space` in Measure: drop a point (Alt: without snapping).
+    DropPoint,
+    /// `Shift+Space` in Measure: drop a point and keep a line going (a path).
+    AddPoint,
+    /// `y` in Measure: deliver the measurements as text.
+    CopyMeasurements,
+    /// `C`: calibrate against the selected measurement.
+    Calibrate,
+    /// `t` in Measure: the other unit system.
+    UnitSystem,
+    /// `T` in Measure: pixels, or back to real units.
+    ShowPixels,
+
+    // Text input.
+    /// A typed character, taken literally.
+    Type(char),
+    /// Shift+Enter: a new line.
+    Newline,
+    Backspace,
+    /// Ctrl+b: the chip behind a text annotation.
+    ToggleChip,
+
+    // Lenses and points.
+    /// `z`: the loupe.
+    Loupe,
+    /// `e`: enhance.
+    Enhance,
+    /// `i`: Insert, a point cursor in the box (in Annotate: text at the
+    /// pen).
+    Insert,
+    /// `m` in Insert: the box's centre.
+    Middle,
+    /// `v` / `V`: the next or previous view filter (lenses only).
+    ViewFilter(i32),
+    /// `s` in Enhance: sharp or smooth pixels.
+    ToggleSharp,
+
+    // Lists (Filter, Layers).
+    /// `[` / `]`: select the item below (-1) or above (+1).
+    ListStep(i32),
+    /// `<` / `>`: move the selected item down (-1) or up (+1).
+    ListMove(i32),
+    /// `d`: delete the selected item.
+    ListDelete,
+    /// `Space`: mute or hide the selected item.
+    ListToggle,
+
+    // Select.
+    /// `.`: the previously accepted boxes.
+    Recall,
+    /// `y`: OCR.
+    Ocr,
+    /// `p`: the cursor pixel's colour.
+    CopyColour,
+    /// `Q`: decode a QR code or barcode.
+    DecodeCode,
+    /// `P`: pin.
+    Pin,
+
+    // The pointer, in logical coordinates.
+    /// The left button went down.
+    Press(LogicalPoint),
+    /// The pointer moved (with or without a button down).
+    Motion(LogicalPoint),
+    /// The left button came up.
+    Release(LogicalPoint),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opposite_held_directions_cancel() {
+        let s: DirSet = [Dir::Left, Dir::Right, Dir::Down].into_iter().collect();
+        assert_eq!(s.vector(), (0.0, 1.0));
+        assert_eq!(
+            s.iter().collect::<Vec<_>>(),
+            [Dir::Left, Dir::Right, Dir::Down]
+        );
+    }
+}
