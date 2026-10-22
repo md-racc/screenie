@@ -1,9 +1,10 @@
 [package]
 name = "screenie-core"
-description = "screenie's picker: geometry, input, modes and the project model, with no display server or renderer"
+description = "screenie's picker logic: geometry, input, modes, layers and the project model, with no display server or renderer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

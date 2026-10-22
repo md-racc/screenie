@@ -52,6 +52,18 @@ The architecture is intended to allow X11 support later without changing picker 
 
 Recording, scrolling captures, uploads, beautification and live/unfrozen picking are non-goals.
 
+## Install
+
+Building needs Rust 1.86 or later, pkg-config and the libxkbcommon headers (`libxkbcommon-dev` on Debian and Ubuntu, `libxkbcommon` on Arch). From the repo root:
+
+```
+cargo install --path rust/crates/screenie --locked
+```
+
+At run time screenie needs a Wayland compositor with wlr-screencopy and layer-shell, and a monospace font (found by path, else through fontconfig's `fc-match`); without one the picker exits with "no monospace font found". Tesseract with its language data (OCR), `zbarimg` (codes) and `notify-send` (notifications) are optional. Pins want a Hyprland window rule: see `pin` in `docs/cli.md`.
+
+The tests run with `cargo test` from `rust/`. The workspace links libxkbcommon and one test needs tzdata; `cargo test -p screenie-core` needs no system libraries. Tests that need a font, tesseract or zbar skip when they're missing.
+
 ---
 
 # The picker
@@ -1029,3 +1041,11 @@ Behavior changes update all three together:
 3. tests.
 
 The interaction grammar is a product constraint, not an implementation detail.
+
+---
+
+# License
+
+screenie is licensed under either of the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in screenie by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

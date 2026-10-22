@@ -1,9 +1,10 @@
 [package]
 name = "screenie-image"
-description = "screenie's pixels: crops, layer rendering, filters and encoding"
+description = "screenie's pixels: frame composition, decoding, layer rendering, view filters, overlay drawing and encoding"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

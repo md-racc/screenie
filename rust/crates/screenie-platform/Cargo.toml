@@ -4,6 +4,7 @@ description = "screenie's desktop integration: capture, desktop layout, overlays
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]
