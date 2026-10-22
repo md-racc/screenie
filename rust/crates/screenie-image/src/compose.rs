@@ -3,7 +3,8 @@
 
 use screenie_core::geometry::{LogicalRect, PixelMap};
 
-use crate::image::Image;
+use crate::frame::Frame;
+use crate::image::{Image, Rgb};
 
 /// The byte layouts capture backends deliver, as they sit in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,9 +76,9 @@ impl Transform {
 /// Turn a buffer in the output's native orientation into what the screen
 /// shows: rotate counter-clockwise by the transform's angle, after a
 /// horizontal flip for the flipped ones.
-pub fn orient(img: &Image, t: Transform) -> Image {
+pub fn orient(img: Image, t: Transform) -> Image {
     if t == Transform::NORMAL {
-        return img.clone();
+        return img;
     }
     let (w, h) = (img.width() as usize, img.height() as usize);
     let (ow, oh) = if t.swaps_axes() { (h, w) } else { (w, h) };
@@ -100,7 +101,10 @@ pub fn orient(img: &Image, t: Transform) -> Image {
     Image::from_rgba(ow as u32, oh as u32, out).expect("sized to fit")
 }
 
-/// Bilinear resize (a lower-scale monitor upsampled to the frame's scale).
+/// Resize: bilinear along an axis that grows, an area average along one
+/// that shrinks (so a thin line still counts however far it shrinks).
+/// Used for monitors at another scale, `--scale`, the overlay's monitor
+/// pictures and OCR's upscale.
 pub fn resize(img: &Image, width: u32, height: u32) -> Image {
     if (img.width(), img.height()) == (width, height) {
         return img.clone();
@@ -108,27 +112,80 @@ pub fn resize(img: &Image, width: u32, height: u32) -> Image {
     let (sw, sh) = (img.width() as usize, img.height() as usize);
     let (dw, dh) = (width as usize, height as usize);
     let mut out = vec![0u8; dw * dh * 4];
-    if sw == 0 || sh == 0 {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return Image::from_rgba(width, height, out).expect("sized to fit");
     }
     let src = img.data();
-    let sample = |x: usize, y: usize, c: usize| f32::from(src[(y * sw + x) * 4 + c]);
-    for y in 0..dh {
-        let fy = ((y as f32 + 0.5) * sh as f32 / dh as f32 - 0.5).clamp(0.0, (sh - 1) as f32);
-        let (y0, ty) = (fy.floor() as usize, fy.fract());
-        let y1 = (y0 + 1).min(sh - 1);
-        for x in 0..dw {
-            let fx = ((x as f32 + 0.5) * sw as f32 / dw as f32 - 0.5).clamp(0.0, (sw - 1) as f32);
-            let (x0, tx) = (fx.floor() as usize, fx.fract());
-            let x1 = (x0 + 1).min(sw - 1);
+    let (xs, ys) = (taps(sw, dw), taps(sh, dh));
+    // A source row resized across, made when first needed and dropped once
+    // the rows below have moved past it.
+    let across = |y: usize| -> Vec<f32> {
+        let row = &src[y * sw * 4..(y + 1) * sw * 4];
+        let mut v = vec![0.0f32; dw * 4];
+        for (x, (first, ws)) in xs.iter().enumerate() {
             for c in 0..4 {
-                let top = sample(x0, y0, c) * (1.0 - tx) + sample(x1, y0, c) * tx;
-                let bottom = sample(x0, y1, c) * (1.0 - tx) + sample(x1, y1, c) * tx;
-                out[(y * dw + x) * 4 + c] = (top * (1.0 - ty) + bottom * ty).round() as u8;
+                let mut acc = 0.0;
+                for (k, w) in ws.iter().enumerate() {
+                    acc += f32::from(row[(first + k) * 4 + c]) * w;
+                }
+                v[x * 4 + c] = acc;
             }
+        }
+        v
+    };
+    let mut rows: Vec<Option<Vec<f32>>> = vec![None; sh];
+    let mut done = 0;
+    for (y, (first, ws)) in ys.iter().enumerate() {
+        for r in &mut rows[done..*first] {
+            *r = None;
+        }
+        done = done.max(*first);
+        for k in 0..ws.len() {
+            if rows[first + k].is_none() {
+                rows[first + k] = Some(across(first + k));
+            }
+        }
+        for (i, px) in out[y * dw * 4..(y + 1) * dw * 4].iter_mut().enumerate() {
+            let mut acc = 0.0;
+            for (k, w) in ws.iter().enumerate() {
+                acc += rows[first + k].as_ref().expect("just made")[i] * w;
+            }
+            *px = acc.round() as u8;
         }
     }
     Image::from_rgba(width, height, out).expect("sized to fit")
+}
+
+/// For each of `dst` pixels along an axis, the `src` pixels it's made of:
+/// the first, and the weight of each from there.
+fn taps(src: usize, dst: usize) -> Vec<(usize, Vec<f32>)> {
+    let (src_f, dst_f) = (src as f32, dst as f32);
+    (0..dst)
+        .map(|i| {
+            if dst >= src {
+                // Between the two nearest pixel centres.
+                let f = ((i as f32 + 0.5) * src_f / dst_f - 0.5).clamp(0.0, src_f - 1.0);
+                let (first, t) = (f.floor() as usize, f.fract());
+                if first + 1 < src {
+                    (first, vec![1.0 - t, t])
+                } else {
+                    (first, vec![1.0]) // the last: t is 0
+                }
+            } else {
+                // Each source pixel by how much of it this one covers.
+                let (a, b) = (
+                    i as f32 * src_f / dst_f,
+                    ((i + 1) as f32 * src_f / dst_f).min(src_f),
+                );
+                let first = a.floor() as usize;
+                let last = (b.ceil() as usize).clamp(first + 1, src);
+                let ws = (first..last)
+                    .map(|j| (b.min(j as f32 + 1.0) - a.max(j as f32)).max(0.0) / (b - a))
+                    .collect();
+                (first, ws)
+            }
+        })
+        .collect()
 }
 
 /// One frame of the whole layout at `scale` pixels per logical pixel, from
@@ -141,8 +198,13 @@ pub fn compose(bounds: LogicalRect, scale: f64, parts: &[(LogicalRect, Image)]) 
     let mut out = Image::new(width, height);
     for (rect, img) in parts {
         let dest = map.to_pixels(*rect);
-        let fitted = resize(img, dest.w.max(0) as u32, dest.h.max(0) as u32);
-        out.blit(&fitted, fitted.extent(), dest.x, dest.y);
+        let size = (dest.w.max(0) as u32, dest.h.max(0) as u32);
+        if (img.width(), img.height()) == size {
+            out.blit(img, img.extent(), dest.x, dest.y);
+        } else {
+            let fitted = resize(img, size.0, size.1);
+            out.blit(&fitted, fitted.extent(), dest.x, dest.y);
+        }
     }
     out
 }
@@ -155,8 +217,8 @@ pub fn place(
     img: Image,
     monitor: LogicalRect,
     scale: f64,
-    background: crate::image::Rgb,
-) -> (crate::frame::Frame, LogicalRect) {
+    background: Rgb,
+) -> (Frame, LogicalRect) {
     let (iw, ih) = (img.width(), img.height());
     let k = scale
         .max(f64::from(iw) / monitor.w)
@@ -174,14 +236,13 @@ pub fn place(
         f64::from(iw) / k,
         f64::from(ih) / k,
     );
-    (crate::frame::Frame::new(canvas, bounds), rect)
+    (Frame::new(canvas, bounds), rect)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image::Rgb;
-    use screenie_core::geometry::PixelPoint;
+    use screenie_core::geometry::{PixelPoint, PixelRect};
 
     fn px(img: &Image, x: i32, y: i32) -> Rgb {
         img.rgb(PixelPoint::new(x, y)).unwrap()
@@ -225,17 +286,20 @@ mod tests {
     #[test]
     fn rotations() {
         let img = strip();
-        let r90 = orient(&img, Transform(1)); // counter-clockwise: red at the bottom
+        let r90 = orient(img.clone(), Transform(1)); // counter-clockwise: red at the bottom
         assert_eq!((r90.width(), r90.height()), (1, 3));
         assert_eq!(
             (px(&r90, 0, 0), px(&r90, 0, 2)),
             (Rgb(0, 0, 255), Rgb(255, 0, 0))
         );
-        let r180 = orient(&img, Transform(2));
+        let r180 = orient(img.clone(), Transform(2));
         assert_eq!(px(&r180, 0, 0), Rgb(0, 0, 255));
-        let flipped = orient(&img, Transform(4));
+        let flipped = orient(img.clone(), Transform(4));
         assert_eq!(px(&flipped, 0, 0), Rgb(0, 0, 255));
-        assert_eq!(orient(&orient(&img, Transform(1)), Transform(3)), img);
+        assert_eq!(orient(orient(img.clone(), Transform(1)), Transform(3)), img);
+        // Upright already: the same pixels, not a copy.
+        let at = img.data().as_ptr();
+        assert_eq!(orient(img, Transform::NORMAL).data().as_ptr(), at);
     }
 
     #[test]
@@ -263,5 +327,38 @@ mod tests {
         let img = Image::filled(3, 3, Rgb(77, 88, 99));
         let big = resize(&img, 7, 5);
         assert!((0..7).all(|x| px(&big, x, 4) == Rgb(77, 88, 99)));
+        let img = Image::filled(7, 5, Rgb(77, 88, 99));
+        let small = resize(&img, 2, 2);
+        assert!((0..2).all(|x| px(&small, x, 1) == Rgb(77, 88, 99)));
+    }
+
+    #[test]
+    fn shrinking_a_lot_keeps_a_thin_line() {
+        // A one-pixel black line on white, wherever it is, shrunk 4:1:
+        // a quarter of one pixel's worth, never lost between samples.
+        for at in 0..16 {
+            let mut img = Image::filled(16, 1, Rgb(255, 255, 255));
+            img.blit(
+                &Image::filled(1, 1, Rgb(0, 0, 0)),
+                PixelRect::new(0, 0, 1, 1),
+                at,
+                0,
+            );
+            let small = resize(&img, 4, 1);
+            let darkest = (0..4).map(|x| px(&small, x, 0).0).min().unwrap();
+            assert_eq!(darkest, 191, "a line at {at}");
+        }
+    }
+
+    #[test]
+    fn halving_averages_each_two_by_two() {
+        let data = [0u8, 10, 20, 30, 40, 50, 60, 71]
+            .iter()
+            .flat_map(|&v| [v, v, v, 255])
+            .collect();
+        let img = Image::from_rgba(4, 2, data).unwrap();
+        let half = resize(&img, 2, 1);
+        assert_eq!(px(&half, 0, 0), Rgb(25, 25, 25)); // (0 + 10 + 40 + 50) / 4
+        assert_eq!(px(&half, 1, 0), Rgb(45, 45, 45)); // (20 + 30 + 60 + 71) / 4, rounded
     }
 }

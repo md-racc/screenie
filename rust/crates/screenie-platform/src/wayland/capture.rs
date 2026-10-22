@@ -138,7 +138,7 @@ impl Pending {
         };
         let data = &pool.mmap()[..];
         self.progress = match compose::convert(data, w, h, stride as usize, format, self.y_invert) {
-            Some(img) => Progress::Ready(compose::orient(&img, self.transform)),
+            Some(img) => Progress::Ready(compose::orient(img, self.transform)),
             None => Progress::Failed("buffer too small".into()),
         };
         if let Some(b) = self.buffer.take() {

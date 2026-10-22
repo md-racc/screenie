@@ -10,7 +10,7 @@ use screenie_core::model::{Layer, Op, OpData};
 
 use crate::frame::Frame;
 use crate::image::{Image, Rgb};
-use crate::render::{Patch, apply_layer, apply_op};
+use crate::render::{Patch, apply_layer, apply_op, contains, intersect};
 
 pub struct Picture {
     base: Frame,
@@ -35,17 +35,6 @@ pub struct Picture {
     generation: u64,
     /// A highlighter trace in progress, so its frames add only its tail.
     highlight: Option<crate::render::HighlightTrace>,
-}
-
-fn clip_to(r: PixelRect, ext: PixelRect) -> PixelRect {
-    let x0 = r.x.max(ext.x);
-    let y0 = r.y.max(ext.y);
-    PixelRect::new(
-        x0,
-        y0,
-        ((r.x + r.w).min(ext.x + ext.w) - x0).max(0),
-        ((r.y + r.h).min(ext.y + ext.h) - y0).max(0),
-    )
 }
 
 /// OCR upscales frames under this scale.
@@ -96,7 +85,7 @@ impl Picture {
             return;
         }
         let map = *self.base.map();
-        let r = clip_to(map.to_pixels(layer.clip), self.base.image().extent());
+        let r = intersect(map.to_pixels(layer.clip), self.base.image().extent());
         let mut img = self.base.image().crop(r);
         let mut shown = layer.clone();
         shown.hidden = false; // inspecting a hidden layer still shows it
@@ -174,16 +163,8 @@ impl Picture {
             .is_some_and(|(clip, ops, _, _)| *clip == open.clip && *ops == open.ops);
         if !fresh {
             let map = *self.committed.map();
-            let ext = self.committed.image().extent();
-            let px = map.to_pixels(open.clip);
-            let x0 = px.x.max(0);
-            let y0 = px.y.max(0);
-            let r = PixelRect::new(
-                x0,
-                y0,
-                ((px.x + px.w).min(ext.w) - x0).max(0),
-                ((px.y + px.h).min(ext.h) - y0).max(0),
-            );
+            let clip = map.to_pixels(open.clip);
+            let r = intersect(clip, self.committed.image().extent());
             if self
                 .locked
                 .as_ref()
@@ -203,7 +184,6 @@ impl Picture {
                     || (0, self.committed.image().crop(r)),
                     |(ops, img)| (ops.len(), img.clone()),
                 );
-            let clip = map.to_pixels(open.clip);
             for i in start..open.ops.len() {
                 apply_op(
                     &mut Patch {
@@ -215,7 +195,10 @@ impl Picture {
                     &open.ops[i].data,
                 );
                 self.applied += 1;
-                self.prefixes.push((open.ops[..=i].to_vec(), img.clone()));
+                // Only the longest prefixes are kept: copy only those.
+                if open.ops.len() - i <= PREFIXES {
+                    self.prefixes.push((open.ops[..=i].to_vec(), img.clone()));
+                }
             }
             let extra = self.prefixes.len().saturating_sub(PREFIXES);
             self.prefixes.drain(..extra);
@@ -294,11 +277,10 @@ impl Picture {
     /// What's shown at a pixel: the open layer's view inside its clip, else
     /// the committed picture.
     pub fn rgb(&self, p: PixelPoint) -> Option<Rgb> {
-        if let Some((r, img)) = self.open_patch() {
-            let inside = p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h;
-            if inside {
-                return img.rgb(PixelPoint::new(p.x - r.x, p.y - r.y));
-            }
+        if let Some((r, img)) = self.open_patch()
+            && contains(r, p)
+        {
+            return img.rgb(PixelPoint::new(p.x - r.x, p.y - r.y));
         }
         self.committed.rgb(p)
     }
@@ -368,9 +350,7 @@ pub fn find_edge(
 ) -> Option<PixelPoint> {
     let (dx, dy) = d.vec();
     let (dx, dy) = (dx as i32, dy as i32);
-    let inside = |q: PixelPoint| {
-        q.x >= bounds.x && q.y >= bounds.y && q.x < bounds.x + bounds.w && q.y < bounds.y + bounds.h
-    };
+    let inside = |q: PixelPoint| contains(bounds, q);
     let grey = |t: i32| -> Option<f64> {
         let c = PixelPoint::new(from.x + dx * t, from.y + dy * t);
         if !inside(c) {
@@ -413,7 +393,7 @@ pub fn flood_region(
     walls: &[(PixelPoint, PixelPoint)],
 ) -> Result<Vec<PixelPoint>, String> {
     let (bx, by, bw, bh) = (bounds.x, bounds.y, bounds.w, bounds.h);
-    let inside = |q: PixelPoint| q.x >= bx && q.y >= by && q.x < bx + bw && q.y < by + bh;
+    let inside = |q: PixelPoint| contains(bounds, q);
     if !inside(seed) {
         return Err("outside the monitor".into());
     }
@@ -455,11 +435,7 @@ pub fn flood_region(
     let g0 = grey(seed).ok_or("no picture there")?;
     mask[ix(seed)] = IN;
     let mut todo = vec![seed];
-    let mut first = seed; // the top-left-most, to trace from
     while let Some(q) = todo.pop() {
-        if (q.y, q.x) < (first.y, first.x) {
-            first = q;
-        }
         for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
             let n = PixelPoint::new(q.x + dx, q.y + dy);
             if !inside(n) {
@@ -478,41 +454,51 @@ pub fn flood_region(
     // Drawn walls the region touches are its edge, so it measures to the
     // lines (not the pixels just inside them).
     const EDGE: u8 = 3;
+    // (diagonally too: a corner of the walls is on the edge)
+    const AROUND: [(i32, i32); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
     for y in by..by + bh {
         for x in bx..bx + bw {
             let q = PixelPoint::new(x, y);
-            // (diagonally too: a corner of the walls is on the edge)
-            let around = [
-                (1, 0),
-                (-1, 0),
-                (0, 1),
-                (0, -1),
-                (1, 1),
-                (1, -1),
-                (-1, 1),
-                (-1, -1),
-            ];
-            let touches = around.iter().any(|&(dx, dy)| {
+            if mask[ix(q)] != WALL {
+                continue;
+            }
+            let touches = AROUND.iter().any(|&(dx, dy)| {
                 let n = PixelPoint::new(x + dx, y + dy);
                 inside(n) && mask[ix(n)] == IN
             });
-            if mask[ix(q)] == WALL && touches {
+            if touches {
                 mask[ix(q)] = EDGE;
             }
         }
     }
     let filled = |q: PixelPoint| inside(q) && matches!(mask[ix(q)], IN | EDGE);
-    let first = (by..by + bh)
+    // The top-left-most filled pixel (an edge one, maybe), to trace from.
+    let start = (by..by + bh)
         .flat_map(|y| (bx..bx + bw).map(move |x| PixelPoint::new(x, y)))
         .find(|&q| filled(q))
-        .unwrap_or(first);
+        .expect("the seed is filled");
     // Within half a pixel: smooths a staircase, keeps a real edge.
-    Ok(simplify_ring(&trace_outline(first, filled), 0.5))
+    let outline = trace_outline(start, filled, 8 * mask.len());
+    Ok(simplify_ring(&outline, 0.5))
 }
 
 /// The outer boundary of an 8-connected region, clockwise on screen, by
-/// Moore-neighbour tracing from its top-left-most pixel.
-fn trace_outline(start: PixelPoint, filled: impl Fn(PixelPoint) -> bool) -> Vec<PixelPoint> {
+/// Moore-neighbour tracing from its top-left-most pixel; at most `max_steps`
+/// long.
+fn trace_outline(
+    start: PixelPoint,
+    filled: impl Fn(PixelPoint) -> bool,
+    max_steps: usize,
+) -> Vec<PixelPoint> {
     const RING: [(i32, i32); 8] = [
         (1, 0),
         (1, 1),
@@ -532,8 +518,9 @@ fn trace_outline(start: PixelPoint, filled: impl Fn(PixelPoint) -> bool) -> Vec<
     let mut out = vec![start];
     let (mut p, mut b) = (start, at(start, 4)); // came from the west: never filled
     let first_b = b;
-    // A safety net: no boundary is longer than four times the region.
-    for _ in 0..16_000_000 {
+    // A safety net: each step is a pixel and the way it was entered, of
+    // eight, and the walk is deterministic, so a longer one is going round.
+    for _ in 0..max_steps {
         let ib = index(p, b);
         let mut next = None;
         for k in 1..=8 {
@@ -951,6 +938,65 @@ mod tests {
         p.sync(&[], Some(&open), None);
         assert_eq!(p.ops_applied(), 6);
         assert_eq!(at(&p, 5), Rgb(10, 10, 10));
+    }
+
+    #[test]
+    fn the_open_view_is_what_committing_outputs() {
+        use screenie_core::model::{FilterKind, FilterOp};
+        // Black left half, white right; the layer's clip is the white half,
+        // so nothing it shows or outputs should darken.
+        let mut img = Image::filled(100, 50, Rgb(0, 0, 0));
+        let white = Image::filled(50, 50, Rgb(255, 255, 255));
+        img.blit(&white, white.extent(), 50, 0);
+        let clip = LogicalRect::new(50.0, 0.0, 50.0, 50.0);
+        let blur = OpData::Filter(FilterOp {
+            rect: clip,
+            kind: FilterKind::Blur,
+            amount: 8.0,
+            muted: false,
+        });
+        // Its cells don't line up with the clip: one straddles x = 50.
+        let pixelate = OpData::Censor(CensorOp {
+            rect: LogicalRect::new(33.0, 0.0, 41.0, 50.0),
+            kind: CensorKind::Pixelate,
+            amount: 12.0,
+        });
+        for data in [blur, pixelate] {
+            let l = Layer {
+                id: LayerId(1),
+                clip,
+                hidden: false,
+                ops: vec![Op { id: OpId(2), data }],
+            };
+            let pic = || Picture::new(Frame::new(img.clone(), ALL));
+            let mut open = pic();
+            open.sync(&[], Some(&l), None);
+            let (r, shown) = open.open_patch().unwrap();
+            assert_eq!(shown.rgb(PixelPoint::new(0, 25)), Some(Rgb(255, 255, 255)));
+            let mut committed = pic();
+            committed.sync(std::slice::from_ref(&l), None, None);
+            assert_eq!(&committed.committed().image().crop(r), shown);
+            let mut inspected = pic();
+            inspected.inspect(Some(&l));
+            assert_eq!(inspected.isolated_patch().unwrap().1, shown);
+        }
+    }
+
+    #[test]
+    fn a_big_batch_keeps_only_the_top_prefixes() {
+        let mut p = picture();
+        let mut open = layer(1, (0..3).map(|i| bar(i, 0.0)).collect());
+        p.sync(&[], Some(&open), None);
+        // Thirty more at once, as accepting auto-redact's suggestions adds.
+        open.ops
+            .extend((3..33).map(|i| bar(i, f64::from(i as u32))));
+        p.sync(&[], Some(&open), None);
+        assert_eq!(p.ops_applied(), 33);
+        assert!(p.prefixes.len() <= PREFIXES, "{}", p.prefixes.len());
+        let top = open.ops.len() - 1;
+        open.ops[top] = bar(99, 40.0); // the top one changes: only it runs
+        p.sync(&[], Some(&open), None);
+        assert_eq!(p.ops_applied(), 34);
     }
 
     #[test]

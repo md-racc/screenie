@@ -68,7 +68,7 @@ pub struct SuggestionView {
 impl View {
     /// What a session shows now.
     pub fn of(s: &screenie_core::session::Session) -> View {
-        let v = View {
+        let mut v = View {
             rect: s.rect(),
             cursor: s.selection().cursor_point(),
             active: s.select_is_top(),
@@ -86,7 +86,8 @@ impl View {
             swatch: matches!(s.mode_name(), "annotate" | "shape").then(|| s.ink().0.rgb),
             lists: s.lists(),
             inspect: s.inspected().map(|l| l.clip),
-            pixel_cursor: None,
+            // The keyboard pen's point; a lens on top overrides it below.
+            pixel_cursor: s.pen_point(),
             loupe: None,
             enhance: None,
             filter: s.view().filter,
@@ -107,8 +108,6 @@ impl View {
                 .unwrap_or_default(),
             measure: s.measurements(),
         };
-        let mut v = v;
-        v.pixel_cursor = s.pen_point(); // the keyboard pen's point
         for (m, top) in s.lenses() {
             match m {
                 Mode::Insert(i) if top => v.pixel_cursor = Some(i.cursor.at),
@@ -224,9 +223,19 @@ pub struct Ui {
     /// The main box as shown, view-filtered, for the lenses: keyed by the
     /// picture's generation, the box and the filter.
     lens_source: Option<((u64, PixelRect, ViewFilter), Image)>,
-    /// Each monitor's chips as last drawn, and the palette items among
-    /// them, with what a click on one sends (`hit`).
+    /// Each monitor's chips as last drawn (tags, labels on the picture, the
+    /// loupe's), and the palette items among them, with what a click on one
+    /// sends (`hit`).
     hits: HashMap<usize, Vec<(LogicalRect, Option<Intent>)>>,
+}
+
+/// The tag blocks, status first so the others keep clear of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Status,
+    /// The palette and legend lines.
+    Palette,
+    List,
 }
 
 /// What's under a point, of what was drawn.
@@ -257,6 +266,16 @@ impl Ui {
             .values()
             .flatten()
             .filter_map(|&(r, i)| Some((r, i?)))
+            .collect()
+    }
+
+    /// Every chip last drawn, on every monitor, global logical.
+    pub fn chips(&self) -> Vec<LogicalRect> {
+        self.hits
+            .values()
+            .flatten()
+            .filter(|(_, i)| i.is_none())
+            .map(|&(r, _)| r)
             .collect()
     }
 
@@ -318,7 +337,12 @@ impl Ui {
             .get(&index)
             .is_none_or(|b| b.size != size || b.version != version);
         if stale {
-            let plain = resize(&pic.committed().crop(monitor), size.0, size.1);
+            let crop = pic.committed().crop(monitor);
+            let plain = if (crop.width(), crop.height()) == size {
+                crop
+            } else {
+                resize(&crop, size.0, size.1)
+            };
             let mut dimmed = plain.clone();
             for px in dimmed.data_mut().chunks_exact_mut(4) {
                 for c in &mut px[..3] {
@@ -352,13 +376,7 @@ impl Ui {
             return;
         }
         let s = f64::from(size.0) / monitor.w;
-        let dev = |r: LogicalRect| {
-            let x0 = rnd((r.x - monitor.x) * s);
-            let y0 = rnd((r.y - monitor.y) * s);
-            let x1 = rnd((r.right() - monitor.x) * s);
-            let y1 = rnd((r.bottom() - monitor.y) * s);
-            PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
-        };
+        let dev = |r: LogicalRect| dev_rect(r, monitor, s);
 
         let base = self.base(pic, index, monitor, size);
         into.data_mut().copy_from_slice(base.dimmed.data());
@@ -373,14 +391,9 @@ impl Ui {
         };
         if let Some((px, patch)) = patch {
             let m = pic.committed().map();
-            let at = m.to_logical(screenie_core::geometry::PixelPoint::new(px.x, px.y));
+            let at = m.from_device(f64::from(px.x), f64::from(px.y));
             let k = m.scale();
-            let logical = LogicalRect::new(
-                at.x - 0.5 / k,
-                at.y - 0.5 / k,
-                f64::from(px.w) / k,
-                f64::from(px.h) / k,
-            );
+            let logical = LogicalRect::new(at.x, at.y, f64::from(px.w) / k, f64::from(px.h) / k);
             let d = dev(logical);
             if (patch.width(), patch.height()) == (d.w as u32, d.h as u32) {
                 into.blit(patch, patch.extent(), d.x, d.y);
@@ -434,42 +447,59 @@ impl Ui {
                 Paint::rgba(1.0, 1.0, 1.0, a),
             );
         }
+        // Every chip is placed the same on every monitor's pass, so the tags
+        // keep clear of the same ones everywhere; each is drawn on its own
+        // monitor only, and takes its clicks there (`hit`).
+        let mut hits = Vec::new();
+        let mut placed: Vec<LogicalRect> = view.occupied();
+        if let Some(l) = &view.loupe {
+            placed.push(
+                self.loupe_chip(l, &loupe_text([0; 4], l.at), &view.monitors, monitor)
+                    .0,
+            );
+        }
         for x in &view.suggestions {
-            let cw = self.chip_width(x.category);
-            let mut cx = x.rect.x.max(monitor.x);
-            if cx + cw > monitor.right() {
-                cx = monitor.right() - cw;
-            }
-            if x.rect.intersects(&monitor) {
-                self.chip(into, monitor, s, cx, x.rect.y - 2.0, x.category);
+            let Some((r, home)) = self.suggestion_chip(x, &view.monitors, monitor) else {
+                continue;
+            };
+            placed.push(r);
+            if monitor.contains(home.centre()) {
+                hits.push((
+                    self.chip(into, monitor, s, r.x, r.bottom(), x.category),
+                    None,
+                ));
             }
         }
-
-        let mut chips: Vec<LogicalRect> = Vec::new();
-        if let Some(m) = &view.measure {
-            chips = self.measures(m, monitor, s, &view.occupied(), into);
-        }
+        let chips = self.measures(view, monitor, s, &placed, into, &mut hits);
+        placed.extend(chips);
 
         if view.enhance.is_some() || view.loupe.is_some() {
-            self.lenses(pic, monitor, s, view, into);
+            self.lenses(pic, monitor, s, view, into, &mut hits);
         }
         if let Some(p) = view.pixel_cursor {
             pixel_cursor(into, pic, monitor, s, p);
         }
 
         // Tags, status first so the others keep clear of it.
-        let mut hits = Vec::new();
-        let status = vec![view.status.clone()];
-        let mut placed: Vec<LogicalRect> = view.occupied();
-        placed.extend(chips);
-        let blocks = [(&status, tags::STATUS), (&view.top, tags::LEGEND)]
-            .into_iter()
-            .chain(view.lists.iter().map(|l| (l, tags::LIST)));
-        for (lines, spots) in blocks {
+        let blocks = [
+            (
+                std::slice::from_ref(&view.status),
+                tags::STATUS,
+                Block::Status,
+            ),
+            (view.top.as_slice(), tags::LEGEND, Block::Palette),
+        ]
+        .into_iter()
+        .chain(
+            view.lists
+                .iter()
+                .map(|l| (l.as_slice(), tags::LIST, Block::List)),
+        );
+        for (lines, spots, block) in blocks {
             if lines.is_empty() {
                 continue;
             }
-            let is_status = std::ptr::eq(lines, &status);
+            let is_status = block == Block::Status;
             // Room for the ink swatch after the status chip.
             let extra = if is_status && view.swatch.is_some() {
                 SWATCH + 5.0
@@ -483,15 +513,13 @@ impl Ui {
             if !r.intersects(&monitor) {
                 continue;
             }
-            let is_top = std::ptr::eq(lines, &view.top);
             for (i, line) in lines.iter().enumerate() {
                 let bottom = r.y + ROW * (i as f64 + 1.0) - 2.0;
-                self.chip(into, monitor, s, r.x, bottom, line);
-                let top = bottom - self.cap_height() - 8.0;
-                let h = bottom - top;
-                hits.push((LogicalRect::new(r.x, top, self.chip_width(line), h), None));
+                let chip = self.chip(into, monitor, s, r.x, bottom, line);
+                hits.push((chip, None));
+                let (top, h) = (chip.y, chip.h);
                 // A palette line's items: where each one's text is.
-                let Some(items) = view.palette.get(i).filter(|_| is_top) else {
+                let Some(items) = view.palette.get(i).filter(|_| block == Block::Palette) else {
                     continue;
                 };
                 let gap = self.chip_width(screenie_core::legend::ITEM_GAP) - 8.0;
@@ -503,11 +531,11 @@ impl Ui {
                     let Some(intent) = intent else { continue };
                     hits.push((item, Some(*intent)));
                     if view.hover.is_some_and(|p| item.contains(p)) {
-                        invert(into, dev_rect(item, monitor, s));
+                        invert(into, dev(item));
                     }
                 }
             }
-            if let (true, Some(rgb)) = (is_status, view.swatch) {
+            if is_status && let Some(rgb) = view.swatch {
                 let x = r.x + self.chip_width(&lines[0]) + 5.0 - monitor.x;
                 let y = r.y + ROW - 2.0 - monitor.y;
                 swatch(into, s, x, y, rgb);
@@ -516,17 +544,21 @@ impl Ui {
         self.hits.insert(index, hits);
     }
 
-    /// Measure's drawings: lines with their points, area fills, the one in
-    /// progress to the cursor, and a chip each. Returns the chips' rects,
-    /// for the tags to keep clear of.
+    /// Measure's drawings, when it's open: lines with their points, area
+    /// fills, the one in progress to the cursor, and a chip each. Returns
+    /// every chip's rect, this monitor's or not, for the tags to keep clear of.
     fn measures(
         &mut self,
-        m: &screenie_core::measure::MeasureView,
+        view: &View,
         monitor: LogicalRect,
         s: f64,
         avoid: &[LogicalRect],
         into: &mut Image,
+        hits: &mut Vec<(LogicalRect, Option<Intent>)>,
     ) -> Vec<LogicalRect> {
+        let Some(m) = &view.measure else {
+            return Vec::new();
+        };
         use tiny_skia::{
             Color, FillRule, LineCap, LineJoin, Paint as SkPaint, PathBuilder, PixmapMut, Stroke,
             StrokeDash, Transform,
@@ -625,24 +657,27 @@ impl Ui {
             }
         }
         // Chips keep clear of the loupe's magnifier, angles' arcs and each
-        // other, trying a few spots round their anchor; each is drawn only on
-        // its anchor's monitor (tags never cross a seam).
+        // other, trying a few spots round their anchor, on its monitor (tags
+        // never cross a seam). Every monitor's pass places them all, the
+        // same way, and draws its own.
         let mut placed: Vec<LogicalRect> = avoid.to_vec();
         placed.extend(m.items.iter().filter_map(|it| bounds(&it.arc)));
         let reserved = placed.len();
         let h = ROW - 2.0;
-        let fit = |r: LogicalRect| {
+        let fit = |r: LogicalRect, home: LogicalRect| {
             LogicalRect::new(
-                r.x.min(monitor.right() - r.w).max(monitor.x),
-                r.y.min(monitor.bottom() - ROW).max(monitor.y),
+                r.x.min(home.right() - r.w).max(home.x),
+                r.y.min(home.bottom() - ROW).max(home.y),
                 r.w,
                 r.h,
             )
         };
         for it in &m.items {
-            if !monitor.contains(it.anchor) {
+            let Some(home) = monitor_at(&view.monitors, it.anchor)
+                .or_else(|| monitor.contains(it.anchor).then_some(monitor))
+            else {
                 continue;
-            }
+            };
             let cw = self.chip_width(&it.label);
             let (x, y) = (it.anchor.x, it.anchor.y);
             let spots: Vec<LogicalRect> = if let Some((ux, uy)) = it.label_out {
@@ -671,11 +706,16 @@ impl Ui {
             };
             let r = spots
                 .iter()
-                .map(|&r| fit(r))
+                .map(|&r| fit(r, home))
                 .find(|r| !placed.iter().any(|o| o.intersects(r)))
-                .unwrap_or_else(|| fit(spots[0]));
+                .unwrap_or_else(|| fit(spots[0], home));
             placed.push(r);
-            self.chip(into, monitor, s, r.x, r.y + ROW - 2.0, &it.label);
+            if monitor.contains(it.anchor) {
+                hits.push((
+                    self.chip(into, monitor, s, r.x, r.y + ROW - 2.0, &it.label),
+                    None,
+                ));
+            }
         }
         placed.split_off(reserved)
     }
@@ -704,24 +744,16 @@ impl Ui {
         s: f64,
         view: &View,
         into: &mut Image,
+        hits: &mut Vec<(LogicalRect, Option<Intent>)>,
     ) {
         let map = *pic.committed().map();
         let main = view.rect;
-        let dev = |r: LogicalRect| {
-            let x0 = rnd((r.x - monitor.x) * s);
-            let y0 = rnd((r.y - monitor.y) * s);
-            PixelRect::new(
-                x0,
-                y0,
-                rnd((r.right() - monitor.x) * s) - x0,
-                rnd((r.bottom() - monitor.y) * s) - y0,
-            )
-        };
+        let dev = |r: LogicalRect| dev_rect(r, monitor, s);
         let t = rnd(2.0 * s).max(1);
         let white = Paint::rgba(1.0, 1.0, 1.0, 0.9);
         let (src_rect, src) = self.lens_source(pic, main, view.filter);
-        let src = src.clone();
         // A pixel of what's shown: through the view filter inside the box.
+        // (It borrows the cached source: no `sample` after `self.chip`.)
         let sample = |p: PixelPoint| -> Option<[u8; 4]> {
             let (lx, ly) = (p.x - src_rect.x, p.y - src_rect.y);
             if lx >= 0 && ly >= 0 && lx < src_rect.w && ly < src_rect.h {
@@ -807,28 +839,82 @@ impl Ui {
                 1,
             );
             outline(into, d, t, white);
-            // Its colour and position, under the magnifier.
+            // Its colour and position, under the magnifier, on its monitor.
             if let Some(v) = sample(l.at) {
-                let text = format!(
-                    "#{:02x}{:02x}{:02x}  ({},{})",
-                    v[0], v[1], v[2], l.at.x, l.at.y
-                );
-                let (x, y) = (l.rect.x, l.rect.bottom() + CHIP);
-                self.chip(into, monitor, s, x, y, &text);
-                let sx = x + self.chip_width(&text) + 5.0 - monitor.x;
-                swatch(
-                    into,
-                    s,
-                    sx,
-                    y - 2.0 - monitor.y,
-                    [0, 1, 2].map(|k| f64::from(v[k]) / 255.0),
-                );
+                let text = loupe_text(v, l.at);
+                let (r, home) = self.loupe_chip(&l, &text, &view.monitors, monitor);
+                if monitor.contains(home.centre()) {
+                    let chip = self.chip(into, monitor, s, r.x, r.bottom(), &text);
+                    hits.push((chip, None));
+                    swatch(
+                        into,
+                        s,
+                        chip.right() + 5.0 - monitor.x,
+                        r.bottom() - monitor.y,
+                        [0, 1, 2].map(|k| f64::from(v[k]) / 255.0),
+                    );
+                }
             }
         }
     }
 
+    /// The loupe's colour chip for `text`, and its swatch: under the
+    /// magnifier, moved left as far as it must to stay on the magnifier's
+    /// monitor. Their rect, and that monitor.
+    fn loupe_chip(
+        &self,
+        l: &LoupeView,
+        text: &str,
+        monitors: &[LogicalRect],
+        monitor: LogicalRect,
+    ) -> (LogicalRect, LogicalRect) {
+        let home = monitor_at(monitors, l.rect.centre()).unwrap_or(monitor);
+        let (w, h) = (
+            self.chip_width(text) + 5.0 + SWATCH,
+            self.cap_height() + 8.0,
+        );
+        let mut x = l.rect.x;
+        if x + w > home.right() {
+            x = (home.right() - w).max(home.x);
+        }
+        let bottom = l.rect.bottom() + CHIP;
+        (LogicalRect::new(x, bottom - h, w, h), home)
+    }
+
+    /// A suggestion's category chip: above it, or under it at a monitor's
+    /// top, on the monitor its top-left is on. Its rect, and that monitor.
+    fn suggestion_chip(
+        &self,
+        x: &SuggestionView,
+        monitors: &[LogicalRect],
+        monitor: LogicalRect,
+    ) -> Option<(LogicalRect, LogicalRect)> {
+        let home = monitor_at(monitors, LogicalPoint::new(x.rect.x, x.rect.y))
+            .or_else(|| monitors.iter().copied().find(|m| m.intersects(&x.rect)))
+            .or_else(|| x.rect.intersects(&monitor).then_some(monitor))?;
+        let (w, h) = (self.chip_width(x.category), self.cap_height() + 8.0);
+        let mut cx = x.rect.x.max(home.x);
+        if cx + w > home.right() {
+            cx = home.right() - w;
+        }
+        let mut bottom = x.rect.y - 2.0;
+        if bottom - h < home.y {
+            bottom = (x.rect.bottom() + 2.0 + h).min(home.bottom());
+        }
+        Some((LogicalRect::new(cx, bottom - h, w, h), home))
+    }
+
     /// A text chip whose bottom-left corner is at `(x, y)`, global logical.
-    fn chip(&mut self, into: &mut Image, monitor: LogicalRect, s: f64, x: f64, y: f64, text: &str) {
+    /// Its rect, global logical.
+    fn chip(
+        &mut self,
+        into: &mut Image,
+        monitor: LogicalRect,
+        s: f64,
+        x: f64,
+        y: f64,
+        text: &str,
+    ) -> LogicalRect {
         let cap = self.cap_height();
         let w = self.chip_width(text);
         let (lx, ly) = (x - monitor.x, y - monitor.y);
@@ -851,7 +937,18 @@ impl Ui {
             blend_coverage(into, gx, gy, g.width, g.height, &g.coverage);
             pen += advance;
         }
+        LogicalRect::new(x, y - cap - 8.0, w, cap + 8.0)
     }
+}
+
+/// The monitor a point is on, if any.
+fn monitor_at(monitors: &[LogicalRect], p: LogicalPoint) -> Option<LogicalRect> {
+    monitors.iter().copied().find(|m| m.contains(p))
+}
+
+/// The loupe chip's text: the pixel's colour and position.
+fn loupe_text(v: [u8; 4], at: PixelPoint) -> String {
+    format!("#{:02x}{:02x}{:02x}  ({},{})", v[0], v[1], v[2], at.x, at.y)
 }
 
 /// A bilinear sample at a continuous pixel position.
@@ -870,8 +967,6 @@ fn bilinear(sample: &impl Fn(PixelPoint) -> Option<[u8; 4]>, x: f64, y: f64) -> 
     }))
 }
 
-/// Invert the pixels of a rectangle (DIFFERENCE with white): shows on any
-/// colour.
 /// A global logical rect on `monitor`, in its device pixels.
 fn dev_rect(r: LogicalRect, monitor: LogicalRect, s: f64) -> PixelRect {
     let x0 = rnd((r.x - monitor.x) * s);
@@ -881,6 +976,8 @@ fn dev_rect(r: LogicalRect, monitor: LogicalRect, s: f64) -> PixelRect {
     PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
+/// Invert the pixels of a rectangle (DIFFERENCE with white): shows on any
+/// colour.
 fn invert(into: &mut Image, r: PixelRect) {
     let (iw, ih) = (into.width() as i32, into.height() as i32);
     for y in r.y.max(0)..(r.y + r.h).min(ih) {

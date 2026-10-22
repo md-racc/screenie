@@ -11,19 +11,43 @@ const MONS: [LogicalRect; 2] = [
 ];
 const START: LogicalRect = LogicalRect::new(100.0, 170.0, 560.0, 90.0);
 
+/// A monospace font, found the way `screenie_platform::fonts::monospace`
+/// finds one (this crate is under that one, so it can't call it). Without
+/// one these tests are skipped, saying so; with SCREENIE_REQUIRE_FONTS=1
+/// (as CI should set) they fail instead.
 fn font() -> Option<Vec<u8>> {
-    [
+    const CANDIDATES: &[&str] = &[
         "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    ]
-    .iter()
-    .find_map(|p| std::fs::read(p).ok())
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    ];
+    let found = CANDIDATES
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+        .or_else(|| {
+            let out = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}", "monospace"])
+                .output()
+                .ok()?;
+            std::fs::read(String::from_utf8(out.stdout).ok()?.trim()).ok()
+        });
+    if found.is_none() {
+        let required = std::env::var_os("SCREENIE_REQUIRE_FONTS").is_some_and(|v| v == "1");
+        assert!(
+            !required,
+            "no monospace font (install DejaVu Sans Mono or Noto Sans Mono)"
+        );
+        eprintln!("no monospace font: UI test skipped");
+    }
+    found
 }
 
-/// The prototype's synthetic frame: a dark grey desktop, at `scale`.
+/// A synthetic frame: a dark grey desktop across both monitors, at `scale`.
 fn frame(scale: u32) -> Picture {
     let mut img = Image::filled(3840 * scale, 1080 * scale, Rgb(31, 31, 36));
-    // A light block where the prototype draws its text, to see the box.
+    // A light block inside the start box, so the box shows.
     let w = img.width() as usize;
     for y in 195 * scale as usize..260 * scale as usize {
         for x in 120 * scale as usize..600 * scale as usize {
@@ -70,10 +94,7 @@ fn at(img: &Image, x: i32, y: i32) -> Rgb {
 
 #[test]
 fn select_on_the_left_monitor() {
-    let Some(font) = font() else {
-        eprintln!("no font: skipped");
-        return;
-    };
+    let Some(font) = font() else { return };
     let mut ui = Ui::new(&font).unwrap();
     let f = frame(1);
     let mut into = Image::new(1920, 1080);
@@ -722,4 +743,143 @@ fn a_lines_label_moves_off_an_angles_arc() {
         let c = at(&into, q.x as i32, q.y as i32);
         assert!(c.2 > 150, "the arc is covered at {q:?}: {c:?}");
     }
+}
+
+/// Every chip drawn lies wholly on one monitor.
+fn on_one_monitor(ui: &Ui) {
+    for c in ui.chips() {
+        assert!(
+            MONS.iter().any(|m| m.x <= c.x
+                && c.right() <= m.right()
+                && m.y <= c.y
+                && c.bottom() <= m.bottom()),
+            "{c:?} crosses a seam"
+        );
+    }
+}
+
+#[test]
+fn monitors_agree_on_where_the_tags_go() {
+    use screenie_core::measure::MeasureView;
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    // A box across the seam, near the bottom. A label on the left monitor
+    // is under its left end, and pushes the status off the screen there:
+    // the status goes below-right, on the right monitor. That monitor's
+    // pass has to know of the label too, or it puts the status below-left,
+    // where its own pass doesn't draw it.
+    let mut v = view(vec![]);
+    v.rect = LogicalRect::new(1500.0, 1000.0, 900.0, 40.0);
+    let pt = LogicalPoint::new;
+    v.measure = Some(MeasureView {
+        items: vec![measure_item(vec![], "4.20 m", pt(1600.5, 1076.5))],
+        progress: vec![],
+        closed: false,
+    });
+    let f = frame(1);
+    let mut left = Image::new(1920, 1080);
+    let mut right = Image::new(1920, 1080);
+    ui.draw(&f, 0, MONS[0], &v, &mut left);
+    ui.draw(&f, 1, MONS[1], &v, &mut right);
+    save("seam-left.png", &left);
+    save("seam-right.png", &right);
+    let status = ui.chips().into_iter().find(|c| c.x >= 1920.0);
+    let status = status.expect("the status, below-right on the right monitor");
+    assert!((status.right() - v.rect.right()).abs() < 1e-6, "{status:?}");
+    let (x, y) = ((status.x - 1920.0 + 4.0) as i32, (status.y + 2.0) as i32);
+    assert!(at(&right, x, y).0 < 30, "drawn: {:?}", at(&right, x, y));
+    assert_eq!(ui.chips().len(), 2); // it and the label, once each
+    on_one_monitor(&ui);
+}
+
+#[test]
+fn chips_on_the_picture_take_their_clicks() {
+    use screenie_core::measure::MeasureView;
+    use screenie_image::ui::Hit;
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    let pt = LogicalPoint::new;
+    v.measure = Some(MeasureView {
+        items: vec![measure_item(
+            vec![pt(700.5, 400.5), pt(900.5, 400.5)],
+            "4.20 m",
+            pt(800.5, 400.5),
+        )],
+        progress: vec![],
+        closed: false,
+    });
+    v.suggestions = vec![
+        SuggestionView {
+            rect: LogicalRect::new(130.0, 220.0, 150.0, 20.0),
+            category: "email",
+            ticked: false,
+            selected: true,
+        },
+        // At the top of the monitor: its chip goes under it.
+        SuggestionView {
+            rect: LogicalRect::new(1000.0, 3.0, 150.0, 20.0),
+            category: "email",
+            ticked: false,
+            selected: false,
+        },
+    ];
+    let mut into = Image::new(1920, 1080);
+    ui.draw(&frame(1), 0, MONS[0], &v, &mut into);
+    save("picture-chips.png", &into);
+    assert_eq!(ui.hit(pt(812.0, 385.0)), Some(Hit::Chip)); // the label
+    assert_eq!(ui.hit(pt(133.0, 210.0)), Some(Hit::Chip)); // above its suggestion
+    assert_eq!(ui.hit(pt(1003.0, 33.0)), Some(Hit::Chip)); // under its suggestion
+    assert!(at(&into, 1003, 33).0 < 30);
+    assert_eq!(ui.hit(pt(750.0, 300.0)), None); // the picture
+    on_one_monitor(&ui);
+}
+
+#[test]
+fn the_loupes_chip_stays_on_its_monitor() {
+    use screenie_image::ui::{Hit, LoupeView};
+    let Some(font) = font() else { return };
+    let mut ui = Ui::new(&font).unwrap();
+    let mut v = view(vec![]);
+    // The smallest magnifier, at the left monitor's right edge: its chip
+    // is wider than it, so it's moved left rather than over the seam.
+    let n = screenie_core::lens::SIZE_MIN;
+    let side = f64::from(n) * screenie_core::lens::ZOOM;
+    let l = LoupeView {
+        rect: LogicalRect::new(1920.0 - side, 500.0, side, side),
+        at: PixelPoint::new(1860, 560),
+        n,
+    };
+    v.loupe = Some(l);
+    let f = frame(1);
+    let mut left = Image::new(1920, 1080);
+    let mut right = Image::new(1920, 1080);
+    ui.draw(&f, 0, MONS[0], &v, &mut left);
+    ui.draw(&f, 1, MONS[1], &v, &mut right);
+    save("loupe-seam.png", &left);
+    let bottom = l.rect.bottom() + screenie_core::lens::CHIP;
+    let chip = ui
+        .chips()
+        .into_iter()
+        .find(|c| c.bottom() == bottom)
+        .expect("the loupe's chip");
+    assert!(chip.right() < 1920.0, "{chip:?}");
+    assert_eq!(
+        ui.hit(LogicalPoint::new(chip.x + 2.0, chip.y + 2.0)),
+        Some(Hit::Chip)
+    );
+    let leaked = (0..60)
+        .flat_map(|x| (chip.y as i32..bottom as i32).map(move |y| (x, y)))
+        .any(|(x, y)| at(&right, x, y) != Rgb(16, 16, 18));
+    assert!(!leaked, "drawn over the seam");
+    // Its swatch sits level in the chip, as the status's does: the light
+    // border's bottom row is two above the chip's bottom.
+    let sx = (chip.right() + 5.0 + 6.0) as i32;
+    let light = |y: i32| at(&left, sx, y).0 > 150;
+    let b = bottom as i32;
+    assert!(
+        light(b - 2) && !light(b - 1) && !light(b - 3),
+        "the swatch's bottom"
+    );
+    on_one_monitor(&ui);
 }

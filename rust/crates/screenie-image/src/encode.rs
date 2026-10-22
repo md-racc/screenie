@@ -4,13 +4,21 @@ use std::io;
 
 use crate::image::Image;
 
+/// The pixels as packed RGB, alpha dropped (screenshots are opaque).
+fn rgb(img: &Image) -> Vec<u8> {
+    img.data()
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
+}
+
 /// Encode as PNG: RGB (screenshots are opaque), at a zlib level 0-9. Level
 /// 1, the default, is fast and only a few percent bigger.
 pub fn png(img: &Image, level: u8) -> io::Result<Vec<u8>> {
     png_with_text(img, level, None)
 }
 
-/// PNG with a UTF-8 text chunk (iTXt) under `keyword`.
+/// PNG with a UTF-8 text chunk (iTXt): `text` is its keyword and text.
 pub fn png_with_text(img: &Image, level: u8, text: Option<(&str, &str)>) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut enc = png::Encoder::new(&mut out, img.width(), img.height());
@@ -31,12 +39,7 @@ pub fn png_with_text(img: &Image, level: u8, text: Option<(&str, &str)>) -> io::
         png::Filter::Adaptive
     });
     let mut w = enc.write_header().map_err(io::Error::other)?;
-    let rgb: Vec<u8> = img
-        .data()
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
-    w.write_image_data(&rgb).map_err(io::Error::other)?;
+    w.write_image_data(&rgb(img)).map_err(io::Error::other)?;
     w.finish().map_err(io::Error::other)?;
     Ok(out)
 }
@@ -48,12 +51,18 @@ pub fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((i.width, i.height))
 }
 
-/// Read a PNG (8-bit RGB, RGBA, grey) into an image, with the text of its
-/// `keyword` iTXt chunk if it has one.
+/// Read a PNG (any colour type and depth, brought to 8-bit RGBA) into a
+/// premultiplied image, with the text of its `keyword` iTXt chunk if it
+/// has one.
 pub fn read_png(bytes: &[u8], keyword: &str) -> io::Result<(Image, Option<String>)> {
     let mut dec = png::Decoder::new(io::Cursor::new(bytes));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut r = dec.read_info().map_err(io::Error::other)?;
+    // Its buffer is the size the header claims, before any data is read.
+    let (w, h) = r.info().size();
+    if u64::from(w) * u64::from(h) > crate::image::MAX_PIXELS {
+        return Err(io::Error::other("too big"));
+    }
     let text = r
         .info()
         .utf8_text
@@ -66,10 +75,12 @@ pub fn read_png(bytes: &[u8], keyword: &str) -> io::Result<(Image, Option<String
             .ok_or_else(|| io::Error::other("too big"))?
     ];
     let info = r.next_frame(&mut buf).map_err(io::Error::other)?;
-    let (w, h) = (info.width, info.height);
-    let n = (w * h) as usize;
-    let rgba: Vec<u8> = match info.color_type {
-        png::ColorType::Rgba => buf[..n * 4].to_vec(),
+    let n = w as usize * h as usize;
+    let mut rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => {
+            buf.truncate(n * 4);
+            buf
+        }
         png::ColorType::Rgb => buf[..n * 3]
             .chunks_exact(3)
             .flat_map(|p| [p[0], p[1], p[2], 255])
@@ -82,16 +93,12 @@ pub fn read_png(bytes: &[u8], keyword: &str) -> io::Result<(Image, Option<String
         png::ColorType::Indexed => return Err(io::Error::other("indexed PNG left unexpanded")),
     };
     // Premultiply (screenshots are opaque; this is for other images).
-    let rgba = rgba
-        .chunks_exact(4)
-        .flat_map(|p| {
-            let a = u16::from(p[3]);
-            [0, 1, 2]
-                .map(|k| ((u16::from(p[k]) * a + 127) / 255) as u8)
-                .into_iter()
-                .chain([p[3]])
-        })
-        .collect();
+    for p in rgba.chunks_exact_mut(4) {
+        let a = u16::from(p[3]);
+        for c in &mut p[..3] {
+            *c = ((u16::from(*c) * a + 127) / 255) as u8;
+        }
+    }
     let img = Image::from_rgba(w, h, rgba).ok_or_else(|| io::Error::other("bad size"))?;
     Ok((img, text))
 }
@@ -103,28 +110,23 @@ pub fn jpeg(img: &Image, quality: u8) -> Result<Vec<u8>, String> {
         u16::try_from(w).map_err(|_| "too wide for JPEG")?,
         u16::try_from(h).map_err(|_| "too tall for JPEG")?,
     );
-    let rgb: Vec<u8> = img
-        .data()
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
     let mut out = Vec::new();
     jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100))
-        .encode(&rgb, w16, h16, jpeg_encoder::ColorType::Rgb)
+        .encode(&rgb(img), w16, h16, jpeg_encoder::ColorType::Rgb)
         .map_err(|e| format!("JPEG: {e}"))?;
     Ok(out)
 }
 
 /// WebP, lossless (the encoder has no lossy mode).
 pub fn webp(img: &Image) -> Result<Vec<u8>, String> {
-    let rgb: Vec<u8> = img
-        .data()
-        .chunks_exact(4)
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
     let mut out = Vec::new();
     image_webp::WebPEncoder::new(&mut out)
-        .encode(&rgb, img.width(), img.height(), image_webp::ColorType::Rgb8)
+        .encode(
+            &rgb(img),
+            img.width(),
+            img.height(),
+            image_webp::ColorType::Rgb8,
+        )
         .map_err(|e| format!("WebP: {e}"))?;
     Ok(out)
 }
@@ -132,7 +134,7 @@ pub fn webp(img: &Image) -> Result<Vec<u8>, String> {
 /// PPM (binary P6): no compression, quickest to pipe to another tool.
 pub fn ppm(img: &Image) -> Vec<u8> {
     let mut out = format!("P6\n{} {}\n255\n", img.width(), img.height()).into_bytes();
-    out.extend(img.data().chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+    out.extend(rgb(img));
     out
 }
 

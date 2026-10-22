@@ -7,25 +7,22 @@ use crate::image::{Image, Rgb};
 /// Decode `bytes` by their format, flattening alpha over `background`.
 pub fn decode(bytes: &[u8], background: Rgb) -> Result<Image, String> {
     // read_png premultiplies (the picture's convention); the rest don't.
-    let mut premultiplied = false;
-    let (w, h, rgba) = if bytes.starts_with(b"\x89PNG") {
+    let ((w, h, mut rgba), premultiplied) = if bytes.starts_with(b"\x89PNG") {
         let (img, _) = crate::encode::read_png(bytes, "").map_err(|e| format!("PNG: {e}"))?;
-        premultiplied = true;
-        (img.width(), img.height(), img.into_data())
+        ((img.width(), img.height(), img.into_data()), true)
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        jpeg(bytes)?
+        (jpeg(bytes)?, false)
     } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        webp(bytes)?
+        (webp(bytes)?, false)
     } else if bytes.len() > 2 && bytes[0] == b'P' && b"2356".contains(&bytes[1]) {
-        pnm(bytes)?
+        (pnm(bytes)?, false)
     } else {
         return Err("not an image screenie reads: PNG, JPEG, WebP or PPM".into());
     };
-    let mut rgba = rgba;
+    let bg = [background.0, background.1, background.2];
     for p in rgba.chunks_exact_mut(4) {
         let a = u32::from(p[3]);
         if a < 255 {
-            let bg = [background.0, background.1, background.2];
             for k in 0..3 {
                 let c = if premultiplied {
                     u32::from(p[k]) * 255
@@ -47,7 +44,56 @@ fn jpeg(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut d = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
     let px = d.decode().map_err(|e| format!("JPEG: {e:?}"))?;
     let info = d.info().ok_or("JPEG: no header")?;
-    Ok((u32::from(info.width), u32::from(info.height), px))
+    let img = Image::from_rgba(u32::from(info.width), u32::from(info.height), px)
+        .ok_or("JPEG: the image's size doesn't match its data")?;
+    // A camera's pixels are as the sensor saw them; EXIF says how to turn
+    // them upright (here as a flip, then a counter-clockwise turn).
+    let t = match d.exif().and_then(|e| exif_orientation(e)) {
+        Some(2) => 4,
+        Some(3) => 2,
+        Some(4) => 6,
+        Some(5) => 5,
+        Some(6) => 3,
+        Some(7) => 7,
+        Some(8) => 1,
+        _ => 0,
+    };
+    let img = crate::compose::orient(img, crate::compose::Transform(t));
+    Ok((img.width(), img.height(), img.into_data()))
+}
+
+/// The orientation (1-8) in an EXIF block (a TIFF header and its first
+/// directory), if it gives one.
+fn exif_orientation(tiff: &[u8]) -> Option<u16> {
+    let big = match tiff.get(..4)? {
+        b"MM\0*" => true,
+        b"II*\0" => false,
+        _ => return None,
+    };
+    let u16_at = |i: usize| {
+        let b: [u8; 2] = tiff.get(i..i + 2)?.try_into().ok()?;
+        Some(if big {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
+    };
+    let u32_at = |i: usize| {
+        let b: [u8; 4] = tiff.get(i..i + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let dir = usize::try_from(u32_at(4)?).ok()?;
+    // Twelve-byte entries: tag, type (3 is SHORT), count, value.
+    (0..usize::from(u16_at(dir)?))
+        .map(|k| dir + 2 + 12 * k)
+        .find(|&e| u16_at(e) == Some(0x0112))
+        .filter(|&e| u16_at(e + 2) == Some(3))
+        .and_then(|e| u16_at(e + 8))
+        .filter(|v| (1..=8).contains(v))
 }
 
 fn webp(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
@@ -98,8 +144,12 @@ fn pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     if w == 0 || h == 0 || max == 0 || max > 65535 {
         return Err(bad("a bad size or depth"));
     }
+    if u64::from(w) * u64::from(h) > crate::image::MAX_PIXELS {
+        return Err(bad("too big"));
+    }
     let channels = if matches!(kind, b'3' | b'6') { 3 } else { 1 };
-    let n = (w * h) as usize * channels;
+    let n = w as usize * h as usize * channels;
+    // Samples are at most 65535, so this can't overflow.
     let scale = |v: u32| ((v * 255 + max / 2) / max).min(255) as u8;
     let samples: Vec<u8> = if matches!(kind, b'5' | b'6') {
         let data = &bytes[(at + 1).min(bytes.len())..]; // one whitespace, then data
@@ -122,9 +172,9 @@ fn pnm(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         let v: Vec<u8> = text
             .split_ascii_whitespace()
             .take(n)
-            .map(|t| t.parse::<u32>().map(scale))
-            .collect::<Result<_, _>>()
-            .map_err(|_| bad("a bad sample"))?;
+            .map(|t| t.parse::<u32>().ok().filter(|&v| v <= max).map(scale))
+            .collect::<Option<_>>()
+            .ok_or_else(|| bad("a bad sample"))?;
         if v.len() < n {
             return Err(bad("cut short"));
         }

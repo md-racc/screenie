@@ -9,8 +9,8 @@ fn lum(p: &[u8]) -> f32 {
     0.3 * f32::from(p[0]) + 0.59 * f32::from(p[1]) + 0.11 * f32::from(p[2])
 }
 
-/// One S-curve pass around mid-grey.
-fn s_curve(v: f32) -> f32 {
+/// One S-curve pass around mid-grey (overlaying a picture on itself).
+pub(crate) fn s_curve(v: f32) -> f32 {
     let x = v / 255.0;
     let y = if x < 0.5 {
         2.0 * x * x

@@ -101,7 +101,7 @@ usage error (exit 2).
 | Source | Meaning |
 |---|---|
 | `screen` | the frozen screen (the default) |
-| `FILE` | an image file (PNG, JPEG, WebP, PPM) |
+| `FILE` | an image file (PNG, JPEG, WebP, PPM) of up to 16384² pixels; a JPEG is turned upright by its EXIF orientation |
 | `last`, `last:N` | a past shot, with its project (layers, layout) |
 | `clipboard` | the image on the clipboard; a screenie shot there (its copies say which, as `application/x-screenie-shot`) reopens with its project, like `last` |
 | `recent` | the clipboard's image if it holds one, else `last` |

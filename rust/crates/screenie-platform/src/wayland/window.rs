@@ -251,6 +251,6 @@ impl Wayland {
             false,
         )
         .ok_or_else(|| Error::Protocol("the buffer is too small".into()))?;
-        Ok(compose::orient(&img, Transform(w.transform)))
+        Ok(compose::orient(img, Transform(w.transform)))
     }
 }

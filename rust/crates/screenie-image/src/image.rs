@@ -30,6 +30,10 @@ impl std::fmt::Debug for Image {
     }
 }
 
+/// The most pixels an image read in may have: 16384², the JPEG and WebP
+/// decoders' own bound (a gigabyte as RGBA).
+pub const MAX_PIXELS: u64 = 1 << 28;
+
 /// The side of a damage tile, px.
 pub const TILE: usize = 64;
 /// More damaged rectangles than this become their bounds.
@@ -204,6 +208,7 @@ impl Image {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     fn dot(img: &mut Image, x: i32, y: i32, w: u32, h: u32) {
         let red = Image::filled(w, h, Rgb(255, 0, 0));
@@ -237,8 +242,6 @@ mod tests {
         }
         assert_eq!(many.damage(&other), [PixelRect::new(0, 0, 7808, 64)]);
     }
-
-    use super::*;
 
     fn gradient(w: u32, h: u32) -> Image {
         let mut img = Image::new(w, h);

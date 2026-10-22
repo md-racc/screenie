@@ -1323,6 +1323,7 @@ Do not require full damage precision in the first implementation, but preserve t
 Layer clipping is enforced in imaging.
 
 An operation may geometrically extend beyond the clip, but pixels outside the clip are not affected.
+Nor are they read: a blur or a pixelate cell stops at the clip's edge, so a layer looks the same open (rendered over its clip alone) as committed (over the whole frame).
 
 This is distinct from interaction bounds.
 

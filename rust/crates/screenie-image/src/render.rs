@@ -2,7 +2,9 @@
 //! this is the only place that knows what they look like.
 //!
 //! Everything works on a patch: an image whose top-left sits at `origin`
-//! in frame pixels. A layer never touches pixels outside its clip.
+//! in frame pixels. A layer never touches pixels outside its clip, and
+//! never reads them either, so a layer looks the same over a patch of just
+//! its clip (while it's open) as over the whole frame (once committed).
 
 use screenie_core::geometry::{PixelMap, PixelPoint, PixelRect};
 use screenie_core::model::{
@@ -16,12 +18,18 @@ use tiny_skia::{
 
 use crate::image::Image;
 
-fn intersect(a: PixelRect, b: PixelRect) -> PixelRect {
+/// Where two rectangles overlap (empty, not negative, where they don't).
+pub(crate) fn intersect(a: PixelRect, b: PixelRect) -> PixelRect {
     let x0 = a.x.max(b.x);
     let y0 = a.y.max(b.y);
     let x1 = (a.x + a.w).min(b.x + b.w);
     let y1 = (a.y + a.h).min(b.y + b.h);
     PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+}
+
+/// Whether `p` is in `r` (its right and bottom edges are outside).
+pub(crate) fn contains(r: PixelRect, p: PixelPoint) -> bool {
+    p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h
 }
 
 /// A patch: pixels plus where they sit in the frame.
@@ -92,17 +100,6 @@ fn lerp(c: [f32; 3], to: [f32; 3], t: f32) -> [f32; 3] {
     [0, 1, 2].map(|k| c[k] + (to[k] - c[k]) * t)
 }
 
-/// One S-curve pass around mid-grey (overlaying a picture on itself).
-fn s_curve(v: f32) -> f32 {
-    let x = v / 255.0;
-    let y = if x < 0.5 {
-        2.0 * x * x
-    } else {
-        1.0 - 2.0 * (1.0 - x) * (1.0 - x)
-    };
-    y * 255.0
-}
-
 fn filter(patch: &mut Patch, map: &PixelMap, clip: PixelRect, f: &FilterOp) {
     if f.muted {
         return;
@@ -120,11 +117,12 @@ fn filter(patch: &mut Patch, map: &PixelMap, clip: PixelRect, f: &FilterOp) {
             per_pixel(patch, area, |c| c.map(|v| v * (1.0 + 0.1 * a).max(0.0)))
         }
         FilterKind::Contrast if a > 0.0 => {
-            let passes = a.round() as u32;
+            // (the palette goes to 4; a project file could say anything)
+            let passes = a.round().min(4.0) as u32;
             per_pixel(patch, area, |c| {
                 c.map(|mut v| {
                     for _ in 0..passes {
-                        v = s_curve(v);
+                        v = crate::view::s_curve(v);
                     }
                     v
                 })
@@ -133,17 +131,25 @@ fn filter(patch: &mut Patch, map: &PixelMap, clip: PixelRect, f: &FilterOp) {
         FilterKind::Contrast => {
             per_pixel(patch, area, |c| lerp(c, [127.5; 3], (-0.2 * a).min(1.0)))
         }
-        FilterKind::Blur => blur(patch, area, (f.amount * map.scale()).max(1.0)),
+        FilterKind::Blur => blur(
+            patch,
+            area,
+            intersect(clip, patch.extent()),
+            (f.amount * map.scale()).max(1.0),
+        ),
     }
 }
 
-/// Three box-blur passes (close to a Gaussian), reading past `area` where
-/// the patch has pixels (edges are clamped), writing only inside it.
+/// Three box-blur passes (close to a Gaussian), reading past `area` up to
+/// `bounds` (edges are clamped there), writing only inside `area`.
 /// Channels are 8.8 fixed point, and each pass a running sum, so a pixel
 /// costs the same whatever the radius, and the passes move half the bytes
 /// floats would.
-fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
-    let r = ((radius / 2.0).round() as i32).max(1);
+fn blur(patch: &mut Patch, area: PixelRect, bounds: PixelRect, radius: f64) {
+    // No wider than what it reads (a project file could ask for anything),
+    // which keeps the running sums inside a u32.
+    let widest = f64::from(bounds.w.max(bounds.h));
+    let r = ((radius / 2.0).round().min(widest) as i32).max(1);
     let margin = 3 * r;
     let src = intersect(
         PixelRect::new(
@@ -152,7 +158,7 @@ fn blur(patch: &mut Patch, area: PixelRect, radius: f64) {
             area.w + 2 * margin,
             area.h + 2 * margin,
         ),
-        patch.extent(),
+        bounds,
     );
     let (w, h) = (src.w as usize, src.h as usize);
     let mut buf = vec![[0u16; 4]; w * h];
@@ -282,7 +288,7 @@ fn glyphs(
         for j in 0..m.height as i32 {
             for i in 0..m.width as i32 {
                 let (fx, fy) = (gx + i, gy + j);
-                if fx < area.x || fy < area.y || fx >= area.x + area.w || fy >= area.y + area.h {
+                if !contains(area, PixelPoint::new(fx, fy)) {
                     continue;
                 }
                 let a = f32::from(cov[(j * m.width as i32 + i) as usize]) / 255.0;
@@ -470,12 +476,10 @@ fn stroke(patch: &mut Patch, map: &PixelMap, clip: PixelRect, st: &StrokeOp) {
     });
 }
 
-/// A highlighter trace: one path, so overlaps don't double up, multiplied
-/// at its opacity so dark text under it stays dark.
 /// The highlighter's paint: its ink at its opacity, multiplied.
 fn highlight_paint(h: &HighlightOp) -> Paint<'static> {
     let mut paint = ink(h.rgb);
-    paint.shader = tiny_skia::Shader::SolidColor(
+    paint.set_color(
         Color::from_rgba(
             h.rgb[0] as f32,
             h.rgb[1] as f32,
@@ -597,6 +601,8 @@ pub fn highlight_cached(
     }
 }
 
+/// A highlighter trace: one path, so overlaps don't double up, multiplied
+/// at its opacity so dark text under it stays dark.
 fn highlight(patch: &mut Patch, map: &PixelMap, clip: PixelRect, h: &HighlightOp) {
     let pts: Vec<(f32, f32)> = h
         .points
@@ -714,23 +720,35 @@ fn censor(patch: &mut Patch, map: &PixelMap, clip: PixelRect, c: &CensorOp) {
         }
         CensorKind::Pixelate => {
             // Blocks of the op's size, aligned to its rect: each the mean
-            // of what's under it so far.
+            // of what's under it so far, in the clip.
             let block = (c.amount * map.scale()).max(2.0);
-            let cols = (f64::from(rect.w) / block).ceil().max(1.0) as i32;
-            let rows = (f64::from(rect.h) / block).ceil().max(1.0) as i32;
-            let edge = |start: i32, len: i32, n: i32, i: i32| start + (len * i + n / 2) / n;
-            for j in 0..rows {
+            let cols = (f64::from(rect.w) / block).ceil().max(1.0) as i64;
+            let rows = (f64::from(rect.h) / block).ceil().max(1.0) as i64;
+            let edge = |start: i32, len: i32, n: i64, i: i64| {
+                start + ((i64::from(len) * i + n / 2) / n) as i32
+            };
+            // Only the cells over `area`: cell i starts within half a pixel
+            // of len * i / n, and is a pixel wide or more.
+            let over = |start: i32, len: i32, n: i64, from: i32, to: i32| {
+                let at = |p: i32| i64::from(p - start) * n / i64::from(len);
+                (at(from) - 2).max(0)..(at(to) + 2).min(n)
+            };
+            let (across, down) = (
+                over(rect.x, rect.w, cols, area.x, area.x + area.w),
+                over(rect.y, rect.h, rows, area.y, area.y + area.h),
+            );
+            for j in down {
                 let (y0, y1) = (
                     edge(rect.y, rect.h, rows, j),
                     edge(rect.y, rect.h, rows, j + 1),
                 );
-                for i in 0..cols {
+                for i in across.clone() {
                     let (x0, x1) = (
                         edge(rect.x, rect.w, cols, i),
                         edge(rect.x, rect.w, cols, i + 1),
                     );
                     let cell = PixelRect::new(x0, y0, x1 - x0, y1 - y0);
-                    let src = intersect(cell, patch.extent());
+                    let src = intersect(cell, intersect(clip, patch.extent()));
                     if src.is_empty() {
                         continue;
                     }
@@ -927,9 +945,7 @@ mod tests {
         assert_eq!(img.rgb(PixelPoint::new(50, 50)), Some(Rgb(0, 0, 0)));
     }
 
-    use crate::image::Rgb as Rgb3;
-
-    fn filtered(kind: FilterKind, amount: f64, c: Rgb3) -> Rgb3 {
+    fn filtered(kind: FilterKind, amount: f64, c: Rgb) -> Rgb {
         let mut img = Image::filled(10, 10, c);
         let mut p = Patch {
             img: &mut img,
@@ -947,26 +963,23 @@ mod tests {
 
     #[test]
     fn filters_per_pixel() {
-        let c = Rgb3(200, 100, 50);
+        let c = Rgb(200, 100, 50);
         let l = (0.3 * 200.0 + 0.59 * 100.0 + 0.11 * 50.0_f64).round() as u8;
-        assert_eq!(filtered(FilterKind::Grey, 1.0, c), Rgb3(l, l, l));
-        assert_eq!(filtered(FilterKind::Invert, 1.0, c), Rgb3(55, 155, 205));
-        assert_eq!(
-            filtered(FilterKind::Brightness, 2.0, c),
-            Rgb3(251, 151, 101)
-        );
-        assert_eq!(filtered(FilterKind::Brightness, -5.0, c), Rgb3(100, 50, 25));
+        assert_eq!(filtered(FilterKind::Grey, 1.0, c), Rgb(l, l, l));
+        assert_eq!(filtered(FilterKind::Invert, 1.0, c), Rgb(55, 155, 205));
+        assert_eq!(filtered(FilterKind::Brightness, 2.0, c), Rgb(251, 151, 101));
+        assert_eq!(filtered(FilterKind::Brightness, -5.0, c), Rgb(100, 50, 25));
         // Contrast: the S-curve pushes away from mid-grey; less pulls toward it.
         let more = filtered(FilterKind::Contrast, 1.0, c);
         assert!(more.0 > 200 && more.2 < 50, "{more:?}");
-        assert_eq!(filtered(FilterKind::Contrast, -5.0, c), Rgb3(128, 128, 128));
+        assert_eq!(filtered(FilterKind::Contrast, -5.0, c), Rgb(128, 128, 128));
         // A flat colour stays flat under blur.
         assert_eq!(filtered(FilterKind::Blur, 4.0, c), c);
     }
 
     #[test]
     fn blur_spreads_an_edge_and_stays_in_its_rect() {
-        let mut img = Image::filled(40, 10, Rgb3(0, 0, 0));
+        let mut img = Image::filled(40, 10, Rgb(0, 0, 0));
         for y in 0..10 {
             for x in 20..40 {
                 let i = (y * 40 + x) * 4;
@@ -991,8 +1004,69 @@ mod tests {
     }
 
     #[test]
+    fn pixelate_works_only_over_its_area() {
+        // A rect a million pixels across, mostly off the patch: two cells
+        // a side, so far too many to visit them all.
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
+        img.blit(
+            &Image::filled(1, 100, Rgb(200, 200, 200)),
+            PixelRect::new(0, 0, 1, 100),
+            41,
+            0,
+        );
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let huge = LogicalRect::new(-500_000.0, -500_000.0, 1_000_000.0, 1_000_000.0);
+        let op = censor_op(CensorKind::Pixelate, 2.0, huge);
+        apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
+        // The column is averaged with its cell's neighbour, as anywhere.
+        let v = |x| img.rgb(PixelPoint::new(x, 50)).unwrap().0;
+        assert_eq!((v(40), v(41), v(42)), (100, 100, 0));
+    }
+
+    #[test]
+    fn out_of_range_amounts_are_bounded() {
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
+        img.blit(
+            &Image::filled(50, 100, Rgb(255, 255, 255)),
+            PixelRect::new(0, 0, 50, 100),
+            50,
+            0,
+        );
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        let op = |kind, amount| {
+            OpData::Filter(FilterOp {
+                rect: LogicalRect::new(0.0, 0.0, 100.0, 100.0),
+                kind,
+                amount,
+                muted: false,
+            })
+        };
+        let all = PixelRect::new(0, 0, 100, 100);
+        apply_op(&mut p, &map(), all, &op(FilterKind::Blur, 1e6));
+        // As wide as the patch: the two halves run well into each other.
+        let v = |img: &Image, x| img.rgb(PixelPoint::new(x, 50)).unwrap().0;
+        assert!(
+            v(&img, 0) > 64 && v(&img, 99) < 192,
+            "{} {}",
+            v(&img, 0),
+            v(&img, 99)
+        );
+        let mut p = Patch {
+            img: &mut img,
+            origin: PixelPoint::new(0, 0),
+        };
+        apply_op(&mut p, &map(), all, &op(FilterKind::Contrast, 1e9)); // and done
+    }
+
+    #[test]
     fn a_muted_filter_does_nothing() {
-        let mut img = Image::filled(10, 10, Rgb3(10, 20, 30));
+        let mut img = Image::filled(10, 10, Rgb(10, 20, 30));
         let mut p = Patch {
             img: &mut img,
             origin: PixelPoint::new(0, 0),
@@ -1004,13 +1078,13 @@ mod tests {
             muted: true,
         });
         apply_op(&mut p, &map(), PixelRect::new(0, 0, 100, 100), &op);
-        assert_eq!(img.rgb(PixelPoint::new(5, 5)), Some(Rgb3(10, 20, 30)));
+        assert_eq!(img.rgb(PixelPoint::new(5, 5)), Some(Rgb(10, 20, 30)));
     }
 
     #[test]
     fn an_arrow_has_a_head_at_its_end_only() {
         use screenie_core::geometry::LogicalPoint;
-        let mut img = Image::filled(100, 100, Rgb3(0, 0, 0));
+        let mut img = Image::filled(100, 100, Rgb(0, 0, 0));
         let mut p = Patch {
             img: &mut img,
             origin: PixelPoint::new(0, 0),
@@ -1034,7 +1108,7 @@ mod tests {
     #[test]
     fn a_highlight_tints_light_and_keeps_dark_dark() {
         use screenie_core::geometry::LogicalPoint;
-        let mut img = Image::filled(100, 100, Rgb3(255, 255, 255));
+        let mut img = Image::filled(100, 100, Rgb(255, 255, 255));
         for x in 0..100 {
             let i = (50 * 100 + x) * 4;
             img.data_mut()[i..i + 3].copy_from_slice(&[0, 0, 0]); // a dark line of "text"
@@ -1056,8 +1130,8 @@ mod tests {
             tinted.0 == 255 && tinted.2 < 200 && tinted.2 > 100,
             "{tinted:?}"
         ); // yellowish, not opaque
-        assert_eq!(px(50, 50), Rgb3(0, 0, 0)); // the text stays black
-        assert_eq!(px(50, 40), Rgb3(255, 255, 255)); // outside the trace
+        assert_eq!(px(50, 50), Rgb(0, 0, 0)); // the text stays black
+        assert_eq!(px(50, 40), Rgb(255, 255, 255)); // outside the trace
     }
 
     #[test]
@@ -1081,7 +1155,7 @@ mod tests {
     #[test]
     fn blur_matches_a_direct_box_blur_to_a_level() {
         let (w, h, r) = (37usize, 23usize, 3i32);
-        let mut img = Image::filled(w as u32, h as u32, Rgb3(0, 0, 0));
+        let mut img = Image::filled(w as u32, h as u32, Rgb(0, 0, 0));
         let mut seed = 7u32;
         for v in img.data_mut().iter_mut() {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
@@ -1117,11 +1191,8 @@ mod tests {
             img: &mut img,
             origin: PixelPoint::new(0, 0),
         };
-        blur(
-            &mut p,
-            PixelRect::new(0, 0, w as i32, h as i32),
-            f64::from(2 * r),
-        );
+        let all = PixelRect::new(0, 0, w as i32, h as i32);
+        blur(&mut p, all, all, f64::from(2 * r));
         let worst = img
             .data()
             .iter()
