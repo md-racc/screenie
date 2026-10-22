@@ -1,8 +1,8 @@
 # screenie(1): the command-line interface (Rust port)
 
-**Status:** the Rust port's CLI contract. The Python prototype keeps its
-three flags (`--window`, `--save-dir`, `--lang`) and won't grow this
-interface. Picker behaviour and keys are specified in `README.md` (which
+**Status:** the Rust port's CLI contract. It replaces the Python
+prototype's three flags (`--window`, `--save-dir`, `--lang`): see
+MIGRATING FROM THE PROTOTYPE. Picker behaviour and keys are specified in `README.md` (which
 wins over this document), and will become the man page's KEYS section.
 How the port is built is `docs/architecture-rust.md`.
 

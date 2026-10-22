@@ -1,6 +1,7 @@
 //! Select's behaviour, driven like a user: `--keys` scripts, and raw
 //! events where timing matters. Ported from the prototype's
-//! tests/test_modes.py, tests/test_audit.py and tests/test_recall.py.
+//! tests/test_modes.py, tests/test_audit.py and tests/test_recall.py (at
+//! the `python-prototype` tag).
 
 mod common;
 

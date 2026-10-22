@@ -1,15 +1,4 @@
-# Python (the prototype)
-__pycache__/
-*.py[cod]
-*.egg-info/
-build/
-dist/
-.venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Rust (the port, under rust/)
+# Rust (under rust/)
 target/
 
 # editors and OS

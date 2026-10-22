@@ -34,9 +34,9 @@ Use Rust's type system primarily to prevent invalid state and accidental mixing 
 
 # 2. Repository structure
 
-The Rust implementation lives in the existing screenie repository alongside the Python behavioral reference.
+The Rust implementation lives in the screenie repository, under `rust/`.
 
-Recommended workspace:
+Workspace:
 
 ```text
 screenie/
@@ -46,10 +46,11 @@ screenie/
 │   ├── cli.md
 │   ├── auto-redact.md
 │   ├── measure.md
-│   └── annotate.md
-├── src/screenie/              # Python prototype
-├── tests/                     # Python behavioral reference
+│   ├── annotate.md
+│   └── mouse.md
+├── TODO.md
 └── rust/
+    ├── PROGRESS.md
     ├── Cargo.toml
     └── crates/
         ├── screenie-core/
@@ -58,14 +59,9 @@ screenie/
         └── screenie/
 ```
 
-The implementation should be developed on a separate branch/worktree until it is suitable for daily use.
+The implementation was developed on a separate branch and worktree until it was suitable for daily use, and merged to `main` on 2026-10-08.
 
-The Python prototype remains available during the port for:
-
-- behavioral comparison;
-- test reference;
-- UX validation;
-- fallback daily use (until 2026-10-08, when it was retired).
+The Python prototype (`src/screenie/`, with its tests in `tests/`) was the behavioral reference, test reference and fallback during the port. It was retired as a fallback on 2026-10-08 and removed on 2026-10-22; it's kept at the `python-prototype` tag.
 
 ---
 
@@ -1985,7 +1981,7 @@ CLI exit semantics are defined in `docs/cli.md`.
 
 # 66. Testing strategy
 
-The Rust test suite should treat current Python behavior as the executable reference during the port.
+The Rust test suite treated the Python prototype's behavior as the executable reference during the port: its behavioral tests (`tests/test_modes.py`, `tests/test_audit.py`, at the `python-prototype` tag) were ported into `screenie-core`.
 
 Most behavioral tests belong in `screenie-core`.
 
@@ -2422,5 +2418,5 @@ says what was chosen and why. Smaller judgement calls live in
   it as the plain capture.
 - **The recall ring keeps the prototype's `regions.json` format** in the
   same place (`$XDG_STATE_HOME/screenie/regions.json`), so the Python and
-  Rust pickers share one ring until the cutover. Core holds the data and
+  Rust pickers shared one ring until the cutover. Core holds the data and
   its JSON; the front end does the file I/O.

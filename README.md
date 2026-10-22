@@ -8,7 +8,7 @@ The core idea is simple: learn how **Select** works, and the rest of the picker 
 
 ## Status
 
-screenie is a Rust program, used daily on Hyprland. It began as a Python prototype for settling the UX, which is now frozen and kept only as a historical reference (no longer a fallback, since 2026-10-08).
+screenie is a Rust program, used daily on Hyprland. It began as a Python prototype for settling the UX, which was retired on 2026-10-08 and removed from the tree on 2026-10-22; it's kept in git at the `python-prototype` tag.
 
 This README is the authoritative specification for picker behavior. When implementation and README disagree, the README wins.
 
@@ -20,7 +20,6 @@ Supporting design documents:
 - `docs/annotate.md` — annotation extensions
 - `docs/architecture-rust.md` — architecture of the Rust rewrite
 - `TODO.md` — port notes and deferred work
-- `docs/python-prototype.md` — running, testing and comparing against the Python prototype
 
 ## What screenie does
 
@@ -47,18 +46,7 @@ What you see in the frozen frame is what the output is based on. Live desktop ch
 
 ## Platform
 
-### Current prototype
-
-The current Python implementation targets:
-
-- Wayland
-- Hyprland
-- `gtk-layer-shell`
-- `grim`
-
-### Rust implementation
-
-The Rust port targets Wayland first, with Hyprland as the initial supported compositor environment.
+screenie targets Wayland first, with Hyprland as the initial supported compositor environment. It captures with wlr-screencopy (and ext-image-copy-capture for a window's own pixels) and draws its overlays as layer-shell surfaces. OCR uses Tesseract, codes use zbar, and notifications use `notify-send`.
 
 The architecture is intended to allow X11 support later without changing picker behavior.
 
@@ -773,7 +761,7 @@ That representation is shared by:
 - future scale-bar detection;
 - possible future word-level text selection.
 
-The current Python prototype uses Tesseract.
+OCR uses Tesseract.
 
 ---
 
@@ -984,35 +972,6 @@ Mixed and fractional monitor scaling must not create different interpretations o
 
 ---
 
-# Current Python prototype
-
-The prototype currently implements:
-
-- Select;
-- Insert;
-- Loupe;
-- Enhance;
-- Censor;
-- Annotate pen/rectangle/circle;
-- Filter;
-- Layers;
-- image output;
-- OCR;
-- colour picking;
-- QR/barcode decoding;
-- pins;
-- region recall.
-
-Its purpose is to settle interaction behavior, not to become the long-term implementation.
-
-Current dependencies include GTK3, cairo, gtk-layer-shell, grim, wl-clipboard, notify-send, Tesseract, zbar and swayimg.
-
-The Python CLI remains intentionally small and is not being expanded while the Rust port is underway.
-
-How to run and test it, its tuning constants, and where it differs from this README: `docs/python-prototype.md`.
-
----
-
 # Rust port
 
 The Rust implementation reached behavioral parity before expanding the feature set. The order it was built in (milestones 1-11 are done; 12 is deferred):
@@ -1030,7 +989,7 @@ The Rust implementation reached behavioral parity before expanding the feature s
 11. Measure and auto-redact;
 12. additional platform support such as X11.
 
-The Python prototype was the behavioral reference until parity; this README is now the only one.
+The Python prototype was the behavioral reference until parity; this README is now the only one. The prototype is at the `python-prototype` tag.
 
 ---
 
@@ -1057,8 +1016,6 @@ Important test areas include:
 - serialization round trips;
 - logical/pixel rounding;
 - rendered image equivalence.
-
-The existing Python test suite remains useful as a behavioral reference during the port.
 
 ---
 

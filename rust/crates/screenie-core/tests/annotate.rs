@@ -1,5 +1,6 @@
 //! Annotate (the pen, inks, width) and its Shape child. Ported from the
-//! prototype's tests/test_modes.py and tests/test_audit.py.
+//! prototype's tests/test_modes.py and tests/test_audit.py (at the
+//! `python-prototype` tag).
 
 mod common;
 

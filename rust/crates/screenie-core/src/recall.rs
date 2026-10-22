@@ -7,7 +7,7 @@
 //!
 //! This is only the data. The front end reads and writes the file
 //! (`$XDG_STATE_HOME/screenie/regions.json`), in the same format as the
-//! Python prototype, so the two can share it during the port.
+//! Python prototype, so the two could share it during the port.
 
 use serde::{Deserialize, Serialize};
 

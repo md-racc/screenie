@@ -1,7 +1,8 @@
 //! The Layers view: picking, moving, deleting and hiding committed layers,
 //! and their project-history undo. Ported from the prototype's
-//! tests/test_modes.py and test_audit.py, following README where the
-//! prototype differs (python-prototype.md, differences 2 and 3).
+//! tests/test_modes.py and test_audit.py (at the `python-prototype` tag),
+//! following README where the prototype differs: hiding is an undo step,
+//! and `u` undoes the last layer action, not a box change.
 
 mod common;
 

@@ -1,5 +1,6 @@
 //! Filter: the stack, amounts, the list keys and its undo. Ported from the
-//! prototype's tests/test_modes.py and tests/test_audit.py.
+//! prototype's tests/test_modes.py and tests/test_audit.py (at the
+//! `python-prototype` tag).
 
 mod common;
 
