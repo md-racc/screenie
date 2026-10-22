@@ -1,7 +1,5 @@
 //! Insert, Loupe and Enhance: the point cursor, the lenses, view filters,
-//! and positions handed back. Ported from the prototype's
-//! tests/test_modes.py and tests/test_audit.py (at the `python-prototype`
-//! tag).
+//! and positions handed back.
 
 mod common;
 

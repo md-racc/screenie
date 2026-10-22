@@ -1,7 +1,5 @@
 //! Select's behaviour, driven like a user: `--keys` scripts, and raw
-//! events where timing matters. Ported from the prototype's
-//! tests/test_modes.py, tests/test_audit.py and tests/test_recall.py (at
-//! the `python-prototype` tag).
+//! events where timing matters.
 
 mod common;
 
@@ -512,7 +510,7 @@ fn dot_with_one_box_says_last() {
     assert!(!s.selection().is_centred()); // . leaves centre mode
 }
 
-// --- the box by its edges (docs/mouse.md) --------------------------------------------
+// --- the box by its edges (docs/picker.md) -------------------------------------------
 
 fn boxed() -> Session {
     session_at(r(100.0, 100.0, 400.0, 300.0), vec![])
@@ -582,7 +580,7 @@ fn away_from_the_edges_a_drag_still_draws_and_a_click_still_snaps() {
     assert_eq!(s.rect(), t.rect());
 }
 
-// --- clickable palettes (docs/mouse.md) ----------------------------------------------
+// --- clickable palettes (docs/picker.md) ---------------------------------------------
 
 #[test]
 fn a_palette_click_does_what_its_key_does_in_every_mode() {

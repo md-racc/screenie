@@ -1,6 +1,6 @@
-//! OCR results as plain data (README, OCR): the full text, and each word
-//! with its box and confidence. Shared by OCR output, auto-redact and
-//! Measure's scale-bar reading. The engine lives in the platform crate.
+//! OCR results as plain data (docs/picker.md, Output): the full text, and
+//! each word with its box and confidence. Shared by OCR output, auto-redact
+//! and Measure's scale-bar reading. The engine lives in the platform crate.
 
 use crate::geometry::PixelRect;
 

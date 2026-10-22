@@ -24,7 +24,7 @@ pub const DRAG_SLOP: f64 = 3.0;
 /// How near the box's edge a press takes hold of it, logical px.
 pub const GRAB: f64 = 6.0;
 
-/// What a press takes hold of (docs/mouse.md).
+/// What a press takes hold of (docs/picker.md, The box by its edges).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Handle {
     /// Nothing: a drag draws a new box.

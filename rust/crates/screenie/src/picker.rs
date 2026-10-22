@@ -332,8 +332,8 @@ mod tests {
         assert_eq!(p.session.mode_name(), "select");
     }
 
-    /// Frame costs, for the performance audit (docs/architecture-rust.md
-    /// §69): `cargo test --release -p screenie frame_costs -- --ignored
+    /// Frame costs (docs/architecture.md, Performance):
+    /// `cargo test --release -p screenie frame_costs -- --ignored
     /// --nocapture`. Two 1920x1080 monitors, a noisy frame, a big box.
     #[test]
     #[ignore]

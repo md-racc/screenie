@@ -72,7 +72,7 @@ pub const SELECT: &[&[Item]] = &[
 ];
 
 /// Select's palette: the modes it opens and what it finishes with, so a
-/// session can go by mouse alone (docs/mouse.md).
+/// session can go by mouse alone (docs/picker.md, Palettes).
 pub const SELECT_PALETTE: &[&[Item]] = &[
     &[
         ("insert", &[Intent::Insert]),
@@ -357,8 +357,8 @@ pub const REDACT: &[&[Item]] = &[&[
     ("back", &[Intent::Back]),
 ]];
 
-/// Measure's primitives, always shown (README: palettes for directly
-/// selectable kinds).
+/// Measure's primitives, always shown (docs/picker.md, Tags: a palette
+/// for directly selectable kinds).
 pub const MEASURE_PALETTE: &[&[Item]] = &[&[
     ("line", &[Intent::Measure(crate::measure::Prim::Line)]),
     ("circle", &[Intent::Measure(crate::measure::Prim::Circle)]),

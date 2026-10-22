@@ -1,5 +1,5 @@
 //! Annotate (`a`) and its Shape child: visible markup in the open layer
-//! (README, Annotate; docs/annotate.md; the keys are in keymap.rs).
+//! (docs/picker.md, Annotate; the keys are in keymap.rs).
 //!
 //! The pen is the default: a drag, or Space and hjkl, draws a freehand
 //! line. Shift holds the piece being drawn straight, Ctrl bends it into an

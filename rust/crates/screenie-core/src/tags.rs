@@ -1,5 +1,5 @@
 //! Where tags go: the status line, the legend and lists, placed around the
-//! main box (README, Tags).
+//! main box (docs/picker.md, Tags).
 //!
 //! Each kind has its own side, so they never compete for one spot: the
 //! status tag on the bottom, the palette and legend on top, lists on the

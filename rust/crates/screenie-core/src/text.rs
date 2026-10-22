@@ -1,6 +1,7 @@
 //! Text input: a temporary child that suspends command letters. Typed
 //! keys are literal text until Enter (accept) or Esc (cancel); the child
-//! returns the text, and its parent says what it means (architecture §20).
+//! returns the text, and its parent says what it means
+//! (docs/architecture.md, Text input).
 //!
 //! For a text annotation it also previews the text where it will go, and
 //! Ctrl keys place and style it: Ctrl+hjkl nudge it 1px (Ctrl+Shift 10px),

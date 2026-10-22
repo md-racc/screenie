@@ -1,6 +1,4 @@
-//! Censor, the open layer, its undo, and the Esc / q warnings. Ported
-//! from the prototype's tests/test_modes.py and tests/test_audit.py (at
-//! the `python-prototype` tag).
+//! Censor, the open layer, its undo, and the Esc / q warnings.
 
 mod common;
 

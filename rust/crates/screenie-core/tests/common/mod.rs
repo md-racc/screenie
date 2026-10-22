@@ -1,5 +1,4 @@
-//! The prototype's test fixture (tests/test_modes.py, at the
-//! `python-prototype` tag): two 1920x1080 monitors side by side at scale
+//! The shared test fixture: two 1920x1080 monitors side by side at scale
 //! 1, three tiled windows, and a starting box at 100,170 560x90.
 
 #![allow(dead_code)]

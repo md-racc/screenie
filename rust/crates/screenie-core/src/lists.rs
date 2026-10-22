@@ -1,6 +1,6 @@
-//! The list grammar Filter and Layers share (README, Lists): selection
-//! and order over stable IDs, listed bottom first here (the tag shows the
-//! top of the stack first).
+//! The list grammar Filter and Layers share (docs/picker.md, Lists):
+//! selection and order over stable IDs, listed bottom first here (the tag
+//! shows the top of the stack first).
 //!
 //! What delete, mute and hide mean is the mode's; this only keeps the
 //! selection sensible.
@@ -25,7 +25,8 @@ pub fn swap_with<T: Copy + PartialEq>(ids: &[T], selected: Option<T>, delta: i32
 /// list as it was): the next surviving item, else the previous one.
 ///
 /// "Next" is the next row down the list as displayed (top first), so the
-/// item below in the stack; with none below, the one above (README, Lists).
+/// item below in the stack; with none below, the one above
+/// (docs/picker.md, Lists).
 pub fn after_delete<T: Copy>(before: &[T], index: usize) -> Option<T> {
     if index > 0 {
         before.get(index - 1).copied()

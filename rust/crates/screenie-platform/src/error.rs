@@ -1,4 +1,4 @@
-//! Platform failures, by class (architecture-rust.md §65).
+//! Platform failures, by class (docs/architecture.md, Error handling).
 
 use std::fmt;
 use std::io;

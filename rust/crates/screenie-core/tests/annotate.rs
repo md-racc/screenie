@@ -1,6 +1,4 @@
-//! Annotate (the pen, inks, width) and its Shape child. Ported from the
-//! prototype's tests/test_modes.py and tests/test_audit.py (at the
-//! `python-prototype` tag).
+//! Annotate (the pen, inks, width) and its Shape child.
 
 mod common;
 
@@ -35,7 +33,7 @@ fn ink(s: &Session) -> (String, f64) {
     (i.name.clone(), w)
 }
 
-/// A picture that's light grey everywhere (the prototype fixture's text).
+/// A picture that's light grey everywhere.
 struct Grey;
 
 impl Sampler for Grey {

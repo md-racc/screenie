@@ -318,7 +318,7 @@ impl Session {
         let c = self.pixels.to_logical(m.cursor.at);
         let around = LogicalRect::new(c.x - 12.0, c.y - 12.0, 24.0, 24.0);
         let size = f64::from(self.loupe_px) * ZOOM;
-        // Only the cursor's monitor (README, Loupe).
+        // Only the cursor's monitor (docs/picker.md, Loupe).
         let monitors: Vec<LogicalRect> = self
             .layout
             .monitor_at(c)
