@@ -7,6 +7,8 @@
 //!   gives. Every held direction counts, so `k` + `l` is diagonal.
 //! - Keys held across a mode transition go stale: until they're released,
 //!   they're not fresh presses in the new mode, and they stop repeating.
+//! - A direction pressed with Super held never repeats, even after Super
+//!   is released while it's still down.
 //!
 //! Time is seconds on any monotonic clock, passed in with each call.
 
@@ -136,6 +138,8 @@ impl InputState {
     }
 
     /// A key went down. `mods` is the modifier state including this key.
+    /// A direction pressed with Super held is down but never held, so it
+    /// doesn't steer once Super is let go.
     pub fn press(&mut self, code: u32, key: Key, mods: Mods, now: f64) -> Press {
         self.mods = mods;
         if key.is_modifier() {
@@ -145,7 +149,7 @@ impl InputState {
             return Press::Ignored;
         }
         self.down.insert(code);
-        if let Some(dir) = key.direction() {
+        if let Some(dir) = key.direction().filter(|_| !mods.logo) {
             self.held.push(HeldDir {
                 code,
                 dir,

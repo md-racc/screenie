@@ -1,6 +1,7 @@
-//! Auto-redact's OCR jobs. The picker's crop is taken at once, from the
-//! committed picture; tesseract then runs inline (`--keys`, `--no-ui`) or
-//! on a thread (the overlay), whose results the picker collects on ticks.
+//! Auto-redact's OCR jobs, of the committed picture as it is when they're
+//! asked for: cropped and read by tesseract inline (`--keys`, `--no-ui`)
+//! or on a thread (the overlay), whose results the picker collects on
+//! ticks.
 //!
 //! Scans are kept, by picture version and rect (docs/auto-redact.md,
 //! Performance): a scan of a rect inside one already made, of the same
@@ -12,6 +13,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 use screenie_core::geometry::PixelRect;
+use screenie_core::model::Layer;
 use screenie_core::ocr::OcrResult;
 use screenie_core::session::{Analyzer, JobKind, JobResult, Session};
 use screenie_image::Picture;
@@ -168,19 +170,12 @@ impl Ocr {
         (ocr, rx)
     }
 
-    /// Scan each of `rects` (with codes) in the background, as the picture
-    /// is now, for scans inside them to find.
-    pub fn prescan(&mut self, rects: &[PixelRect]) {
+    /// Scan each of `rects` (with `codes` when the detectors include them)
+    /// in the background, as the session's committed picture is now (its
+    /// `layers`), for scans inside them to find.
+    pub fn prescan(&mut self, layers: &[Layer], rects: &[PixelRect], codes: bool) {
+        let keys = self.prescan_keys(layers, rects, codes);
         let frame = self.picture.committed().clone();
-        let version = self.picture.version();
-        let keys: Vec<Key> = rects
-            .iter()
-            .map(|&rect| Key {
-                version,
-                rect,
-                codes: true,
-            })
-            .collect();
         self.scans.0.lock().expect("scans").running.extend(&keys);
         let (scans, lang) = (self.scans.clone(), self.lang.clone());
         std::thread::spawn(move || {
@@ -188,12 +183,28 @@ impl Ocr {
             // kept waiting.
             let picture = Picture::new(frame);
             for key in keys {
-                let result = Crop::of(&picture, key.rect).and_then(|c| c.recognize(&lang, true));
+                let result =
+                    Crop::of(&picture, key.rect).and_then(|c| c.recognize(&lang, key.codes));
                 let (lock, ready) = &*scans;
                 lock.lock().expect("scans").finish(key, &result);
                 ready.notify_all();
             }
         });
+    }
+
+    /// What a prescan of `rects` will scan: the picture with `layers`
+    /// synced in, as a job's sync will see it.
+    fn prescan_keys(&mut self, layers: &[Layer], rects: &[PixelRect], codes: bool) -> Vec<Key> {
+        self.picture.sync(layers, None, None);
+        let version = self.picture.version();
+        rects
+            .iter()
+            .map(|&rect| Key {
+                version,
+                rect,
+                codes,
+            })
+            .collect()
     }
 }
 
@@ -213,15 +224,14 @@ impl Analyzer for Ocr {
             }
             scans.running.iter().any(|k| k.covers(&key))
         };
-        let crop = match Crop::of(&self.picture, rect) {
-            Ok(c) => c,
-            Err(e) => return Some(JobResult::Ocr(Err(e))),
-        };
         let Some(tx) = &self.results else {
-            let result = crop.recognize(&self.lang, codes);
+            let result = Crop::of(&self.picture, rect).and_then(|c| c.recognize(&self.lang, codes));
             self.scans.0.lock().expect("scans").finish(key, &result);
             return Some(JobResult::Ocr(result));
         };
+        // The crop is made on the thread too, so the overlay isn't kept
+        // waiting (the frame's pixels are shared).
+        let frame = self.picture.committed().clone();
         let (tx, lang, scans) = (tx.clone(), self.lang.clone(), self.scans.clone());
         if !pending {
             scans.0.lock().expect("scans").running.push(key);
@@ -243,7 +253,8 @@ impl Analyzer for Ocr {
                     guard = ready.wait(guard).expect("scans");
                 }
             }
-            let result = crop.recognize(&lang, codes);
+            let result =
+                Crop::of(&Picture::new(frame), rect).and_then(|c| c.recognize(&lang, codes));
             lock.lock().expect("scans").finish(key, &result);
             ready.notify_all();
             // The picker may be gone by now: then nobody wants it.
@@ -342,5 +353,82 @@ mod tests {
         }
         assert_eq!(s.done.len(), KEPT);
         assert!(s.answer(&key(19)).is_some() && s.answer(&key(0)).is_none());
+    }
+
+    /// A small picture on one monitor, and a session over it.
+    fn setup() -> (Picture, Session) {
+        use screenie_core::geometry::LogicalRect;
+        use screenie_core::layout::{Layout, Monitor, MonitorId};
+        use screenie_core::session::Setup;
+        use screenie_image::{Frame, Image, Rgb};
+        let mon = Monitor {
+            id: MonitorId(0),
+            name: "A".into(),
+            rect: LogicalRect::new(0.0, 0.0, 40.0, 20.0),
+            scale: 2.0,
+        };
+        let layout = Layout::new(vec![mon], vec![], MonitorId(0));
+        let frame = Frame::new(Image::filled(80, 40, Rgb(250, 250, 250)), layout.bounds);
+        let session = Session::new(Setup {
+            layout,
+            pixels: *frame.map(),
+            start: Some(LogicalRect::new(0.0, 0.0, 40.0, 20.0)),
+            recall: vec![],
+        });
+        (Picture::new(frame), session)
+    }
+
+    #[test]
+    fn a_prescan_is_of_the_picture_the_scans_will_ask_about() {
+        use screenie_core::geometry::LogicalRect;
+        use screenie_core::model::{CensorKind, CensorOp, LayerId, Op, OpData, OpId};
+        let (picture, _) = setup();
+        let (mut ocr, _rx) = Ocr::threaded(picture, "eng".into());
+        let layers = [Layer {
+            id: LayerId(1),
+            clip: LogicalRect::new(0.0, 0.0, 40.0, 20.0),
+            hidden: false,
+            ops: vec![Op {
+                id: OpId(2),
+                data: OpData::Censor(CensorOp {
+                    rect: LogicalRect::new(0.0, 0.0, 10.0, 10.0),
+                    kind: CensorKind::Bar,
+                    amount: 0.0,
+                }),
+            }],
+        }];
+        let rects = [PixelRect::new(0, 0, 80, 40)];
+        let before = ocr.picture.version();
+        let keys = ocr.prescan_keys(&layers, &rects, false);
+        let version = ocr.picture.version();
+        assert_ne!(version, before, "the layers are synced in");
+        assert_eq!(keys.len(), 1);
+        // Without codes in the detectors, it doesn't look for any.
+        assert!(
+            keys.iter().all(|k| k.version == version && !k.codes),
+            "{keys:?}"
+        );
+        let keys = ocr.prescan_keys(&layers, &rects, true);
+        assert!(keys.iter().all(|k| k.version == version && k.codes));
+        // And the prescan itself starts, whatever its thread finds.
+        ocr.prescan(&layers, &rects, false);
+        // A job's sync, with the same layers, leaves it as it is.
+        ocr.picture.sync(&layers, None, None);
+        assert_eq!(ocr.picture.version(), version);
+    }
+
+    #[test]
+    fn a_threaded_job_answers_on_the_receiver_and_finishes_its_scan() {
+        let (picture, session) = setup();
+        let (mut ocr, rx) = Ocr::threaded(picture, "eng".into());
+        let job = JobKind::Ocr {
+            rect: PixelRect::new(0, 0, 80, 40),
+            codes: false,
+        };
+        assert!(ocr.start(&session, 7, job).is_none(), "not at once");
+        // Read, or failed with no tesseract: either way it comes back.
+        let (id, result) = rx.recv_timeout(std::time::Duration::from_secs(60)).unwrap();
+        assert!(id == 7 && matches!(result, JobResult::Ocr(_)));
+        assert!(ocr.scans.0.lock().unwrap().running.is_empty());
     }
 }

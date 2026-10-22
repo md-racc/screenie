@@ -242,8 +242,9 @@ impl SnapEnv {
             .filter(|w| monitor.is_some_and(|m| m.contains(w.centre())))
             .copied()
             .collect();
+        let holding = self.windows.iter().find(|w| w.contains(c)).copied();
         let mut steps: Vec<LogicalRect> = Vec::new();
-        steps.extend(own.or_else(|| nearest(&on_monitor, c)));
+        steps.extend(own.or(holding).or_else(|| nearest(&on_monitor, c)));
         steps.extend(monitor);
         steps.push(sel.bounds());
         // A fullscreen window is its monitor; one monitor is everything.
@@ -409,6 +410,20 @@ mod tests {
         let mut s = sel(WINDOWS[2]);
         e.scope(&mut s, 1);
         assert_eq!(s.rect(), MONITORS[0]);
+    }
+
+    #[test]
+    fn plus_widens_a_drawn_box_to_a_window_straddling_monitors() {
+        let w = r(1500.0, 100.0, 1000.0, 800.0); // centre on MONITORS[1]
+        let e = SnapEnv::new(vec![w, WINDOWS[2]], MONITORS.to_vec());
+        let mut s = sel(r(1600.0, 200.0, 100.0, 100.0)); // centre on MONITORS[0]
+        e.scope(&mut s, 1);
+        assert_eq!(s.rect(), w);
+        // Then the window's own monitor, and back down to the window.
+        e.scope(&mut s, 1);
+        assert_eq!(s.rect(), MONITORS[1]);
+        e.scope(&mut s, -1);
+        assert_eq!(s.rect(), w);
     }
 
     #[test]

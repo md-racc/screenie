@@ -26,6 +26,7 @@ pub const OPTIONS: &[(&str, Option<&[&str]>)] = &[
         Some(&["all", "monitor", "active", "last-region"]),
     ),
     ("--keys", Some(&[])),
+    ("--keys-file", Some(&[])),
     ("--no-ui", None),
     (
         "--mode",
@@ -38,22 +39,28 @@ pub const OPTIONS: &[(&str, Option<&[&str]>)] = &[
         Some(&["image", "text", "colour", "code", "pin", "measure"]),
     ),
     ("--lock-box", None),
+    ("--no-lock-box", None),
     ("--select-only", None),
     ("--region-format", Some(&["slurp", "json", "hypr"])),
     ("--measure-scale", Some(&[])),
     ("--redact", Some(&["suggest", "auto"])),
     ("--delay", Some(&[])),
     ("--cursor", None),
+    ("--no-cursor", None),
     ("--scale", Some(&["native", "min", "1", "2", "0.5"])),
     ("--save", None),
+    ("--no-save", None),
     ("--save-project", None),
+    ("--no-save-project", None),
     ("--stdout", None),
     ("--json", None),
+    ("--no-json", None),
     ("--copy", None),
     ("--no-copy", None),
     ("--notify", None),
     ("--no-notify", None),
     ("--quiet", None),
+    ("--no-quiet", None),
     ("--no-history", None),
     ("--format", Some(&["png", "jpeg", "webp", "ppm"])),
     ("--quality", Some(&[])),
@@ -62,10 +69,13 @@ pub const OPTIONS: &[(&str, Option<&[&str]>)] = &[
         Some(&["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]),
     ),
     ("--pin", None),
+    ("--no-pin", None),
     ("--colour-format", Some(&["hex", "rgb", "hsl"])),
     ("--copy-uri", None),
     ("--no-copy-uri", None),
     ("--ocr-lang", Some(&[])),
+    ("--at", Some(&[])),
+    ("--all", None),
     ("--profile", Some(&[])),
     ("--config", Some(&[])),
     ("--no-config", None),
@@ -125,23 +135,24 @@ fn config() -> String {
             section = s;
         }
         let what = match kind {
-            Kind::Bool(on, Some(off)) => format!("true or false: {on} / {off}"),
-            Kind::Bool(on, None) => format!("true: {on}"),
+            Kind::Bool(on, off) => format!("true or false: {on} / {off}"),
             Kind::Value(opt) => format!("{opt} VALUE"),
-            Kind::Save => "a directory, or true or false: --save".into(),
+            Kind::Save => "a directory or template, or true or false: --save".into(),
             Kind::Keep => "0: --no-history".into(),
             Kind::Redact => "off, suggest or auto: --redact".into(),
             Kind::Only(what) => what.to_string(),
         };
         out.push_str(&format!("  {key:<14} {what}  ({})\n", verbs.join(", ")));
     }
-    let not_yet: Vec<&str> = NOT_YET
+    let not_yet: Vec<String> = NOT_YET
         .iter()
-        .copied()
-        .chain(["[look]", "[keys.*]"])
+        .map(|s| match *s {
+            "keys" => "[keys.*]".to_string(),
+            s => format!("[{s}]"),
+        })
         .collect();
     out.push_str(&format!(
-        "\nNot built yet (warned about, skipped): {}\n",
+        "\nReserved (warned about, skipped): {}\n",
         not_yet.join(", ")
     ));
     out
@@ -244,7 +255,12 @@ mod tests {
                     .to_string(),
                 ),
             };
-            let mut args = vec![OsString::from(*opt)];
+            // pin's own options follow it.
+            let mut args: Vec<OsString> = match *opt {
+                "--at" | "--all" => vec!["pin".into()],
+                _ => vec![],
+            };
+            args.push(OsString::from(*opt));
             args.extend(value.map(OsString::from));
             if let Err(e) = crate::cli::parse(args) {
                 assert!(!e.contains("invalid option"), "{opt}: {e}");
@@ -253,10 +269,25 @@ mod tests {
     }
 
     #[test]
+    fn every_option_the_parser_knows_is_completed() {
+        let parser = include_str!("cli.rs");
+        for long in parser.split("Arg::Long(\"").skip(1) {
+            let name = &long[..long.find('"').unwrap()];
+            if name == "color-format" {
+                continue; // colour-format's other spelling
+            }
+            let opt = format!("--{name}");
+            assert!(OPTIONS.iter().any(|(o, _)| *o == opt), "{opt}");
+        }
+    }
+
+    #[test]
     fn topics_and_shells() {
         assert!(topic("keys").unwrap().contains("MEASURE"));
         assert!(topic("regions").unwrap().contains("window:class:REGEX"));
-        assert!(topic("config").unwrap().contains("[output]"));
+        let config = topic("config").unwrap();
+        assert!(config.contains("[output]") && config.contains("[look], [keys.*]"));
+        assert!(config.contains("a directory or template, or true or false: --save"));
         assert!(topic("nope").is_err());
         for (sh, format) in [
             ("bash", "--format"),

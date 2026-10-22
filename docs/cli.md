@@ -64,17 +64,19 @@ Global options: `-p, --profile NAME` (repeatable), `--config PATH`,
   last shot), which replaces textgrab (`SUPER+G`).
   - `last` (or `last:2` for the one before it) restores the shot's project
     (see FILES), so its layers are still editable: a censor can be moved,
-    and a filter deleted.
-  - A plain image opens flattened.
+    and a filter deleted. If the monitors have changed since, it opens
+    with its layers drawn in, like a project PNG.
+  - A plain image, or a shot that kept no project, opens flattened.
 
 `history`
-: Recent shots, newest first: time, size, where from, and path. With
-  `--json`, it prints one line per shot.
+: Recent shots, newest first: time, size (`WxH`) and path. With
+  `--json`, it prints one line per shot (`time`, `w`, `h`, `path`, and
+  `project` when the shot kept one).
 
 `pin [FILE|last[:N]|-]`
-: Float an image on every workspace (default: `last`). It goes where the
-  image came from if screenie took it, or else to `--at`, or else the
-  centre of the focused monitor. Prints the pin's ID.
+: Float an image on every workspace (default: `last`). It goes to
+  `--at` if given, or else where the image came from if screenie took
+  it, or else the centre of the focused monitor. Prints the pin's ID.
 
 `pin list` / `pin close [ID...|--all]`
 : The open pins. Pins are screenie's own windows, not swayimg's, so it can
@@ -82,7 +84,8 @@ Global options: `-p, --profile NAME` (repeatable), `--config PATH`,
   which a window rule floats and pins (`float`, `pin` on class
   `^screenie-pin$`); dragging it moves it, and Esc, `q` or the middle
   button close it. With `--json`, `pin` prints its report, `pin list` one
-  line per pin, and `pin close` the IDs it closed.
+  line per pin, and `pin close` a report of `kind: pins` with the IDs it
+  `closed`.
 
 `help keys|regions|config`
 : Print a section of the man page (the picker's keys, the REGION grammar,
@@ -102,7 +105,7 @@ usage error (exit 2).
 |---|---|
 | `screen` | the frozen screen (the default) |
 | `FILE` | an image file (PNG, JPEG, WebP, PPM) of up to 16384² pixels; a JPEG is turned upright by its EXIF orientation |
-| `last`, `last:N` | a past shot, with its project (layers, layout) |
+| `last`, `last:N` | a past shot, with its project (layers, layout); one that kept none (a window shot, an opened image) is a plain image, as `FILE` is |
 | `clipboard` | the image on the clipboard; a screenie shot there (its copies say which, as `application/x-screenie-shot`) reopens with its project, like `last` |
 | `recent` | the clipboard's image if it holds one, else `last` |
 | `-` | an image on stdin |
@@ -111,7 +114,7 @@ usage error (exit 2).
 
 | Region | Meaning |
 |---|---|
-| `active` | the focused window, from its own pixels |
+| `active` | the focused window, from its own pixels (over `--from last`, the box of the window that was focused then) |
 | `window:class:REGEX` | a window by class |
 | `window:title:REGEX` | a window by title |
 | `window:address:0x…` / `window:pid:N` | an exact window |
@@ -121,24 +124,34 @@ usage error (exit 2).
 | `last-region`, `last-region:N` | the box the previous (Nth previous) accepted selection used: the picker's `.` ring |
 | `-` | read one of the above from stdin (`slurp \| screenie shot -`) |
 
+`shot` of an `X,Y WxH` on no monitor, or with no area, is exit 3; one
+partly off the monitors keeps its size, with the part off them black.
+
 Window regions:
 - Several matches are resolved by focus history (the most recently focused
   wins), not by stacking order. `--json` reports which window was taken.
 - A window is captured from its own pixels (Hyprland's toplevel-export),
   so a covered window, or one on another workspace, still captures whole.
-- No match, or `active` with nothing focused, is exit 3.
+- No match, or `active` with nothing focused, is exit 3, as is a
+  monitor or `last-region:N` that isn't there.
 
 Other sources:
 - With `--from FILE` or `-`, only `all` and `X,Y WxH` apply (in image
-  pixels). Window and monitor regions are exit 2.
+  pixels). Window and monitor regions are exit 2. A rectangle must lie
+  within the image: one partly off it is exit 2, and one with no area, or
+  off it, is exit 3.
 - The picker shows an image on the focused monitor, centred, at the
   monitor's scale or more, so a big image is shown smaller but every pixel
   is kept; the box starts on all of it.
 - A screenie project PNG (`--save-project`, or one beside a shot) reopens
   with its layers when its monitors are still there, and otherwise opens
-  with them drawn in, never as the bare capture.
+  with them drawn in, never as the bare capture. One this screenie can't
+  read (a newer screenie's) is exit 3.
 - An opened image doesn't join the `.` ring or keep a project of its own.
-- `--from last` keeps the layout it was taken with, so every region works.
+- `--from last` keeps the layout it was taken with, so its monitors,
+  `all`, `active` (the window that was focused then, its box in the
+  shot), rectangles and `last-region` work (`window:` regions need the
+  live screen, exit 2).
   `shot --from last` delivers it again, its layers drawn in, over its own
   box unless a region is given.
 
@@ -162,13 +175,14 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 ## PICK OPTIONS
 
 `--region REGION`
-: The initial box (default: the focused window, as today).
+: The initial box (default: the focused window, else the middle of the
+  focused monitor).
 
 `--mode select|insert|censor|annotate|filter|measure`
 : Open straight into a mode: for example, a "shoot and censor" bind. The
   build tools open a layer as if their key had been pressed.
 
-`--lock-box`
+`--lock-box` / `--no-lock-box`
 : The box can't be changed, only worked inside.
 
 `--result image|text|colour|code|pin|measure`
@@ -181,6 +195,8 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
   - The sequence is space-separated key names (`x l l Return`), with vim
     modifiers (`<C-l>`, `<S-space>`, `<A-S-h>`). Mouse events are
     `click:X,Y`, `drag:X,Y:X,Y`, `rclick` and `wheel:±N`.
+  - `--keys-file` reads the sequence from a file (any whitespace,
+    newlines too), or from stdin for `-`.
   - If the sequence reaches a result, the picker never appears.
   - Otherwise the picker opens in the state the keys left it. With
     `--no-ui`, that's exit 2 instead.
@@ -190,7 +206,8 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 
 `--redact suggest|auto`
 : Run auto-redact on the box (see `docs/auto-redact.md`). `suggest` opens
-  Censor with the suggestions ready to accept. `auto` applies them as they
+  Censor at once and proposes the suggestions when the scan is in (with
+  `--keys`, before they're played). `auto` applies them as they
   are, the only way to use it with `shot` or `--no-ui`, and is best effort.
   It runs before `--keys`, so scripted keys can review what it found.
   `--json` lists what was redacted whenever `--redact` is given or a
@@ -203,7 +220,8 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 
 `--select-only`
 : Pick a box and print its geometry, without capturing or delivering
-  anything: screenie as a slurp. Layers are ignored.
+  anything: screenie as a slurp. Layers are ignored. A finish that has
+  no box (`p`'s colour, Measure's measurements) is a cancel.
 
 `--region-format slurp|json|hypr`
 : `slurp`: `X,Y WxH` (the default). `json`: `{"x":…,"y":…,"w":…,"h":…}`,
@@ -215,9 +233,9 @@ layout), and falls back to the global rect, clamped, when that monitor is gone.
 : Wait before capturing (up to an hour), with a notification saying how
   long that closes half a second before the capture (a delay under a
   second has none). There's no countdown on screen: anything drawn there
-  would be in the capture.
+  would be in the capture. The window, monitor or region is chosen after the wait.
 
-`--cursor`
+`--cursor` / `--no-cursor`
 : Include the mouse pointer in the capture.
 
 `--scale native|min|FACTOR`
@@ -238,6 +256,7 @@ Output options are composable and apply to any verb that produces a result.
 : The clipboard. It's on by default, **except** when stdout carries the
   data: `--stdout` and `--select-only` imply `--no-copy` unless `--copy` is
   given explicitly. `--json` doesn't, because it only describes the result.
+  A config's `copy = true` is the default, not an explicit `--copy`.
   - Text results are copied as text.
   - A saved image is offered as `image/png`, plus `text/uri-list` when it
     was saved, so file-drop targets get the file. `--no-copy-uri` (`[output] copy-uri =
@@ -246,7 +265,7 @@ Output options are composable and apply to any verb that produces a result.
     a small child that serves the selection until something else is copied
     (as wl-copy does).
 
-`--save [DIR|TEMPLATE]`
+`--save [DIR|TEMPLATE]` / `--no-save`
 : Also save to a file. With no argument, the configured directory is used,
   else `$XDG_PICTURES_DIR/Screenshots`.
   A TEMPLATE may use strftime fields plus:
@@ -255,19 +274,24 @@ Output options are composable and apply to any verb that produces a result.
   - `{kind}`: the result type;
   - `{n}`: a counter (the files already in its directory, plus one).
 
+  A template ending in `/` names a directory (`~/shots/%Y-%m/`), and the
+  file in it gets the usual time stamp.
+
   A plain file name (`out.png`, `~/shots/today.webp`: an image extension
   and no fields) is a template too, naming one file, unless a directory
   of that name exists. `--save NAME` takes it as the value when it has a
-  `/`, starts with `~` or `.`, or ends in an image extension.
+  `/`, starts with `~` or `.`, or ends in an image extension (and isn't
+  an option).
 
   The extension follows `--format`, replacing one the template gives, so a
   name always says what's in the file. `{class}` and `{title}` are known
-  for window shots; otherwise they're `unknown`.
+  for window shots; otherwise, or when empty, they're `unknown`. A
+  field's text is cut to 100 bytes.
 
   A name that already exists gets `-1`, `-2`… (two shots in a second never
   overwrite).
 
-`--save-project`
+`--save-project` / `--no-save-project`
 : Also save the project next to the image (`NAME.screenie`, see FILES), so
   it can be edited later with its layers. **It holds the uncensored
   capture.**
@@ -276,12 +300,12 @@ Output options are composable and apply to any verb that produces a result.
 : Write the result to stdout: image bytes in `--format`, or the text,
   colour, code or measurement.
 
-`--json`
+`--json` / `--no-json`
 : Write one JSON line to stdout describing what happened (see JSON).
   `--stdout` and `--json` both claim stdout, so passing both is a usage
   error.
 
-`--pin`
+`--pin` / `--no-pin`
 : Also float the result.
 
 `--format png|jpeg|webp|ppm` and `--quality N`
@@ -302,7 +326,7 @@ Output options are composable and apply to any verb that produces a result.
 : The tesseract language (default eng). This replaces the prototype's
   `--lang`.
 
-`--notify` / `--quiet`
+`--notify` / `--no-notify`, `--quiet` / `--no-quiet`
 : A desktop notification per result (on by default when stdout isn't a
   terminal). `--quiet` also silences stderr notes.
 
@@ -321,11 +345,14 @@ scripts can tell the two apart:
 
 What varies by result:
 - `kind` is one of `image`, `text`, `colour`, `code`, `pin`, `measure`,
-  `region`.
+  `region`, and `pins` for `pin close`.
 - Text-like results carry `"text"` instead of `"path"`. Colours also carry
   `"rgb":[r,g,b]`. Measurements carry `"measurements"` and `"scale"` (see
   `docs/measure.md`).
 - `--select-only` gives `kind: region`.
+- `project` is the project file written, if one was: the
+  `--save-project` one, else the history copy's (none for a window shot
+  or an opened image, or with `--no-history` alone).
 - A cancel is `{"version":1,"status":"cancelled"}`. A failure is
   `{"version":1,"status":"error","code":3,"message":"…"}`.
 
@@ -337,8 +364,8 @@ What varies by result:
 |---|---|
 | 0 | done |
 | 1 | cancelled (Esc, q); only ever a user's decision |
-| 2 | usage error (bad flags, `--stdout` with `--json`, a bad REGION, `--no-ui` keys that don't finish) |
-| 3 | nothing to capture, or capture failed (no window matched, no screencopy) |
+| 2 | usage error (bad flags or ones the verb doesn't take, `--stdout` with `--json`, a malformed REGION, `--no-ui` keys that don't finish) |
+| 3 | nothing to capture, or capture failed (no window, monitor, remembered box or past shot matched; a region that's empty, or on no monitor or off the image; no screencopy) |
 | 4 | delivery failed (clipboard, file, OCR, a missing zbar or tesseract) |
 
 ## CONFIG
@@ -346,7 +373,16 @@ What varies by result:
 The config file is `$XDG_CONFIG_HOME/screenie/config.toml` (TOML).
 - Every long option has a key of the same name, grouped by section.
 - The command line wins over profiles, and profiles win over the base
-  config.
+  config. Every true-or-false key has a `--no-` option too, so the
+  command line can turn it off for one run.
+- A config option that would clash with the command line gives way to
+  it: a region, delay or cursor when the picture isn't the screen
+  (`--from`, `edit`); `json` under `--stdout`; `[pick] mode` under
+  `--redact`, and `[redact] mode` under `--mode`; `[redact] mode =
+  "suggest"` under `--no-ui`; `[pick] result` under `--select-only`. In
+  the same way, a profile's `[pick] mode` or `[redact] mode` replaces the
+  other one from below it.
+- `help`, `completions` and `--version` don't read the config.
 - `--config PATH` uses a different file; `--no-config` ignores it (useful
   for tests).
 - **Built so far** (2026-10-05): `[output]` copy, notify, quiet, json,
@@ -358,9 +394,10 @@ The config file is `$XDG_CONFIG_HOME/screenie/config.toml` (TOML).
   override them);
   and `[profile.NAME]` with `-p NAME` (repeatable, left to right). Each
   section applies to the verbs it means something for (`[pick]` not to
-  `shot`; `[pick] region` not to `edit`'s image). `[output]` also takes
+  `shot`). `[output]` also takes
   pin, colour-format and copy-uri, and `[capture]` scale. `[look]` and
-  `[keys.*]` are warned about and skipped until they're built; any other
+  `[keys.*]` are warned about (unless `--quiet`) and skipped until
+  they're built; any other
   key is an error naming it. `--quality` is unused by formats other than
   JPEG (so a config's quality can sit under a profile's format).
 
@@ -376,23 +413,12 @@ colour-format = "hex"
 [ocr]
 lang = "eng"
 
-[pick]
-region = "active"
-
 [history]
-keep = 20           # projects kept in the runtime dir; 0 is --no-history
+keep = 20           # the fixed count; only 0 (--no-history) changes it
 
 [redact]            # see docs/auto-redact.md
 detectors = ["email", "ip", "token", "card", "iban", "home-path"]
 literal = ["my-hostname"]
-
-[look]              # the overlay
-dim = 0.45
-tag-opacity = 0.92
-ink = ["white", "black", "red", "green", "blue"]
-
-[keys.select]       # explicit keymap tables
-capture = ["Return", "y"]
 
 # Profiles: named overrides, applied left to right with -p.
 [profile.share]
@@ -409,11 +435,14 @@ pick.mode = "annotate"
 
 `$XDG_RUNTIME_DIR/screenie/`
 : tmpfs: private (0700) and cleared at logout. `last` holds the newest
-  shot's path.
+  shot's path. Without `XDG_RUNTIME_DIR`, it's `screenie-UID` in the
+  temp directory, and screenie refuses one that isn't its user's.
 
 `$XDG_RUNTIME_DIR/screenie/shots/NAME.png`, `NAME.screenie`
 : Each shot's output and its **project**, which `edit last`, `--from last`
-  and `history` read. The newest `[history] keep` shots are kept.
+  and `history` read; window shots and opened images keep no project.
+  The newest 20 shots are kept (none with `[history] keep = 0`, like
+  `--no-history`).
   - A project is the uncensored capture, the layout snapshot (monitors,
     windows, scales), the box, the layer stack as ops, and any measure
     calibration. The file is a PNG of the capture, with the versioned

@@ -368,6 +368,17 @@ fn a_key_with_super_held_does_nothing() {
 }
 
 #[test]
+fn a_direction_pressed_with_super_doesnt_steer_once_super_is_let_go() {
+    let mut s = session();
+    s.press(60, "Super_L", SUPER, 0.0);
+    s.press(1, "l", SUPER, 0.0);
+    s.release(60, "Super_L", Mods::NONE, 1.0);
+    s.tick(1.0 + 1.0 / 60.0); // no burst
+    tick_to(&mut s, 1.0, 2.0); // nor any later steering
+    assert_eq!(s.rect(), START);
+}
+
+#[test]
 fn super_types_nothing_in_text() {
     use screenie_core::model::OpData;
     let mut s = session();

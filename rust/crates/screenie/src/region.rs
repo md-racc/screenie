@@ -3,9 +3,24 @@
 use screenie_core::geometry::LogicalRect;
 use screenie_core::layout::Layout;
 
+/// Why a region didn't resolve.
+#[derive(Debug, PartialEq)]
+pub enum Unresolved {
+    /// Malformed, or meaningless here: a usage error.
+    Bad(String),
+    /// Well formed, but nothing is there (no such window, monitor or
+    /// remembered box): nothing to capture.
+    Missing(String),
+}
+
 /// A region as written, resolved to a logical rectangle. `ring` is the
-/// recall ring on this layout, newest first. Errors are usage errors.
-pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<LogicalRect, String> {
+/// recall ring on this layout, newest first.
+pub fn resolve(
+    spec: &str,
+    layout: &Layout,
+    ring: &[LogicalRect],
+) -> Result<LogicalRect, Unresolved> {
+    use Unresolved::{Bad, Missing};
     let spec = spec.trim();
     match spec {
         "all" => return Ok(layout.bounds),
@@ -13,7 +28,7 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
             return layout
                 .monitor(layout.focused)
                 .map(|m| m.rect)
-                .ok_or_else(|| "no focused monitor".into());
+                .ok_or_else(|| Missing("no focused monitor".into()));
         }
         "active" => {
             // In the picker, the active window's box (shot captures the
@@ -22,7 +37,7 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
                 .active
                 .and_then(|id| layout.window(id))
                 .map(|w| w.rect)
-                .ok_or_else(|| "no active window".into());
+                .ok_or_else(|| Missing("no active window".into()));
         }
         _ => {}
     }
@@ -32,26 +47,39 @@ pub fn resolve(spec: &str, layout: &Layout, ring: &[LogicalRect]) -> Result<Logi
             .iter()
             .find(|m| m.name == name)
             .map(|m| m.rect)
-            .ok_or_else(|| format!("no monitor named {name:?}"));
+            .ok_or_else(|| Missing(format!("no monitor named {name:?}")));
     }
     if spec.starts_with("window:") {
-        return Err(
+        return Err(Bad(
             "window regions are for the live screen (shot, or pick from the screen)".into(),
-        );
+        ));
     }
     if let Some(rest) = spec.strip_prefix("last-region") {
         let n: usize = match rest.strip_prefix(':') {
-            Some(n) => n.parse().map_err(|_| format!("bad region {spec:?}"))?,
+            Some(n) => n
+                .parse()
+                .ok()
+                .filter(|&n| n >= 1)
+                .ok_or_else(|| Bad(format!("bad region {spec:?}")))?,
             None if rest.is_empty() => 1,
-            None => return Err(format!("bad region {spec:?}")),
+            None => return Err(Bad(format!("bad region {spec:?}"))),
         };
-        return n
-            .checked_sub(1)
-            .and_then(|i| ring.get(i))
+        return ring
+            .get(n - 1)
             .copied()
-            .ok_or_else(|| format!("no {spec} (the ring has {})", ring.len()));
+            .ok_or_else(|| Missing(format!("no {spec} (the ring has {})", ring.len())));
     }
-    geometry(spec).ok_or_else(|| format!("bad region {spec:?}: expected all, monitor, X,Y WxH..."))
+    geometry(spec).ok_or_else(|| {
+        Bad(format!(
+            "bad region {spec:?}: expected all, monitor, X,Y WxH..."
+        ))
+    })
+}
+
+/// Whether a box has something on screen to capture: an area, on some
+/// monitor (a box partly off them keeps its size, the rest black).
+pub fn on_screen(r: LogicalRect, layout: &Layout) -> bool {
+    r.w > 0.0 && r.h > 0.0 && layout.monitors.iter().any(|m| m.rect.intersects(&r))
 }
 
 /// slurp's `X,Y WxH`.
@@ -74,9 +102,7 @@ pub fn format(r: LogicalRect, f: crate::cli::RegionFormat) -> String {
     match f {
         RegionFormat::Slurp => format!("{x0},{y0} {w}x{h}"),
         RegionFormat::Hypr => format!("{x0} {y0} {w} {h}"),
-        RegionFormat::Json => {
-            serde_json::json!({"x": r.x, "y": r.y, "w": r.w, "h": r.h}).to_string()
-        }
+        RegionFormat::Json => crate::report::rect_json(r).to_string(),
     }
 }
 
@@ -97,7 +123,28 @@ mod tests {
         // Pasted back, it covers the box.
         assert!(geometry("10,20 101x50").is_some_and(|b| b.x <= r.x && b.right() >= r.right()));
     }
-    use screenie_core::layout::{Monitor, MonitorId};
+    use screenie_core::layout::{Monitor, MonitorId, Window, WindowId};
+
+    #[test]
+    fn active_resolves_from_the_layout_it_was_taken_with() {
+        // Over --from last, the window focused then; window: regions need
+        // the live screen.
+        let mut l = layout();
+        let rect = LogicalRect::new(50.0, 60.0, 300.0, 200.0);
+        l.windows.push(Window {
+            id: WindowId(7),
+            rect,
+            monitor: Some(MonitorId(0)),
+            class: "foot".into(),
+            title: "~".into(),
+        });
+        l.active = Some(WindowId(7));
+        assert_eq!(resolve("active", &l, &[]), Ok(rect));
+        assert!(matches!(
+            resolve("window:class:foot", &l, &[]),
+            Err(Unresolved::Bad(_))
+        ));
+    }
 
     fn layout() -> Layout {
         let m = |id, name: &str, x| Monitor {
@@ -132,15 +179,48 @@ mod tests {
         );
         assert_eq!(resolve("last-region", &l, &ring), Ok(ring[0]));
         assert_eq!(resolve("last-region:2", &l, &ring), Ok(ring[1]));
+        // Nothing there is nothing to capture; a malformed region is a
+        // usage error.
+        for missing in ["monitor:nope", "last-region:3", "active"] {
+            assert!(
+                matches!(resolve(missing, &l, &ring), Err(Unresolved::Missing(_))),
+                "{missing}"
+            );
+        }
         for bad in [
-            "monitor:nope",
-            "last-region:3",
             "last-region:0",
+            "last-region:x",
+            "window:class:foo",
             "10,20",
             "1,2 3x-4",
             "nonsense",
         ] {
-            assert!(resolve(bad, &l, &ring).is_err(), "{bad}");
+            assert!(
+                matches!(resolve(bad, &l, &ring), Err(Unresolved::Bad(_))),
+                "{bad}"
+            );
         }
+    }
+
+    #[test]
+    fn a_box_on_no_monitor_is_off_screen() {
+        // A short monitor beside a tall one: below it is a gap.
+        let m = |id, x, h| Monitor {
+            id: MonitorId(id),
+            name: format!("M{id}"),
+            rect: LogicalRect::new(x, 0.0, 1920.0, h),
+            scale: 1.0,
+        };
+        let l = Layout::new(
+            vec![m(0, 0.0, 1080.0), m(1, 1920.0, 2160.0)],
+            vec![],
+            MonitorId(0),
+        );
+        let on = |x, y, w, h| on_screen(LogicalRect::new(x, y, w, h), &l);
+        assert!(on(10.0, 10.0, 100.0, 100.0));
+        assert!(on(3800.0, 0.0, 100.0, 100.0), "partly off");
+        assert!(!on(9000.0, 9000.0, 100.0, 100.0));
+        assert!(!on(0.0, 0.0, 0.0, 0.0));
+        assert!(!on(100.0, 1500.0, 100.0, 100.0), "in the gap");
     }
 }

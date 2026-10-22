@@ -11,6 +11,7 @@ mod picker;
 mod region;
 mod report;
 
+use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -20,7 +21,9 @@ use screenie_core::model::{Project, ProjectFile};
 use screenie_core::session::{FinishedAction, Outcome, Session, Setup};
 use screenie_image::ui::Ui;
 use screenie_image::{Frame, Picture};
-use screenie_platform::desktop::{DesktopInfo, hyprland::Hyprland};
+use screenie_platform::desktop::DesktopInfo;
+use screenie_platform::desktop::hyprland::{HyprClient, Hyprland};
+use screenie_platform::notify::notify;
 use screenie_platform::wayland::Wayland;
 
 use cli::Command;
@@ -80,22 +83,40 @@ fn wait(out: &cli::Output) {
     }
 }
 
-/// A REGION, where `-` means one read from stdin (`slurp | screenie shot -`).
+/// A REGION as written, where `-` means one read from stdin
+/// (`slurp | screenie shot -`).
+fn region_spec(spec: &str) -> Result<String, Failure> {
+    if spec.trim() != "-" {
+        return Ok(spec.to_owned());
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| Failure::usage(format!("reading the region from stdin: {e}")))?;
+    Ok(line)
+}
+
+/// A REGION on a layout: a malformed one is exit 2, one with nothing
+/// there exit 3.
 fn resolve_region(
     spec: &str,
     layout: &Layout,
     ring: &[LogicalRect],
 ) -> Result<LogicalRect, Failure> {
-    let spec = if spec == "-" {
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| Failure::usage(format!("reading the region from stdin: {e}")))?;
-        line
-    } else {
-        spec.to_owned()
-    };
-    region::resolve(&spec, layout, ring).map_err(Failure::usage)
+    region::resolve(&region_spec(spec)?, layout, ring).map_err(unresolved)
+}
+
+/// A region over an image (`open::region`), as `resolve_region` fails.
+fn image_region(spec: &str, image: LogicalRect, k: f64) -> Result<LogicalRect, Failure> {
+    open::region(&region_spec(spec)?, image, k).map_err(unresolved)
+}
+
+/// A region that didn't resolve: a usage error, or nothing to capture.
+fn unresolved(e: region::Unresolved) -> Failure {
+    match e {
+        region::Unresolved::Bad(e) => Failure::usage(e),
+        region::Unresolved::Missing(e) => Failure::capture(e),
+    }
 }
 
 fn ring_on(layout: &Layout) -> Vec<LogicalRect> {
@@ -103,8 +124,9 @@ fn ring_on(layout: &Layout) -> Vec<LogicalRect> {
 }
 
 /// `shot active`: the focused window from its own pixels, even if it's
-/// covered (replacing the prototype's `--window`).
+/// covered.
 fn shot_active(out: &cli::Output) -> Result<Report, Failure> {
+    wait(out); // focus may move to another window meanwhile
     let active = Hyprland
         .active_client()
         .map_err(Failure::capture)?
@@ -114,7 +136,7 @@ fn shot_active(out: &cli::Output) -> Result<Report, Failure> {
 
 /// A window by `window:SPEC` (see `find_window`): no match is exit 3, a bad
 /// spec exit 2.
-fn window_by(spec: &str) -> Result<screenie_platform::desktop::hyprland::HyprClient, Failure> {
+fn window_by(spec: &str) -> Result<HyprClient, Failure> {
     let spec = spec.strip_prefix("window:").unwrap_or(spec);
     let clients = Hyprland.clients().map_err(Failure::capture)?;
     screenie_platform::desktop::hyprland::find_window(&clients, spec)
@@ -124,51 +146,45 @@ fn window_by(spec: &str) -> Result<screenie_platform::desktop::hyprland::HyprCli
 }
 
 /// A window's own pixels (covered or on another workspace, still whole).
-fn shot_window(
-    active: &screenie_platform::desktop::hyprland::HyprClient,
-    out: &cli::Output,
-) -> Result<Report, Failure> {
-    wait(out);
+fn shot_window(window: &HyprClient, out: &cli::Output) -> Result<Report, Failure> {
     let mut wl = Wayland::connect().map_err(Failure::capture)?;
     wl.set_cursor(out.cursor);
-    if active.stable_id.is_empty() {
+    if window.stable_id.is_empty() {
         return Err(Failure::capture("Hyprland gave the window no stable id"));
     }
     let img = wl
-        .capture_window(&active.stable_id)
+        .capture_window(&window.stable_id)
         .map_err(Failure::capture)?;
     drop(wl);
-    let what = format!("{} window", active.class);
+    let what = format!("{} window", window.class);
     // The window on its own: one monitor its size, for auto-redact.
-    let rect = LogicalRect::new(0.0, 0.0, f64::from(img.width()), f64::from(img.height()));
-    let layout = Layout::new(
-        vec![screenie_core::layout::Monitor {
-            id: screenie_core::layout::MonitorId(0),
-            name: what.clone(),
-            rect,
-            scale: 1.0,
-        }],
-        vec![],
-        screenie_core::layout::MonitorId(0),
-    );
+    let monitor = screenie_core::layout::Monitor {
+        name: what.clone(),
+        ..open::its_own(&img)
+    };
+    let (rect, layout) = (monitor.rect, open::one_monitor(&monitor));
     let (picture, _, redacted) = redact_shot(&Frame::new(img, rect), &layout, rect, out)?;
-    let window = LogicalRect::new(active.at[0], active.at[1], active.size[0], active.size[1]);
-    let img = deliver::at_scale(picture.crop(rect), window, &[], out.scale);
+    let placed = placed(window);
+    let img = deliver::at_scale(picture.crop(rect), placed, &[], out.scale);
     let mut names = naming(&img, None, None);
-    (names.class, names.title) = (Some(active.class.clone()), Some(active.title.clone()));
+    (names.class, names.title) = (Some(window.class.clone()), Some(window.title.clone()));
     let d = deliver::image(&img, out, &what, None, &names).map_err(Failure::delivery)?;
     if out.pin {
-        let at = LogicalRect::new(active.at[0], active.at[1], active.size[0], active.size[1]);
-        float(&img, at, out)?;
+        float(&img, placed, out.png_level)?;
     }
     Ok(Report::done("image")
         .redacted(out, &redacted)
-        .set("px", json!({"w": img.width(), "h": img.height()}))
+        .size(&img)
         .set(
             "window",
-            json!({"class": active.class, "title": active.title, "address": active.address}),
+            json!({"class": window.class, "title": window.title, "address": window.address}),
         )
         .delivered(&d))
+}
+
+/// Where Hyprland places a window, in logical pixels.
+fn placed(w: &HyprClient) -> LogicalRect {
+    LogicalRect::new(w.at[0], w.at[1], w.size[0], w.size[1])
 }
 
 /// `shot --redact auto`: the shot with the ticked suggestions censored,
@@ -194,8 +210,7 @@ fn redact_shot(
         Picture::new(frame.clone()),
         out.ocr_lang(),
     )));
-    s.start_redact(true)
-        .map_err(|e| Failure::capture(format!("auto-redact: {e}")))?;
+    s.start_redact(true).map_err(redact_failed)?;
     picture.sync(s.layers(), None, None);
     let mut project = s.project();
     project.selection = rect;
@@ -205,6 +220,12 @@ fn redact_shot(
         .map(|(w, r)| (w.to_string(), r))
         .collect();
     Ok((picture, project, redacted))
+}
+
+/// Auto-redact couldn't run (OCR failed, no tesseract): exit 4, like the
+/// OCR result.
+fn redact_failed(e: impl std::fmt::Display) -> Failure {
+    Failure::delivery(format!("auto-redact: {e}"))
 }
 
 type RedactedShot = (Picture, Project, Vec<(String, LogicalRect)>);
@@ -231,15 +252,14 @@ fn shot(args: cli::Shot) -> Result<Report, Failure> {
         return shot_active(&args.output);
     }
     if spec.starts_with("window:") {
+        wait(&args.output);
         return shot_window(&window_by(spec)?, &args.output);
     }
     let (_wl, layout, frame) = capture(&args.output)?;
     let rect = resolve_region(spec, &layout, &ring_on(&layout))?;
-    if frame.map().to_pixels(rect).is_empty() {
-        return Err(Failure::capture("the region is empty"));
-    }
+    capturable(rect, &frame, &layout)?;
     let (picture, project, redacted) = redact_shot(&frame, &layout, rect, &args.output)?;
-    let keep = || project_png(frame.image(), &project, &layout);
+    let keep = || open::project_png(frame.image(), &project, &layout);
     let img = deliver::at_scale(
         picture.crop(rect),
         rect,
@@ -250,7 +270,7 @@ fn shot(args: cli::Shot) -> Result<Report, Failure> {
     let d = deliver::image(&img, &args.output, "Area", Some(&keep), &names)
         .map_err(Failure::delivery)?;
     if args.output.pin {
-        float(&img, rect, &args.output)?;
+        float(&img, rect, args.output.png_level)?;
     }
     Ok(Report::done("image")
         .rect(rect, &layout)
@@ -259,59 +279,67 @@ fn shot(args: cli::Shot) -> Result<Report, Failure> {
         .delivered(&d))
 }
 
+/// A box with nothing to capture (no pixels, or on no monitor) is exit 3.
+fn capturable(rect: LogicalRect, frame: &Frame, layout: &Layout) -> Result<(), Failure> {
+    if frame.map().to_pixels(rect).is_empty() {
+        return Err(Failure::capture("the region is empty"));
+    }
+    if !region::on_screen(rect, layout) {
+        return Err(Failure::capture("the region is outside every monitor"));
+    }
+    Ok(())
+}
+
 /// `shot --from FILE|-`: a region of an image (all of it by default),
 /// delivered as it is; a project PNG with its layers drawn in.
 fn shot_image(source: &cli::Source, args: &cli::Shot) -> Result<Report, Failure> {
     let bytes = open::read(source).map_err(Failure::capture)?;
-    let img = match open::project_in(&bytes) {
-        Some((img, file)) => open::flatten(img, &file),
-        None => {
-            screenie_image::decode::decode(&bytes, open::BACKGROUND).map_err(Failure::capture)?
-        }
-    };
+    let img = open::image(&bytes).map_err(Failure::capture)?;
     let monitor = open::its_own(&img);
     let (frame, image) = screenie_image::compose::place(img, monitor.rect, 1.0, open::BACKGROUND);
     let layout = open::one_monitor(&monitor);
-    let rect = open::region(args.region.as_deref().unwrap_or("all"), image, 1.0)
-        .map_err(Failure::usage)?;
+    let rect = image_region(args.region.as_deref().unwrap_or("all"), image, 1.0)?;
     let (picture, _, redacted) = redact_shot(&frame, &layout, rect, &args.output)?;
     let img = deliver::at_scale(picture.crop(rect), rect, &[], args.output.scale);
     let d = deliver::image(&img, &args.output, "Image", None, &naming(&img, None, None))
         .map_err(Failure::delivery)?;
     if args.output.pin {
-        float(&img, middle_of_focused(&img), &args.output)?;
+        float(&img, middle_of_focused(&img), args.output.png_level)?;
     }
+    // Not .rect(): the image's own "monitor" isn't one to report.
     Ok(Report::done("image")
-        .set(
-            "rect",
-            json!({"x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h}),
-        )
+        .set("rect", report::rect_json(rect))
         .size(&img)
         .redacted(&args.output, &redacted)
         .delivered(&d))
 }
 
 /// `shot --from last[:N]`: a past shot delivered again, its layers drawn
-/// in, over its own box unless a region says otherwise.
+/// in, over its own box unless a region says otherwise. It keeps its
+/// project (over the box delivered), in history and with `--save-project`.
 fn shot_last(which: usize, args: &cli::Shot) -> Result<Report, Failure> {
-    let (img, file) = last_project(which)?;
+    let (img, file) = match last_shot(which)? {
+        Last::Project(img, file) => (img, *file),
+        Last::Plain(shot) => return shot_image(&cli::Source::File(shot), args),
+    };
     let layout = file.layout.clone();
     let rect = match args.region.as_deref() {
         Some(spec) => resolve_region(spec, &layout, &ring_on(&layout))?,
         None => file.project.selection,
     };
-    let mut picture = Picture::new(Frame::new(img, layout.bounds));
-    picture.sync(&file.project.layers, None, None);
-    let img = deliver::at_scale(
-        picture.crop(rect),
-        rect,
-        &layout.monitors,
-        args.output.scale,
-    );
+    // The project goes with it again, so `last` stays editable.
+    let base = img.clone();
+    let mut project = file.project.clone();
+    project.selection = rect;
+    let keep = || open::project_png(&base, &project, &layout);
+    let frame = open::flattened(img, &file);
+    capturable(rect, &frame, &layout)?;
+    let img = deliver::at_scale(frame.crop(rect), rect, &layout.monitors, args.output.scale);
     let names = naming(&img, Some(&layout), Some(rect));
-    let d = deliver::image(&img, &args.output, "Area", None, &names).map_err(Failure::delivery)?;
+    let d = deliver::image(&img, &args.output, "Area", Some(&keep), &names)
+        .map_err(Failure::delivery)?;
     if args.output.pin {
-        float(&img, rect, &args.output)?;
+        float(&img, rect, args.output.png_level)?;
     }
     Ok(Report::done("image")
         .rect(rect, &layout)
@@ -323,13 +351,13 @@ fn shot_last(which: usize, args: &cli::Shot) -> Result<Report, Failure> {
 fn float(
     img: &screenie_image::Image,
     rect: LogicalRect,
-    out: &cli::Output,
+    png_level: u8,
 ) -> Result<(u32, std::path::PathBuf), Failure> {
-    let png = screenie_image::encode::png(img, out.png_level)
+    let png = screenie_image::encode::png(img, png_level)
         .map_err(|e| Failure::delivery(e.to_string()))?;
     let dir = files::runtime_dir().map_err(|e| Failure::delivery(e.to_string()))?;
     let (path, mut f) =
-        files::create_unique(&dir, &format!("pin-{}", files::stamp()), "png", 0o600)
+        files::create_unique(&dir, &format!("pin-{}", files::stamp()), "png", 0o600, None)
             .map_err(|e| Failure::delivery(e.to_string()))?;
     std::io::Write::write_all(&mut f, &png).map_err(|e| Failure::delivery(e.to_string()))?;
     let exe = std::env::current_exe().map_err(|e| Failure::delivery(e.to_string()))?;
@@ -353,26 +381,26 @@ fn pins_dir() -> Result<std::path::PathBuf, Failure> {
         .join("pins"))
 }
 
-/// `pin [FILE|-|last[:N]] [--at X,Y]`: float an image, where it came from
-/// if screenie took it, else at `--at`, else the focused monitor's middle.
+/// `pin [FILE|-|clipboard|recent|last[:N]] [--at X,Y]`: float an image at `--at`, else
+/// where it came from if screenie took it, else the focused monitor's
+/// middle.
 fn pin_cmd(source: &cli::Source, at: Option<(f64, f64)>) -> Result<Report, Failure> {
-    let source = &resolve(source.clone());
-    let (img, from) = match source {
-        cli::Source::Last(n) => {
-            let (img, file) = last_project(*n)?;
-            let mut picture = Picture::new(Frame::new(img, file.layout.bounds));
-            picture.sync(&file.project.layers, None, None);
-            let rect = file.project.selection;
-            (picture.crop(rect), Some(rect))
+    let mut source = resolve(source.clone());
+    let mut last = None;
+    if let cli::Source::Last(n) = source {
+        match last_shot(n)? {
+            Last::Project(img, file) => last = Some((img, *file)),
+            Last::Plain(shot) => source = cli::Source::File(shot),
         }
-        source => {
-            let bytes = open::read(source).map_err(Failure::capture)?;
-            let img = match open::project_in(&bytes) {
-                Some((img, file)) => open::flatten(img, &file),
-                None => screenie_image::decode::decode(&bytes, open::BACKGROUND)
-                    .map_err(Failure::capture)?,
-            };
-            (img, None)
+    }
+    let (img, from) = match last {
+        Some((img, file)) => {
+            let rect = file.project.selection;
+            (open::flattened(img, &file).crop(rect), Some(rect))
+        }
+        None => {
+            let bytes = open::read(&source).map_err(Failure::capture)?;
+            (open::image(&bytes).map_err(Failure::capture)?, None)
         }
     };
     let (w, h) = (f64::from(img.width()), f64::from(img.height()));
@@ -382,11 +410,7 @@ fn pin_cmd(source: &cli::Source, at: Option<(f64, f64)>) -> Result<Report, Failu
         (None, Some(r)) => r,
         (None, None) => middle_of_focused(&img),
     };
-    let out = cli::Output {
-        png_level: 1,
-        ..cli::Output::default()
-    };
-    let (id, path) = float(&img, rect, &out)?;
+    let (id, path) = float(&img, rect, cli::PNG_LEVEL)?;
     Ok(Report::done("pin")
         .set("id", id)
         .set("path", path.display().to_string())
@@ -462,19 +486,16 @@ fn serve_pin(args: &[String]) -> ExitCode {
 fn pin_list(json: bool) -> Result<Report, Failure> {
     for p in screenie_platform::pins::list(&pins_dir()?) {
         if json {
-            println!(
-                "{}",
-                json!({"id": p.id, "size": p.size, "at": p.at, "path": p.path})
-            );
+            say(json!({"id": p.id, "size": p.size, "at": p.at, "path": p.path}));
         } else {
             let at = p.at.map_or(String::new(), |[x, y]| format!("  at {x},{y}"));
-            println!(
+            say(format!(
                 "{}  {}x{}{at}  {}",
                 p.id,
                 p.size[0],
                 p.size[1],
                 p.path.display()
-            );
+            ));
         }
     }
     Ok(Report::done("pins"))
@@ -499,12 +520,10 @@ fn pin_close(ids: &[u32]) -> Result<Report, Failure> {
 /// middle, at its size.
 fn middle_of_focused(img: &screenie_image::Image) -> LogicalRect {
     let (w, h) = (f64::from(img.width()), f64::from(img.height()));
-    let at = Hyprland.layout().ok().and_then(|l| {
-        l.monitors
-            .iter()
-            .find(|m| m.id == l.focused)
-            .map(|m| m.rect)
-    });
+    let at = Hyprland
+        .layout()
+        .ok()
+        .and_then(|l| l.monitor(l.focused).map(|m| m.rect));
     match at {
         Some(m) => LogicalRect::new(m.x + (m.w - w) / 2.0, m.y + (m.h - h) / 2.0, w, h),
         None => LogicalRect::new(0.0, 0.0, w, h),
@@ -532,8 +551,12 @@ fn naming(
 /// A safety net for development runs: `SCREENIE_DEADLINE=SECS` takes the
 /// overlays down after that long, whatever happens.
 fn deadline() -> Option<Duration> {
-    let secs: f64 = std::env::var("SCREENIE_DEADLINE").ok()?.parse().ok()?;
-    Some(Duration::from_secs_f64(secs))
+    parse_deadline(&std::env::var("SCREENIE_DEADLINE").ok()?)
+}
+
+/// Seconds as a duration; anything else (negative, NaN, too big) is none.
+fn parse_deadline(s: &str) -> Option<Duration> {
+    Duration::try_from_secs_f64(s.trim().parse().ok()?).ok()
 }
 
 fn pick(args: cli::Pick) -> Result<Report, Failure> {
@@ -546,10 +569,7 @@ fn pick(args: cli::Pick) -> Result<Report, Failure> {
     let ring = ring_on(&layout);
     let start = match &args.region {
         // The box on a window, wherever it is (as Hyprland places it).
-        Some(spec) if spec.starts_with("window:") => {
-            let w = window_by(spec)?;
-            Some(LogicalRect::new(w.at[0], w.at[1], w.size[0], w.size[1]))
-        }
+        Some(spec) if spec.starts_with("window:") => Some(placed(&window_by(spec)?)),
         Some(spec) => Some(resolve_region(spec, &layout, &ring)?),
         None => None,
     };
@@ -562,6 +582,20 @@ fn pick(args: cli::Pick) -> Result<Report, Failure> {
     run_picker(wl, layout, frame, session, &args, true)
 }
 
+/// `--keys-file FILE|-`: its keys, as if given with `--keys`.
+fn keys_from_file(mut args: cli::Pick) -> Result<cli::Pick, Failure> {
+    let Some(path) = args.keys_file.take() else {
+        return Ok(args);
+    };
+    let keys = if path == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(&path)
+    };
+    args.keys = Some(keys.map_err(|e| Failure::usage(format!("--keys-file {path}: {e}")))?);
+    Ok(args)
+}
+
 /// `edit [FILE|-|clipboard|recent|last[:N]]`: `pick --from SOURCE`, the
 /// box on all of it; with none, the most recent image.
 fn edit(source: cli::Source, args: cli::Pick) -> Result<Report, Failure> {
@@ -571,16 +605,28 @@ fn edit(source: cli::Source, args: cli::Pick) -> Result<Report, Failure> {
     }
 }
 
-/// A past shot's project: the capture, and the project with its layout.
-fn last_project(which: usize) -> Result<(screenie_image::Image, ProjectFile), Failure> {
-    let shot = files::shots()
-        .into_iter()
-        .nth(which - 1)
-        .ok_or_else(|| Failure::usage(format!("there's no shot last:{which}")))?;
-    let path = files::project_of(&shot);
+/// A past shot (`last:N`).
+enum Last {
+    /// Its capture, and the project with its layout.
+    Project(screenie_image::Image, Box<ProjectFile>),
+    /// A shot that kept no project (a window's, an opened image's): its
+    /// PNG, which reopens as any image does.
+    Plain(std::path::PathBuf),
+}
+
+fn last_shot(which: usize) -> Result<Last, Failure> {
+    let (shot, project) = files::runtime_dir()
+        .ok()
+        .and_then(|d| files::last_in(&d.join("shots"), which))
+        .ok_or_else(|| Failure::capture(format!("there's no shot last:{which}")))?;
+    let Some(path) = project else {
+        return Ok(Last::Plain(shot));
+    };
     let bytes =
         std::fs::read(&path).map_err(|e| Failure::capture(format!("{}: {e}", path.display())))?;
     open::project_in(&bytes)
+        .map_err(|e| Failure::capture(format!("{}: {e}", path.display())))?
+        .map(|(img, file)| Last::Project(img, Box::new(file)))
         .ok_or_else(|| Failure::capture(format!("{}: no project in it", path.display())))
 }
 
@@ -597,16 +643,17 @@ fn same_monitors(a: &Layout, b: &Layout) -> bool {
 }
 
 /// `edit last[:N]` (`--from last[:N]`): the picker over a past shot's
-/// capture, its layers still editable. The monitors must be the ones it
-/// was taken on.
+/// capture, its layers still editable on the monitors it was taken on;
+/// on others, it opens with them drawn in, as a project PNG does.
 fn edit_last(which: usize, args: cli::Pick) -> Result<Report, Failure> {
-    let (img, file) = last_project(which)?;
+    let (img, file) = match last_shot(which)? {
+        Last::Project(img, file) => (img, *file),
+        Last::Plain(shot) => return pick_image(&cli::Source::File(shot), args),
+    };
     let wl = Wayland::connect().map_err(Failure::capture)?;
     let now = Hyprland.layout().map_err(Failure::capture)?;
     if !same_monitors(&now, &file.layout) {
-        return Err(Failure::capture(
-            "the monitors have changed since that shot, and edit needs the same ones",
-        ));
+        return pick_flat(wl, &now, open::flatten(img, &file), args);
     }
     edit_project(wl, img, file, args)
 }
@@ -646,7 +693,7 @@ fn pick_image(source: &cli::Source, args: cli::Pick) -> Result<Report, Failure> 
     let bytes = open::read(source).map_err(Failure::capture)?;
     let wl = Wayland::connect().map_err(Failure::capture)?;
     let now = Hyprland.layout().map_err(Failure::capture)?;
-    let img = match open::project_in(&bytes) {
+    let img = match open::project_in(&bytes).map_err(Failure::capture)? {
         Some((img, file)) if same_monitors(&now, &file.layout) => {
             return edit_project(wl, img, file, args);
         }
@@ -655,10 +702,19 @@ fn pick_image(source: &cli::Source, args: cli::Pick) -> Result<Report, Failure> 
             screenie_image::decode::decode(&bytes, open::BACKGROUND).map_err(Failure::capture)?
         }
     };
+    pick_flat(wl, &now, img, args)
+}
+
+/// The picker over a flat image, on the focused monitor, the box on all of
+/// it unless `--region` says (in the image's pixels).
+fn pick_flat(
+    wl: Wayland,
+    now: &Layout,
+    img: screenie_image::Image,
+    args: cli::Pick,
+) -> Result<Report, Failure> {
     let monitor = now
-        .monitors
-        .iter()
-        .find(|m| m.id == now.focused)
+        .monitor(now.focused)
         .or(now.monitors.first())
         .ok_or_else(|| Failure::capture("no monitor to show it on"))?
         .clone();
@@ -667,7 +723,7 @@ fn pick_image(source: &cli::Source, args: cli::Pick) -> Result<Report, Failure> 
     let layout = open::one_monitor(&monitor);
     let k = frame.map().scale();
     let start = match &args.region {
-        Some(spec) => open::region(spec, image, k).map_err(Failure::usage)?,
+        Some(spec) => image_region(spec, image, k)?,
         None => image,
     };
     let session = Session::new(Setup {
@@ -690,11 +746,7 @@ fn run_picker(
     args: &cli::Pick,
     screen: bool,
 ) -> Result<Report, Failure> {
-    let font = screenie_platform::fonts::monospace();
-    if let Some(f) = &font {
-        // Text and callouts are drawn in it, in the picker and the output.
-        let _ = screenie_image::render::set_font(f);
-    }
+    let font = open::font();
     session.set_sampler(Box::new(screenie_image::picture::PictureSampler::new(
         frame.clone(),
     )));
@@ -721,10 +773,11 @@ fn run_picker(
         Picture::new(frame.clone()),
         lang.clone(),
     )));
-    if let Some(how) = args.output.redact {
+    let redact_now = redact_inline(args);
+    if let Some(how) = redact_now {
         session
             .start_redact(how == cli::Redact::Auto)
-            .map_err(|e| Failure::capture(format!("auto-redact: {e}")))?;
+            .map_err(redact_failed)?;
     }
     if let Some(keys) = &args.keys {
         session
@@ -736,17 +789,21 @@ fn run_picker(
             return Err(Failure::usage("--no-ui: the keys didn't finish the picker"));
         }
         let font = font.ok_or_else(|| Failure::capture("no monospace font found"))?;
-        let ui = Ui::new(&font).map_err(Failure::capture)?;
+        let ui = Ui::new(font).map_err(Failure::capture)?;
         let (mut ocr, jobs) = analysis::Ocr::threaded(Picture::new(frame.clone()), lang);
-        if redact_rules().prescan {
+        let rules = redact_rules();
+        if rules.prescan {
             let monitors: Vec<_> = layout
                 .monitors
                 .iter()
                 .map(|m| frame.map().to_pixels(m.rect))
                 .collect();
-            ocr.prescan(&monitors);
+            ocr.prescan(session.layers(), &monitors, rules.codes);
         }
         session.set_analyzer(Box::new(ocr));
+        if args.output.redact.is_some() && redact_now.is_none() {
+            session.start_redact(false).map_err(redact_failed)?;
+        }
         let mut app = picker::Picker::new(session, Picture::new(frame), ui);
         app.take_jobs(jobs);
         wl.run_overlay(&layout, &mut app, deadline())
@@ -786,7 +843,18 @@ fn run_picker(
     )
 }
 
-/// `--select-only`: a box the picker finished with, as its geometry.
+/// `--redact` to run before the picker: `auto`, which needs its answer at
+/// once, and any with `--keys` or `--no-ui`, which play over it. The
+/// overlay's `suggest` scans on a thread instead, so the overlay opens at
+/// once and the suggestions come in when they're ready.
+fn redact_inline(args: &cli::Pick) -> Option<cli::Redact> {
+    args.output
+        .redact
+        .filter(|&how| how == cli::Redact::Auto || args.keys.is_some() || args.no_ui)
+}
+
+/// `--select-only`: a box the picker finished with, as its geometry. A
+/// finish without a box (a colour, a measurement) is a cancel.
 fn select_only(
     outcome: Option<&Outcome>,
     layout: &Layout,
@@ -796,14 +864,8 @@ fn select_only(
     if !args.select_only {
         return None;
     }
-    let rect = match outcome? {
-        Outcome::Done(
-            FinishedAction::Image { rect }
-            | FinishedAction::Ocr { rect }
-            | FinishedAction::Pin { rect }
-            | FinishedAction::Code { rect, .. },
-        ) => *rect,
-        _ => return None,
+    let Some(rect) = selected_box(outcome) else {
+        return Some(Ok(Report::cancelled()));
     };
     if screen {
         files::remember(&layout.monitors, rect);
@@ -821,18 +883,18 @@ fn select_only(
     )
 }
 
-/// The PNG text keyword a project travels under.
-const PROJECT_KEY: &str = "screenie-project";
-
-/// A project file: the uncensored capture, with the project and layout.
-fn project_png(
-    base: &screenie_image::Image,
-    project: &Project,
-    layout: &Layout,
-) -> Result<Vec<u8>, String> {
-    let json = ProjectFile::new(project.clone(), layout.clone()).to_json();
-    screenie_image::encode::png_with_text(base, 1, Some((PROJECT_KEY, &json)))
-        .map_err(|e| e.to_string())
+/// The box a finish was about, if it had one.
+fn selected_box(outcome: Option<&Outcome>) -> Option<LogicalRect> {
+    match outcome? {
+        Outcome::Done(action) => match action {
+            FinishedAction::Image { rect }
+            | FinishedAction::Ocr { rect }
+            | FinishedAction::Pin { rect }
+            | FinishedAction::Code { rect, .. } => Some(*rect),
+            FinishedAction::Colour { .. } | FinishedAction::Measure { .. } => None,
+        },
+        Outcome::Cancelled => None,
+    }
 }
 
 /// `history`: recent shots, newest first.
@@ -855,12 +917,15 @@ fn history(n: usize, json: bool) -> Result<Report, Failure> {
         let project = files::project_of(&shot);
         let project = project.exists().then(|| project.display().to_string());
         if json {
-            println!(
-                "{}",
-                json!({"time": time, "w": size.0, "h": size.1, "path": shot.display().to_string(), "project": project})
-            );
+            let mut line =
+                json!({"time": time, "w": size.0, "h": size.1, "path": shot.display().to_string()});
+            // Only when the shot kept one, as docs/cli.md says.
+            if let Some(p) = project {
+                line["project"] = p.into();
+            }
+            say(line);
         } else {
-            println!("{time}  {}×{}  {}", size.0, size.1, shot.display());
+            say(format!("{time}  {}x{}  {}", size.0, size.1, shot.display()));
         }
     }
     Ok(Report::done("history"))
@@ -885,7 +950,7 @@ fn finish(
             let mut project = project.clone();
             project.selection = rect;
             let base = picture.base().image();
-            let keep = || project_png(base, &project, layout);
+            let keep = || open::project_png(base, &project, layout);
             // An opened image keeps no project: its "monitor" is a canvas.
             let keep: Option<&dyn Fn() -> Result<Vec<u8>, String>> =
                 if screen { Some(&keep) } else { None };
@@ -896,7 +961,7 @@ fn finish(
             let names = naming(&img, Some(layout), Some(rect));
             let d = deliver::image(&img, out, "Area", keep, &names).map_err(Failure::delivery)?;
             if out.pin {
-                float(&img, rect, out)?;
+                float(&img, rect, out.png_level)?;
             }
             if screen {
                 files::remember(&layout.monitors, rect);
@@ -961,7 +1026,7 @@ fn finish(
             if screen {
                 files::remember(&layout.monitors, rect);
             }
-            let (id, path) = float(&picture.crop(rect), rect, out)?;
+            let (id, path) = float(&picture.crop(rect), rect, out.png_level)?;
             Report::done("pin")
                 .rect(rect, layout)
                 .set("id", id)
@@ -983,12 +1048,6 @@ fn ocr(picture: &Picture, rect: LogicalRect, out: &cli::Output) -> Result<String
     Ok(result.text)
 }
 
-fn notify(title: &str, body: &str) {
-    screenie_platform::notify::notify(title, body);
-}
-
-/// The command line with the config's options before it (none for the
-/// clipboard server, which is screenie talking to itself).
 /// `[redact]`'s rules from the config, which aren't options; unset, the
 /// defaults.
 static REDACT_RULES: std::sync::OnceLock<screenie_core::redact::Rules> = std::sync::OnceLock::new();
@@ -1014,29 +1073,72 @@ fn redact_env() -> screenie_core::redact::Env {
     }
 }
 
-fn with_config() -> Result<Vec<std::ffi::OsString>, String> {
+/// The command line with the config's options before it (none for the
+/// clipboard and pin servers, which are screenie talking to itself), and
+/// warnings about what the config skipped.
+fn with_config() -> Result<(Vec<std::ffi::OsString>, Vec<String>), String> {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| {
         a == screenie_platform::clipboard::SERVE_ARG || a == screenie_platform::pins::SERVE_ARG
     }) {
-        return Ok(args);
+        return Ok((args, vec![]));
     }
     let g = config::split_globals(args)?;
-    let Some(text) = config::read(&g)? else {
-        return Ok(g.rest);
-    };
-    let (mut full, warnings) = config::options(&text, config::verb(&g.rest), &g.profiles)?;
-    let _ = REDACT_RULES.set(config::redact(&text, &g.profiles)?);
-    for w in warnings {
-        eprintln!("screenie: {w}");
+    // The typed line stands on its own, and says which keys apply.
+    let typed = cli::parse(g.rest.clone())?;
+    if config::Typed::of(&typed).is_none() {
+        return Ok((g.rest, vec![])); // help and the like
     }
-    full.extend(g.rest);
-    Ok(full)
+    let text = config::read(&g)?;
+    if let Some(text) = &text {
+        let _ = REDACT_RULES.set(config::redact(text, &g.profiles)?);
+    }
+    config::with_options(text.as_deref(), g, &typed)
+}
+
+/// `--quiet`: no notes on stderr.
+fn quiet(cmd: &Command) -> bool {
+    match cmd {
+        Command::Pick(p) | Command::Edit { pick: p, .. } => p.output.quiet,
+        Command::Shot(s) => s.output.quiet,
+        Command::History { quiet, .. }
+        | Command::Pin { quiet, .. }
+        | Command::PinList { quiet, .. }
+        | Command::PinClose { quiet, .. } => *quiet,
+        _ => false,
+    }
+}
+
+/// A line on stdout. A reader that's gone (`| head`) wants no more of it,
+/// so that's no panic.
+fn say(line: impl std::fmt::Display) {
+    let _ = writeln!(std::io::stdout().lock(), "{line}");
+}
+
+/// A help text on stdout, or its error as a usage error.
+fn print_or_usage(text: Result<String, String>) -> ExitCode {
+    match text {
+        Ok(text) => {
+            let _ = std::io::stdout().lock().write_all(text.as_bytes());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("screenie: {e}");
+            ExitCode::from(Exit::Usage as u8)
+        }
+    }
 }
 
 fn main() -> ExitCode {
-    let cmd = match with_config().and_then(cli::parse) {
-        Ok(c) => c,
+    let cmd = match with_config().and_then(|(line, warnings)| Ok((cli::parse(line)?, warnings))) {
+        Ok((c, warnings)) => {
+            if !quiet(&c) {
+                for w in warnings {
+                    eprintln!("screenie: {w}");
+                }
+            }
+            c
+        }
         Err(e) => {
             eprintln!("screenie: {e}\n\n{}", cli::USAGE);
             return ExitCode::from(Exit::Usage as u8);
@@ -1051,48 +1153,28 @@ fn main() -> ExitCode {
     };
     let result = match cmd {
         Command::Help => {
-            println!("{}", cli::USAGE);
+            say(cli::USAGE);
             return ExitCode::SUCCESS;
         }
-        Command::HelpTopic(t) => {
-            return match help::topic(&t) {
-                Ok(text) => {
-                    print!("{text}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("screenie: {e}");
-                    ExitCode::from(Exit::Usage as u8)
-                }
-            };
-        }
-        Command::Completions(sh) => {
-            return match help::completions(&sh) {
-                Ok(text) => {
-                    print!("{text}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("screenie: {e}");
-                    ExitCode::from(Exit::Usage as u8)
-                }
-            };
-        }
+        Command::HelpTopic(t) => return print_or_usage(help::topic(&t)),
+        Command::Completions(sh) => return print_or_usage(help::completions(&sh)),
         Command::Version => {
-            println!("screenie {}", env!("CARGO_PKG_VERSION"));
+            say(format!("screenie {}", env!("CARGO_PKG_VERSION")));
             return ExitCode::SUCCESS;
         }
         Command::ServePin(args) => return serve_pin(&args),
-        Command::Pin { source, at, json } => {
+        Command::Pin {
+            source, at, json, ..
+        } => {
             let r = pin_cmd(&source, at);
             if let (Ok(report), false) = (&r, json) {
                 if let Some(id) = report.get("id") {
-                    println!("{id}");
+                    say(id);
                 }
             }
             r
         }
-        Command::PinList { json } => pin_list(json),
+        Command::PinList { json, .. } => pin_list(json),
         Command::PinClose { ids, .. } => pin_close(&ids),
         Command::ServeClipboard => {
             return match screenie_platform::clipboard::serve() {
@@ -1101,22 +1183,14 @@ fn main() -> ExitCode {
             };
         }
         Command::Shot(args) => shot(args),
-        Command::Pick(args) => pick(args),
-        Command::Edit { source, pick } => edit(source, pick),
-        Command::History { n, json } => {
-            return match history(n, json) {
-                Ok(_) => ExitCode::SUCCESS,
-                Err(Failure(code, msg)) => {
-                    eprintln!("screenie: {msg}");
-                    ExitCode::from(code as u8)
-                }
-            };
-        }
+        Command::Pick(args) => keys_from_file(args).and_then(pick),
+        Command::Edit { source, pick } => keys_from_file(pick).and_then(|p| edit(source, p)),
+        Command::History { n, json, .. } => history(n, json),
     };
     match result {
         Ok(report) => {
             if json {
-                println!("{}", report.line());
+                say(report.line());
             }
             ExitCode::from(if report.cancelled {
                 Exit::Cancelled
@@ -1126,10 +1200,196 @@ fn main() -> ExitCode {
         }
         Err(Failure(code, msg)) => {
             if json {
-                println!("{}", Report::error(code as u8, &msg));
+                say(Report::error(code as u8, &msg));
             }
             eprintln!("screenie: {msg}");
             ExitCode::from(code as u8)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quiet_covers_every_verb() {
+        for line in [
+            "history --quiet",
+            "pin list --quiet",
+            "pin close --all --quiet",
+            "pin pic.png --quiet",
+            "shot --quiet",
+            "--quiet",
+        ] {
+            let c = cli::parse(line.split(' ').map(std::ffi::OsString::from)).unwrap();
+            assert!(quiet(&c), "{line}");
+        }
+        assert!(!quiet(&cli::parse(["history".into()]).unwrap()));
+    }
+
+    #[test]
+    fn select_only_gives_a_box_or_nothing() {
+        let rect = LogicalRect::new(1.0, 2.0, 3.0, 4.0);
+        for action in [
+            FinishedAction::Image { rect },
+            FinishedAction::Ocr { rect },
+            FinishedAction::Pin { rect },
+            FinishedAction::Code {
+                rect,
+                text: "x".into(),
+            },
+        ] {
+            assert_eq!(selected_box(Some(&Outcome::Done(action))), Some(rect));
+        }
+        let pixel = screenie_core::geometry::PixelPoint { x: 1, y: 2 };
+        for outcome in [
+            Outcome::Done(FinishedAction::Colour { pixel }),
+            Outcome::Done(FinishedAction::Measure {
+                text: "1m".into(),
+                json: json!({}),
+            }),
+            Outcome::Cancelled,
+        ] {
+            assert_eq!(selected_box(Some(&outcome)), None, "{outcome:?}");
+        }
+        assert_eq!(selected_box(None), None);
+    }
+
+    #[test]
+    fn a_region_from_stdin_reads_as_typed_over_an_image() {
+        assert_eq!(region_spec("0,0 10x10").ok().as_deref(), Some("0,0 10x10"));
+        // slurp's line, newline and all, as region_spec gives it.
+        let image = LogicalRect::new(0.0, 0.0, 100.0, 100.0);
+        assert_eq!(
+            open::region("0,0 10x10\n", image, 1.0),
+            Ok(LogicalRect::new(0.0, 0.0, 10.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn a_region_with_nothing_there_is_exit_3_a_bad_one_exit_2() {
+        let layout = Layout::new(
+            vec![screenie_core::layout::Monitor {
+                id: screenie_core::layout::MonitorId(0),
+                name: "HDMI-A-1".into(),
+                rect: LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
+                scale: 1.0,
+            }],
+            vec![],
+            screenie_core::layout::MonitorId(0),
+        );
+        let exit = |spec| {
+            resolve_region(spec, &layout, &[])
+                .err()
+                .map(|Failure(e, _)| e)
+        };
+        assert_eq!(exit("all"), None);
+        for missing in ["active", "monitor:DP-3", "last-region"] {
+            assert_eq!(exit(missing), Some(Exit::Capture), "{missing}");
+        }
+        for bad in ["nonsense", "last-region:0", "window:class:x"] {
+            assert_eq!(exit(bad), Some(Exit::Usage), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_image_region_with_nothing_there_is_exit_3_a_bad_one_exit_2() {
+        let image = LogicalRect::new(0.0, 0.0, 40.0, 30.0);
+        let exit = |spec| image_region(spec, image, 1.0).err().map(|Failure(e, _)| e);
+        assert_eq!(exit("all"), None);
+        assert_eq!(exit("0,0 10x10"), None);
+        for missing in ["0,0 0x5", "50,50 5x5"] {
+            assert_eq!(exit(missing), Some(Exit::Capture), "{missing}");
+        }
+        for bad in ["nonsense", "monitor", "38,28 5x5"] {
+            assert_eq!(exit(bad), Some(Exit::Usage), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_box_with_nothing_to_capture_is_exit_3() {
+        let monitor = open::its_own(&screenie_image::Image::new(100, 50));
+        let layout = open::one_monitor(&monitor);
+        let frame = Frame::new(screenie_image::Image::new(100, 50), layout.bounds);
+        let exit = |x, y, w, h| {
+            capturable(LogicalRect::new(x, y, w, h), &frame, &layout)
+                .err()
+                .map(|Failure(e, _)| e)
+        };
+        assert_eq!(exit(0.0, 0.0, 10.0, 10.0), None);
+        assert_eq!(exit(90.0, 40.0, 20.0, 20.0), None, "partly off");
+        for (x, y, w, h) in [
+            (0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.2, 0.2),
+            (500.0, 0.0, 10.0, 10.0),
+        ] {
+            assert_eq!(exit(x, y, w, h), Some(Exit::Capture), "{x},{y} {w}x{h}");
+        }
+    }
+
+    #[test]
+    fn suggestions_wait_for_the_overlay_unless_keys_need_them() {
+        use cli::Redact::{Auto, Suggest};
+        let pick = |redact, keys: Option<&str>, no_ui| cli::Pick {
+            output: cli::Output {
+                redact,
+                ..cli::Output::default()
+            },
+            keys: keys.map(str::to_owned),
+            no_ui,
+            ..cli::Pick::default()
+        };
+        assert_eq!(redact_inline(&pick(Some(Suggest), None, false)), None);
+        assert_eq!(redact_inline(&pick(None, Some("Return"), true)), None);
+        assert_eq!(redact_inline(&pick(Some(Auto), None, false)), Some(Auto));
+        assert_eq!(
+            redact_inline(&pick(Some(Suggest), Some("Return"), false)),
+            Some(Suggest)
+        );
+        assert_eq!(
+            redact_inline(&pick(Some(Suggest), None, true)),
+            Some(Suggest)
+        );
+    }
+
+    #[test]
+    fn an_ocr_failure_is_exit_4_wherever_it_happens() {
+        let Failure(exit, msg) = redact_failed("no tesseract");
+        assert_eq!(
+            (exit, msg.as_str()),
+            (Exit::Delivery, "auto-redact: no tesseract")
+        );
+    }
+
+    #[test]
+    fn a_project_is_editable_only_on_its_own_monitors() {
+        let layout = |name: &str, scale| {
+            Layout::new(
+                vec![screenie_core::layout::Monitor {
+                    id: screenie_core::layout::MonitorId(0),
+                    name: name.into(),
+                    rect: LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
+                    scale,
+                }],
+                vec![],
+                screenie_core::layout::MonitorId(0),
+            )
+        };
+        assert!(same_monitors(&layout("DP-3", 1.0), &layout("DP-3", 1.0)));
+        assert!(!same_monitors(&layout("DP-3", 1.0), &layout("DP-3", 1.5)));
+        assert!(!same_monitors(
+            &layout("DP-3", 1.0),
+            &layout("HDMI-A-1", 1.0)
+        ));
+    }
+
+    #[test]
+    fn a_deadline_is_seconds_or_nothing() {
+        assert_eq!(parse_deadline("3"), Some(Duration::from_secs(3)));
+        assert_eq!(parse_deadline("0.5"), Some(Duration::from_millis(500)));
+        for bad in ["-1", "nan", "inf", "1e30", "x", ""] {
+            assert_eq!(parse_deadline(bad), None, "{bad}");
         }
     }
 }

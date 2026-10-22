@@ -1,14 +1,17 @@
-//! The command line (docs/cli.md). Only what the port has so far is
-//! accepted; anything else is a usage error rather than silently ignored.
+//! The command line (docs/cli.md). An option it doesn't know, or one the
+//! verb doesn't use, is a usage error rather than silently ignored.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use lexopt::{Arg, Parser, ValueExt};
 
+/// `--png-level`'s default.
+pub const PNG_LEVEL: u8 = 1;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
-    /// `--save [DIR]`: `Some(None)` for the default directory.
+    /// `--save [DIR|TEMPLATE]`: `Some(None)` for the default directory.
     pub save: Option<Option<PathBuf>>,
     pub stdout: bool,
     /// `--copy` / `--no-copy`; `None` is the default (on unless stdout
@@ -19,7 +22,7 @@ pub struct Output {
     /// `--notify` / `--no-notify`; `None` is on when stdout isn't a terminal.
     pub notify: Option<bool>,
     pub no_history: bool,
-    /// The tesseract language; `None` is `$SCREENIE_LANG`, else `eng`.
+    /// `--ocr-lang` (or `[ocr] lang`); `None` is `eng`.
     pub ocr_lang: Option<String>,
     /// `--json`: one line describing what happened.
     pub json: bool,
@@ -115,14 +118,7 @@ impl Output {
     }
 
     pub fn ocr_lang(&self) -> String {
-        self.ocr_lang
-            .clone()
-            .or_else(|| {
-                std::env::var("SCREENIE_LANG")
-                    .ok()
-                    .filter(|l| !l.is_empty())
-            })
-            .unwrap_or_else(|| "eng".into())
+        self.ocr_lang.clone().unwrap_or_else(|| "eng".into())
     }
 }
 
@@ -130,6 +126,8 @@ impl Output {
 pub struct Pick {
     pub region: Option<String>,
     pub keys: Option<String>,
+    /// `--keys-file FILE|-`: keys to read, into `keys`, before the picker.
+    pub keys_file: Option<String>,
     pub no_ui: bool,
     /// `--measure-scale '84.2px=1m'`: Measure starts calibrated.
     pub measure_scale: Option<screenie_core::units::Scale>,
@@ -144,6 +142,8 @@ pub struct Pick {
     /// `--from SOURCE`: the picture (None is the screen).
     pub from: Option<Source>,
     pub output: Output,
+    /// `--stdout` was given, not implied by `--select-only`.
+    pub stdout_typed: bool,
 }
 
 /// Where the picture comes from (docs/cli.md, SOURCES AND REGIONS).
@@ -235,10 +235,11 @@ pub enum Command {
         source: Source,
         pick: Pick,
     },
-    /// `history [-n N] [--json]`.
+    /// `history [-n N] [--json] [--quiet]`.
     History {
         n: usize,
         json: bool,
+        quiet: bool,
     },
     Help,
     /// `help keys|regions|config`.
@@ -250,52 +251,60 @@ pub enum Command {
     ServeClipboard,
     /// Internal: a pin's window (see platform::pins).
     ServePin(Vec<String>),
-    /// `pin [FILE|-|last[:N]] [--at X,Y]`.
+    /// `pin [FILE|-|clipboard|recent|last[:N]] [--at X,Y] [--quiet]`.
     Pin {
         source: Source,
         at: Option<(f64, f64)>,
         json: bool,
+        quiet: bool,
     },
-    /// `pin list [--json]`.
+    /// `pin list [--json] [--quiet]`.
     PinList {
         json: bool,
+        quiet: bool,
     },
-    /// `pin close [ID...|--all]`.
+    /// `pin close [ID...|--all] [--quiet]`.
     PinClose {
         ids: Vec<u32>,
         json: bool,
+        quiet: bool,
     },
 }
 
 pub const USAGE: &str = "\
 usage: screenie [pick] [--from SOURCE] [--region REGION] [PICK OPTIONS] [OUTPUT OPTIONS]
-       screenie shot [REGION] [OUTPUT OPTIONS]
+       screenie shot [REGION] [--from SOURCE] [CAPTURE OPTIONS] [OUTPUT OPTIONS]
        screenie edit [FILE|-|clipboard|recent|last[:N]] [PICK OPTIONS] [OUTPUT OPTIONS]
        screenie history [-n N] [--json]
+       screenie pin [FILE|-|clipboard|recent|last[:N]] [--at X,Y]
+       screenie pin list [--json]  |  pin close ID...|--all
        screenie help [keys|regions|config]
        screenie completions bash|zsh|fish
-       screenie pin [FILE|-|last[:N]] [--at X,Y]  |  pin list [--json]  |  pin close ID...|--all
+       screenie --version
 
-pick options:   --keys KEYS  --no-ui  --mode MODE  --result RESULT  --lock-box
-                --select-only  --region-format slurp|json|hypr
-                --measure-scale PX=LENGTH
+pick options:   --keys KEYS | --keys-file FILE|-  --no-ui  --mode MODE  --result RESULT
+                --lock-box | --no-lock-box  --select-only
+                --region-format slurp|json|hypr  --measure-scale PX=LENGTH
 MODE: select | insert | censor | annotate | filter | measure
 RESULT: image | text | colour | code | pin | measure
 
-output options: --save [DIR]  --stdout  --copy | --no-copy  --png-level 0-9
-                --notify | --no-notify  --quiet  --no-history  --ocr-lang LANG  --json
-                --save-project  --redact suggest|auto
-                --format png|jpeg|webp|ppm  --quality 1-100 (JPEG)  --pin
-                --colour-format hex|rgb|hsl  --no-copy-uri
-capture options: --delay SECONDS  --cursor  --scale native|min|FACTOR
-global options: -p NAME (a config profile)  --config PATH  --no-config
+output options: --save [DIR|TEMPLATE] | --no-save  --stdout  --copy | --no-copy
+                --notify | --no-notify  --quiet | --no-quiet  --no-history
+                --json | --no-json  --save-project | --no-save-project
+                --pin | --no-pin  --redact suggest|auto  --ocr-lang LANG
+                --format png|jpeg|webp|ppm  --quality 1-100 (JPEG)  --png-level 0-9
+                --colour-format hex|rgb|hsl  --copy-uri | --no-copy-uri
+capture options: --delay SECONDS  --cursor | --no-cursor  --scale native|min|FACTOR
+global options: -p, --profile NAME (a config profile)  --config PATH  --no-config
 
-REGION: all | monitor | monitor:NAME | X,Y WxH | last-region[:N] | -
+SOURCE: screen | FILE | - | clipboard | recent | last[:N]
+REGION: active | window:class:RE|title:RE|address:0x..|pid:N | monitor[:NAME]
+        | all | X,Y WxH | last-region[:N] | -
 --redact auto is best effort: OCR misses small, stylised, low-contrast and
 rotated text, and text in images. --json lists what it redacted.
-See README.md for the picker's keys, and docs/cli.md for the rest.";
+See screenie help keys|regions|config for the reference.";
 
-/// `last` (1) or `last:N`. Plain image files aren't editable yet.
+/// `last` (1) or `last:N`.
 fn parse_last(s: &str) -> Result<usize, String> {
     match s.strip_prefix("last") {
         Some("") => Ok(1),
@@ -308,11 +317,15 @@ fn parse_last(s: &str) -> Result<usize, String> {
     }
 }
 
+/// Whether a bare `--save`'s next argument is its directory or template:
+/// not an option, and with a `/`, a leading `~` or `.`, or an image
+/// extension.
 fn looks_like_a_path(s: &str) -> bool {
-    s.contains('/')
-        || s.starts_with('~')
-        || s.starts_with('.')
-        || crate::files::has_image_extension(s)
+    !s.starts_with('-')
+        && (s.contains('/')
+            || s.starts_with('~')
+            || s.starts_with('.')
+            || crate::files::has_image_extension(s))
 }
 
 /// Parse the arguments (without the program name).
@@ -333,13 +346,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     }
     let mut p = Parser::from_args(args);
     let mut verb: Option<String> = None;
-    let mut pick = Pick {
+    let unset = Pick {
         output: Output {
-            png_level: 1,
+            png_level: PNG_LEVEL,
             ..Output::default()
         },
         ..Pick::default()
     };
+    let mut pick = unset.clone();
     let mut positional: Vec<String> = Vec::new();
     let mut history_n: usize = 20;
     let mut pin_at: Option<(f64, f64)> = None;
@@ -355,6 +369,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 pick.region = Some(p.value().map_err(err)?.string().map_err(err)?)
             }
             Arg::Long("keys") => pick.keys = Some(p.value().map_err(err)?.string().map_err(err)?),
+            Arg::Long("keys-file") => {
+                pick.keys_file = Some(p.value().map_err(err)?.string().map_err(err)?)
+            }
             Arg::Long("no-ui") => pick.no_ui = true,
             Arg::Long("from") => {
                 let v = p.value().map_err(err)?.string().map_err(err)?;
@@ -365,6 +382,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             }
             Arg::Long("select-only") => pick.select_only = true,
             Arg::Long("lock-box") => pick.lock_box = true,
+            Arg::Long("no-lock-box") => pick.lock_box = false,
             Arg::Long("region-format") => {
                 pick.region_format = match p.value().map_err(err)?.string().map_err(err)?.as_str() {
                     "slurp" => RegionFormat::Slurp,
@@ -408,11 +426,16 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 };
                 o.save = Some(dir);
             }
+            Arg::Long("no-save") => o.save = None,
             Arg::Long("stdout") => o.stdout = true,
             Arg::Long("json") => o.json = true,
+            Arg::Long("no-json") => o.json = false,
             Arg::Long("save-project") => o.save_project = true,
+            Arg::Long("no-save-project") => o.save_project = false,
             Arg::Long("cursor") => o.cursor = true,
+            Arg::Long("no-cursor") => o.cursor = false,
             Arg::Long("pin") => o.pin = true,
+            Arg::Long("no-pin") => o.pin = false,
             Arg::Long("scale") => {
                 let v = p.value().map_err(err)?.string().map_err(err)?;
                 o.scale = match v.as_str() {
@@ -493,6 +516,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Arg::Long("notify") => o.notify = Some(true),
             Arg::Long("no-notify") => o.notify = Some(false),
             Arg::Long("quiet") => o.quiet = true,
+            Arg::Long("no-quiet") => o.quiet = false,
             Arg::Long("no-history") => o.no_history = true,
             Arg::Long("ocr-lang") => {
                 o.ocr_lang = Some(p.value().map_err(err)?.string().map_err(err)?)
@@ -508,10 +532,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 let v = v.string().map_err(err)?;
                 if verb.is_none()
                     && positional.is_empty()
-                    && matches!(
-                        v.as_str(),
-                        "pick" | "shot" | "edit" | "history" | "help" | "completions" | "pin"
-                    )
+                    && crate::help::VERBS.contains(&v.as_str())
                 {
                     verb = Some(v);
                 } else {
@@ -519,6 +540,41 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                 }
             }
             other => return Err(other.unexpected().to_string()),
+        }
+    }
+    if let Some(v @ ("help" | "completions" | "history" | "pin")) = verb.as_deref() {
+        // These take none of pick's, capture's or output's options, but
+        // the global ones.
+        let mut used = pick.clone();
+        (used.output.json, used.output.quiet, used.output.no_history) = (false, false, false);
+        if v == "pin" && used.from.is_some() {
+            return Err("pin takes the image as FILE, not --from".into());
+        }
+        if used != unset {
+            return Err(format!("{v} takes no pick, capture or output options"));
+        }
+    }
+    if pin_all && positional.first().map(String::as_str) != Some("close") {
+        return Err("--all is for pin close".into());
+    }
+    if pin_at.is_some()
+        && matches!(
+            positional.first().map(String::as_str),
+            Some("list" | "close")
+        )
+    {
+        return Err("--at is for pinning an image".into());
+    }
+    if pick.keys.is_some() && pick.keys_file.is_some() {
+        return Err("--keys or --keys-file, not both".into());
+    }
+    if pick.keys_file.as_deref() == Some("-") {
+        let image = pick.from == Some(Source::Stdin)
+            || verb.as_deref() == Some("edit") && positional.first().is_some_and(|f| f == "-");
+        if image || pick.region.as_deref().map(str::trim) == Some("-") {
+            return Err(
+                "--keys-file - and another - both read stdin: give one in the arguments".into(),
+            );
         }
     }
     if pick.output.stdout && pick.output.json {
@@ -533,8 +589,14 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if pick.select_only && pick.result.is_some() {
         return Err("--select-only already says what Enter gives".into());
     }
-    if pick.select_only && !pick.output.json {
-        pick.output.stdout = true; // the geometry is the output
+    pick.stdout_typed = pick.output.stdout;
+    if pick.select_only {
+        // The geometry is the output: stdout's (unless --json describes
+        // it), and never the clipboard's unless --copy says so.
+        pick.output.copy.get_or_insert(false);
+        if !pick.output.json {
+            pick.output.stdout = true;
+        }
     }
     if pick.output.redact == Some(Redact::Suggest)
         && (pick.no_ui || verb.as_deref() == Some("shot"))
@@ -557,6 +619,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         Some("pin") => match positional.first().map(String::as_str) {
             Some("list") if positional.len() == 1 => Ok(Command::PinList {
                 json: pick.output.json,
+                quiet: pick.output.quiet,
             }),
             Some("close") => {
                 let ids = positional[1..]
@@ -569,6 +632,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     _ => Ok(Command::PinClose {
                         ids,
                         json: pick.output.json,
+                        quiet: pick.output.quiet,
                     }),
                 }
             }
@@ -579,12 +643,13 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     Some(s) => Source::parse(s)?,
                 };
                 if source == Source::Screen {
-                    return Err("pin what? (a file, -, last or last:N)".into());
+                    return Err("pin what? (a file, -, clipboard, recent, last or last:N)".into());
                 }
                 Ok(Command::Pin {
                     source,
                     at: pin_at,
                     json: pick.output.json,
+                    quiet: pick.output.quiet,
                 })
             }
         },
@@ -599,6 +664,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
             Ok(Command::History {
                 n: history_n,
                 json: pick.output.json,
+                quiet: pick.output.quiet,
             })
         }
         Some("edit") => {
@@ -620,6 +686,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         }
         Some("shot") => {
             let picker_only = pick.keys.is_some()
+                || pick.keys_file.is_some()
                 || pick.no_ui
                 || pick.measure_scale.is_some()
                 || pick.select_only
@@ -669,7 +736,7 @@ mod tests {
         let Command::Pick(p) = cmd("").unwrap() else {
             panic!()
         };
-        assert_eq!(p.output.png_level, 1);
+        assert_eq!(p.output.png_level, PNG_LEVEL);
         assert!(p.output.copies());
         assert!(matches!(cmd("pick").unwrap(), Command::Pick(_)));
     }
@@ -695,6 +762,14 @@ mod tests {
             panic!()
         };
         assert_eq!(p.output.save, Some(Some(PathBuf::from("out.png"))));
+        // An option after it is never its directory.
+        for line in ["--save --from=./pic.png", "--save --from=pic.png"] {
+            let Command::Pick(p) = cmd(line).unwrap() else {
+                panic!("{line}")
+            };
+            assert_eq!(p.output.save, Some(None), "{line}");
+            assert!(matches!(p.from, Some(Source::File(_))), "{line}");
+        }
     }
 
     #[test]
@@ -743,20 +818,32 @@ mod tests {
         ));
         assert_eq!(
             cmd("pin list --json").unwrap(),
-            Command::PinList { json: true }
+            Command::PinList {
+                json: true,
+                quiet: false
+            }
+        );
+        assert_eq!(
+            cmd("pin list --quiet").unwrap(),
+            Command::PinList {
+                json: false,
+                quiet: true
+            }
         );
         assert_eq!(
             cmd("pin close 2 3").unwrap(),
             Command::PinClose {
                 ids: vec![2, 3],
-                json: false
+                json: false,
+                quiet: false
             }
         );
         assert_eq!(
             cmd("pin close --all --json").unwrap(),
             Command::PinClose {
                 ids: vec![],
-                json: true
+                json: true,
+                quiet: false
             }
         );
         for bad in [
@@ -769,6 +856,33 @@ mod tests {
             assert!(cmd(bad).is_err(), "{bad}");
         }
         assert!(cmd("--at 1,2").is_err(), "--at is pin's");
+        // An option the verb doesn't use is an error, not ignored.
+        for bad in [
+            "pin --from x.png",
+            "pin --format webp",
+            "pin --region all",
+            "pin list --all",
+            "pin pic.png --all",
+            "pin close 1 --at 1,2",
+            "pin list --at 1,2",
+            "history --save",
+            "history --stdout",
+            "help --redact auto",
+            "completions bash --pin",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
+        // The global ones are fine anywhere.
+        for good in [
+            "history --json",
+            "history --no-history --quiet",
+            "pin list --json",
+            "pin close --all --json",
+            "pin --quiet",
+            "help keys --json",
+        ] {
+            assert!(cmd(good).is_ok(), "{good}");
+        }
     }
 
     #[test]
@@ -868,6 +982,9 @@ mod tests {
         // A file's regions: the whole image, or a rect of its pixels.
         assert!(cmd("--from pic.png --region all").is_ok());
         assert!(cmd("shot --from pic.png 10,20 30x40").is_ok());
+        // A region on stdin, the image in a file.
+        assert!(cmd("shot --from pic.png -").is_ok());
+        assert!(cmd("--from pic.png --region -").is_ok());
     }
 
     #[test]
@@ -880,7 +997,11 @@ mod tests {
         let Command::Pick(p) = cmd("--select-only --json").unwrap() else {
             panic!()
         };
-        assert!(!p.output.stdout && p.output.copies() == !p.output.stdout);
+        assert!(!p.output.stdout && !p.output.copies());
+        let Command::Pick(p) = cmd("--select-only --json --copy").unwrap() else {
+            panic!()
+        };
+        assert!(p.output.copies());
         let Command::Pick(p) = cmd("--result colour --mode insert --lock-box").unwrap() else {
             panic!()
         };
@@ -973,12 +1094,76 @@ mod tests {
         assert_eq!(p.from, Some(Source::Clipboard));
         assert_eq!(
             cmd("history -n 5 --json").unwrap(),
-            Command::History { n: 5, json: true }
+            Command::History {
+                n: 5,
+                json: true,
+                quiet: false
+            }
         );
         assert_eq!(
             cmd("history").unwrap(),
-            Command::History { n: 20, json: false }
+            Command::History {
+                n: 20,
+                json: false,
+                quiet: false
+            }
         );
+        assert_eq!(
+            cmd("history --quiet").unwrap(),
+            Command::History {
+                n: 20,
+                json: false,
+                quiet: true
+            }
+        );
+    }
+
+    #[test]
+    fn every_flag_a_config_can_set_the_command_line_can_unset() {
+        let Command::Pick(p) = cmd(
+            "--json --no-json --stdout --pin --no-pin --save --no-save --quiet --no-quiet \
+             --save-project --no-save-project --cursor --no-cursor --lock-box --no-lock-box",
+        )
+        .unwrap() else {
+            panic!()
+        };
+        let o = &p.output;
+        assert!(!o.json && !o.pin && o.save.is_none() && !o.quiet && !o.save_project);
+        assert!(!o.cursor && !p.lock_box && o.stdout);
+        assert!(cmd("shot --no-lock-box").is_ok_and(|c| matches!(c, Command::Shot(_))));
+    }
+
+    #[test]
+    fn usage_names_what_the_parser_takes() {
+        for want in [
+            "active",
+            "window:class:",
+            "shot [REGION] [--from SOURCE]",
+            "--save [DIR|TEMPLATE]",
+        ] {
+            assert!(USAGE.contains(want), "{want}");
+        }
+        for name in crate::help::VERBS.iter().chain(crate::help::TOPICS) {
+            assert!(USAGE.contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_verb_is_one() {
+        for v in crate::help::VERBS {
+            if let Err(e) = cmd(v) {
+                assert!(!e.contains("unexpected argument"), "{v}: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn ocr_lang_is_eng_unless_given() {
+        assert_eq!(Output::default().ocr_lang(), "eng");
+        let Command::Pick(p) = cmd("--ocr-lang deu").unwrap() else {
+            panic!()
+        };
+        assert_eq!(p.output.ocr_lang(), "deu");
     }
 
     #[test]
@@ -990,5 +1175,19 @@ mod tests {
         };
         assert_eq!(p.keys.as_deref(), Some("x l Return"));
         assert!(p.no_ui);
+        let Command::Edit { pick, .. } = cmd("edit last --keys-file macro.txt").unwrap() else {
+            panic!()
+        };
+        assert_eq!(pick.keys_file.as_deref(), Some("macro.txt"));
+        assert!(cmd("--keys-file -").is_ok());
+        for bad in [
+            "--keys x --keys-file f",
+            "--keys-file - --from -",
+            "--keys-file - --region -",
+            "edit - --keys-file -",
+            "shot --keys-file f",
+        ] {
+            assert!(cmd(bad).is_err(), "{bad}");
+        }
     }
 }

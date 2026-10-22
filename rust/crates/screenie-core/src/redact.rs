@@ -265,7 +265,10 @@ static URL_SECRET: LazyLock<Regex> = LazyLock::new(|| {
         r"(?i)[?&](?:token|key|api_?key|secret|sig|signature|code|password|pass|auth|access_token)=([^&\s]+)",
     )
 });
-static CARD: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d(?:[ -]?\d){12,18}\b"));
+/// A run of digit groups, split by single spaces or hyphens, of any
+/// length: `card_span` finds the card in it, so a number before a card
+/// can't push the card's last group out of a capped match.
+static CARD: LazyLock<Regex> = LazyLock::new(|| re(r"\b\d+(?:[ -]\d+)*\b"));
 /// What a security code is labelled.
 /// OCR often runs the label into the code (`cvv:123`, `CVV123`).
 static CODE_WORD: LazyLock<Regex> =
@@ -325,11 +328,12 @@ fn near_card(r: PixelRect, cards: &[(PixelRect, i32)]) -> bool {
 static EXPIRY: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?:^|[^0-9/])((?:0?[1-9]|1[0-2]) ?/ ?(?:[0-9]{4}|[0-9]{2}))(?:$|[^0-9/])")
 });
-/// What an expiry date is labelled, as group 1: a whole word (`exp`, not
-/// `export`), or one OCR ran into the date (`Thru:12/30`, `EXP12/27`).
+/// What an expiry date is labelled, as group 1: a whole word (`exp`,
+/// `expired`, `ExpDate`, not `export` or `expected`), or one OCR ran into
+/// the date (`Thru:12/30`, `EXP12/27`).
 static EXPIRY_WORD: LazyLock<Regex> = LazyLock::new(|| {
     re(
-        r"(?i)\b(exp(?:iry|ires|iration|\.)?|valid\s*(?:thru|through|until)|good\s*thru)(?:\b|[0-9])",
+        r"(?i)\b(exp(?:iry|ires|ired|ire|iring|iration|\.|\s*date)?|valid\s*(?:thru|through|until)|good\s*thru)(?:\b|[0-9])",
     )
 });
 
@@ -422,18 +426,28 @@ fn luhn(digits: &[u32]) -> bool {
     sum % 10 == 0
 }
 
-/// The card in a run of digit groups, as byte offsets in it: the longest
-/// run of whole groups (then the leftmost) with 13-19 digits that passes
-/// Luhn, so digits next to a card on its line (a list number, an expiry, a
-/// CVC) don't hide it. A group is never cut.
+/// The card in a run of digit groups, as byte offsets in it: the whole run
+/// if it passes Luhn, else the longest run of whole groups (then the
+/// leftmost) with 13-19 digits that's grouped like a card and passes, so
+/// digits next to a card on its line (a list number, an expiry, a CVC)
+/// don't hide it. A group is never cut, a row of short numbers never makes
+/// a card, and at most one group (a list or row number) comes before it,
+/// so a long row of 4-digit numbers isn't tried at every offset.
 fn card_span(s: &str) -> Option<(usize, usize)> {
     let groups: Vec<(usize, usize)> = DIGITS.find_iter(s).map(|m| (m.start(), m.end())).collect();
     let mut windows: Vec<(usize, usize, Vec<u32>)> = Vec::new();
-    for a in 0..groups.len() {
+    for a in 0..groups.len().min(2) {
         for b in a..groups.len() {
+            let whole = a == 0 && b == groups.len() - 1;
+            if !whole && !card_like(&groups[a..=b]) {
+                continue;
+            }
             let span = &s[groups[a].0..groups[b].1];
             let d: Vec<u32> = span.chars().filter_map(|c| c.to_digit(10)).collect();
-            if (13..=19).contains(&d.len()) {
+            if d.len() > 19 {
+                break; // only longer from here
+            }
+            if d.len() >= 13 {
                 windows.push((groups[a].0, groups[b].1, d));
             }
         }
@@ -443,6 +457,18 @@ fn card_span(s: &str) -> Option<(usize, usize)> {
         .into_iter()
         .find(|w| luhn(&w.2))
         .map(|(start, end, _)| (start, end))
+}
+
+/// Whether digit groups (byte ranges) are grouped like a card: one group,
+/// or groups of 4 or more digits, the last maybe 3 (4-4-4-4, 4-6-5,
+/// 4-4-4-4-3).
+fn card_like(groups: &[(usize, usize)]) -> bool {
+    let n = groups.len();
+    n == 1
+        || groups
+            .iter()
+            .enumerate()
+            .all(|(i, (a, b))| b - a >= 4 || (i == n - 1 && b - a == 3))
 }
 
 fn iban_ok(s: &str) -> bool {
@@ -1086,9 +1112,33 @@ mod tests {
             (p.len(), p[0].category, p[0].rect.x),
             (1, Category::Card, 20)
         );
+        // A 4-digit row number before it, too (and, 4 digits by a card,
+        // it may be the card's code).
+        let row = ["1001", "4111", "1111", "1111", "1111"];
+        assert_eq!(cats(&[&row]), [("card", true), ("security-code", true)]);
+        let p = propose(&ocr(&[&row]), &rules(0.0));
+        let card = p.iter().find(|p| p.category == Category::Card).unwrap();
+        assert_eq!(card.rect.x, 50);
+        assert_eq!(
+            cats(&[&["2024", "4242", "4242", "4242", "4242", "12/34"]]),
+            [
+                ("card", true),
+                ("card-expiry", true),
+                ("security-code", true)
+            ]
+        );
         // No run of whole groups passes, and an unbroken run isn't cut.
         assert_eq!(cats(&[&["4111", "1111", "1111", "1112", "12"]]), []);
         assert_eq!(cats(&[&["41111111111111111123"]]), []);
+    }
+
+    #[test]
+    fn a_row_of_short_numbers_is_not_a_card() {
+        // "34 56 78 90 12 34 56" passes Luhn, but nobody groups a card in pairs.
+        let row = ["12", "34", "56", "78", "90", "12", "34", "56"];
+        assert_eq!(cats(&[&row]), []);
+        let got = cats(&[&row, &["Total", "123"], &["Date", "10/27"]]);
+        assert!(got.is_empty(), "{got:?}");
     }
 
     #[test]
@@ -1332,6 +1382,16 @@ mod tests {
         assert_eq!(cats(&[&["Exp.", "12/27"]]), [("card-expiry", true)]);
         assert_eq!(cats(&[&["Exp.12/27"]]), [("card-expiry", true)]);
         assert_eq!(cats(&[&["Good", "thru", "1/26"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Expired", "03/25"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Expire", "12/27"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Expiring", "04/26"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["ExpDate", "12/27"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Exp", "Date", "12/27"]]), [("card-expiry", true)]);
+        // A saved card showing only its last four: the label alone.
+        assert_eq!(
+            cats(&[&["Visa", "ending", "4242", "Expired", "03/25"]]),
+            [("card-expiry", true)]
+        );
         // Near a card, no label.
         assert_eq!(
             cats(&[&card, &["MR", "J", "Q", "PUBLIC", "03/28"]]),

@@ -494,16 +494,37 @@ pub fn of(name: &str) -> Option<(Lines, Lines)> {
 }
 
 /// Every mode's keys, palette then legend, from the keymaps themselves
-/// (`screenie help keys`).
+/// (`screenie help keys`). What the legend already lists is left out of
+/// the palette, so each key is listed once, by the legend's name for it.
 pub fn reference() -> Vec<(&'static str, Vec<String>)> {
     crate::keymap::all()
         .into_iter()
         .filter_map(|(name, map)| {
             let (palette, legend) = of(name)?;
-            let mut lines = render(map, palette);
+            let palette = not_in(palette, legend);
+            let palette: Vec<&[Item]> = palette.iter().map(Vec::as_slice).collect();
+            let mut lines = render(map, &palette);
             lines.extend(render(map, legend));
             Some((name, lines))
         })
+        .collect()
+}
+
+/// `palette`'s items that `legend` doesn't list already: by intent, by
+/// label, or by a note naming it (`1-9 layers` for `layers`).
+fn not_in(palette: Lines, legend: Lines) -> Vec<Vec<Item>> {
+    let items = || legend.iter().flat_map(|l| l.iter());
+    let listed = |&(label, intents): &Item| {
+        items().any(|&(l, is)| {
+            l == label
+                || is.is_empty() && l.ends_with(&format!(" {label}"))
+                || intents.first().is_some_and(|i| is.contains(i))
+        })
+    };
+    palette
+        .iter()
+        .map(|line| line.iter().copied().filter(|i| !listed(i)).collect())
+        .filter(|line: &Vec<Item>| !line.is_empty())
         .collect()
 }
 
@@ -551,6 +572,18 @@ mod tests {
         let measure = &r.iter().find(|(n, _)| *n == "measure").unwrap().1;
         assert!(measure[0].contains("s line"), "palette first: {measure:?}");
         assert!(measure.iter().any(|l| l.contains("C calibrate")));
+    }
+
+    #[test]
+    fn the_reference_lists_palette_keys_the_legend_already_has_once() {
+        let r = reference();
+        let get = |m: &str| r.iter().find(|(n, _)| *n == m).unwrap().1.clone();
+        assert_eq!(get("select"), render(&keymap::SELECT, SELECT));
+        assert_eq!(get("censor"), render(&keymap::CENSOR, CENSOR));
+        assert!(
+            get("annotate")[0].starts_with("1 white"),
+            "palettes not in the legend stay"
+        );
     }
 
     #[test]

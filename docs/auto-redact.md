@@ -23,7 +23,8 @@ them, and it never silently decides for you**, except with an explicit
 - **In the picker:** press `r` in Censor to scan the box and propose
   censors. Censor's current keys (`t`, `x`, `+`/`-`) don't use `r`.
 - **From the command line:**
-  - `--redact suggest` opens Censor with the suggestions already proposed.
+  - `--redact suggest` opens Censor and scans, the suggestions proposed
+    when they're ready (before `--keys` are played).
   - `--redact auto` applies them without asking, for `shot` and `--no-ui`
     (see `docs/cli.md`).
 - **Config:** `[redact]` (below), and profiles (`-p share` can turn it on).
@@ -73,9 +74,9 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 | `token` | known key prefixes: `sk-`, `ghp_`/`gho_`/`github_pat_`, `glpat-`, `AKIA…`, `xox[bap]-`, JWTs (`eyJ…`) | prefix regexes |
 | `entropy` | long random-looking strings (≥20 chars, high Shannon entropy) | entropy per char, with an OCR-noise allowance |
 | `url-secret` | secret-looking query params in URLs (`token=`, `key=`, `sig=`, `code=`) | URL parse, param names |
-| `card` | card numbers | digits plus a Luhn check; digits next to a card on its line (a list number, an expiry, a CVC) are left off until it passes |
+| `card` | card numbers | digits plus a Luhn check; digits next to a card on its line (a list number, an expiry, a CVC) are left off until it passes, keeping card-like grouping (groups of 4 or more digits), so a row of short numbers isn't one |
 | `security-code` | a card's CVV/CVC/CID | 3-4 isolated digits after a keyword (`CVV`, `CVC`, `CID`, `CSC`, "security code"), or within 4 line heights of a found card |
-| `card-expiry` | a card's expiry date | `MM/YY` or `MM/YYYY` (a real month) after a keyword, a whole word (`exp`, `expiry`, `expires`, `valid thru`, `good thru`; not `export`), or within 4 line heights of a found card; never a lone date elsewhere |
+| `card-expiry` | a card's expiry date | `MM/YY` or `MM/YYYY` (a real month) after a keyword, a whole word (`exp`, `expiry`, `expires`, `expired`, `expiring`, `exp date`, `valid thru`, `good thru`; not `export`/`expected`), or within 4 line heights of a found card; never a lone date elsewhere |
 | `iban` | IBANs | the mod-97 check; words after one on its line (a BIC, a currency) are left off until it passes |
 | `phone` | phone numbers | 8-15 digits in groups, not a date; off by default (too many false positives); ticked only with `+` or brackets |
 | `uuid` | UUIDs | regex, off by default |
@@ -139,8 +140,9 @@ OCR-tolerant detectors are for recall.
   only from a scan that looked for them) is its words and codes reaching
   into the rect, at once; one inside a scan still running waits for it.
   A box that grew, or pixels that changed, scan again. Prescan reads each
-  monitor (not the whole layout, so the box's monitor is enough), on its
-  own thread, with codes. Its light/dark choice is the monitor's, not the
+  monitor of the committed picture (not the whole layout, so the box's
+  monitor is enough), on its own thread, with codes if `codes` is among
+  the detectors. Its light/dark choice is the monitor's, not the
   box's, which may read a dark window on a light screen less well than
   the box's own scan (tesseract retries inverted lines); so it stays off
   by default.
