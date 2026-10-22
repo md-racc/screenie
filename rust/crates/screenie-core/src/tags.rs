@@ -3,11 +3,11 @@
 //!
 //! Each kind has its own side, so they never compete for one spot: the
 //! status tag on the bottom, the palette and legend on top, lists on the
-//! sides. Each block takes the first spot that works: outside the box,
-//! wholly on one monitor; else inside on the same side, while it's small
+//! sides. Each block takes the first spot that works, always wholly on one
+//! monitor: outside the box; else inside on the same side, while it's small
 //! next to the box; else another side. Never on a block already placed.
 
-use crate::geometry::{LogicalPoint, LogicalRect};
+use crate::geometry::LogicalRect;
 
 /// One chip row, logical px.
 pub const ROW: f64 = 20.0;
@@ -94,8 +94,8 @@ fn on_a_monitor(r: &LogicalRect, monitors: &[LogicalRect]) -> bool {
 }
 
 /// Where a `bw` x `bh` block goes (its rectangle): the first of `spots`
-/// that fits. If none does, inside the box at the first spot, clamped onto
-/// the monitor under the box's centre.
+/// that fits. If none does, the first spot's position, clamped onto the
+/// monitor under the box's centre.
 pub fn place(
     b: LogicalRect,
     bw: f64,
@@ -111,6 +111,7 @@ pub fn place(
             bw <= b.w - 2.0 * MARGIN
                 && bh <= b.h - 2.0 * MARGIN
                 && bw * bh <= INSIDE_MAX * b.w * b.h
+                && on_a_monitor(&r, monitors)
                 && !avoid.iter().any(|o| o.intersects(&r))
         } else {
             // Outside, a block already there doesn't rule the side out:
@@ -140,7 +141,7 @@ pub fn place(
     }
     let first = spots.first().copied().unwrap_or(InsideTopLeft);
     let (x, y) = first.at(b, bw, bh);
-    let c: LogicalPoint = b.centre();
+    let c = b.centre();
     let mon = monitors
         .iter()
         .find(|m| m.contains(c))
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     fn nowhere_fits_falls_back_inside_on_the_monitor() {
         let p = place(r(0.0, 0.0, 3840.0, 1080.0), 900.0, 700.0, LIST, &MONS, &[]);
-        assert!(p.x >= 0.0 && p.right() <= 3840.0 && p.y >= 0.0 && p.bottom() <= 1080.0);
+        assert!(on_a_monitor(&p, &MONS));
     }
 
     #[test]
@@ -222,6 +223,38 @@ mod tests {
             &[],
         );
         assert!(on_a_monitor(&p, &MONS));
+    }
+
+    #[test]
+    fn inside_spots_stay_on_one_monitor() {
+        // Across the seam, both spots below off-screen: inside would cross it.
+        let b = r(1800.0, 0.0, 400.0, 1080.0);
+        let status = place(b, TAG.0, TAG.1, STATUS, &MONS, &[]);
+        assert!(on_a_monitor(&status, &MONS));
+        assert_eq!((status.x, status.y), (2204.0, 1060.0)); // right, bottom
+        let b = r(1800.0, 700.0, 300.0, 380.0);
+        for (size, spots) in [
+            (TAG, STATUS),
+            ((300.0, 20.0), LEGEND),
+            ((200.0, 60.0), LIST),
+        ] {
+            let p = place(b, size.0, size.1, spots, &MONS, &[]);
+            assert!(on_a_monitor(&p, &MONS), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn on_uneven_monitors_the_status_tag_stays_visible() {
+        let mons = [r(0.0, 0.0, 1920.0, 1080.0), r(1920.0, 0.0, 2560.0, 1440.0)];
+        let p = place(
+            r(0.0, 0.0, 4480.0, 1440.0),
+            TAG.0,
+            TAG.1,
+            STATUS,
+            &mons,
+            &[],
+        );
+        assert!(on_a_monitor(&p, &mons), "{p:?}");
     }
 
     #[test]

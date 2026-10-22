@@ -13,7 +13,7 @@
 use std::collections::HashSet;
 
 use crate::geometry::Dir;
-use crate::intent::DirSet;
+use crate::intent::{DirSet, Intent};
 use crate::keys::{Key, Mods};
 
 /// Seconds a direction is held before repeat starts.
@@ -59,9 +59,9 @@ impl Default for KeyRepeat {
 
 /// A held key whose action repeats.
 #[derive(Clone, Copy, Debug)]
-struct HeldKey<T> {
+struct HeldKey {
     code: u32,
-    action: T,
+    action: Intent,
     since: f64,
     done: u32,
 }
@@ -89,7 +89,7 @@ pub enum Press {
 pub struct InputState {
     mods: Mods,
     key_repeat: KeyRepeat,
-    held_key: Option<HeldKey<crate::intent::Intent>>,
+    held_key: Option<HeldKey>,
     held: Vec<HeldDir>,
     down: HashSet<u32>,
     stale: HashSet<u32>,
@@ -113,7 +113,7 @@ impl InputState {
     }
 
     /// The key just pressed (`code`) repeats `action` while it's held.
-    pub fn repeat_key(&mut self, code: u32, action: crate::intent::Intent, now: f64) {
+    pub fn repeat_key(&mut self, code: u32, action: Intent, now: f64) {
         self.held_key = Some(HeldKey {
             code,
             action,
@@ -123,7 +123,7 @@ impl InputState {
     }
 
     /// The repeats of a held repeating key due by `now`.
-    pub fn key_repeats(&mut self, now: f64) -> Option<(crate::intent::Intent, u32)> {
+    pub fn key_repeats(&mut self, now: f64) -> Option<(Intent, u32)> {
         let r = self.key_repeat;
         let h = self.held_key.as_mut()?;
         if r.rate <= 0.0 || now < h.since + r.delay {
@@ -185,7 +185,9 @@ impl InputState {
 
     /// Repeat steps due by `now` for the held directions, at `rates` (none
     /// for a mode or modifier state that doesn't repeat). Returns the held
-    /// directions and how many whole steps to take.
+    /// directions and how many whole steps to take. Time spent without
+    /// rates is skipped, not owed: once they're back, counting resumes from
+    /// the last tick, further up the ramp.
     pub fn repeat(&mut self, now: f64, rates: Option<Rates>) -> Option<(DirSet, u32)> {
         let repeating: Vec<&HeldDir> = self
             .held
@@ -194,7 +196,7 @@ impl InputState {
             .collect();
         let Some(rates) = rates.filter(|_| !repeating.is_empty()) else {
             self.acc = 0.0;
-            self.counted = None;
+            self.counted = (!repeating.is_empty()).then_some(now);
             return None;
         };
         let start = repeating
@@ -303,6 +305,18 @@ mod tests {
     }
 
     #[test]
+    fn time_without_rates_is_not_replayed() {
+        let mut s = InputState::default();
+        s.press(1, Key::Char('l'), Mods::NONE, 0.0);
+        tick_until(&mut s, 0.0, 1.0, BOX);
+        // Ctrl goes down and up while `l` stays held.
+        assert_eq!(s.repeat(1.0 + 1.0 / 60.0, None), None);
+        assert_eq!(s.repeat(1.0 + 2.0 / 60.0, None), None);
+        let (_, n) = s.repeat(1.0 + 3.0 / 60.0, Some(BOX)).unwrap();
+        assert!(n <= 6, "one frame at the top rate, not {n}");
+    }
+
+    #[test]
     fn keys_held_across_a_transition_are_stale_until_released() {
         let mut s = InputState::default();
         s.press(1, Key::Char('h'), Mods::NONE, 0.0);
@@ -315,7 +329,6 @@ mod tests {
 
     #[test]
     fn a_repeating_key_follows_the_keyboard_repeat() {
-        use crate::intent::Intent;
         let mut s = InputState::default();
         s.set_key_repeat(KeyRepeat {
             rate: 10.0,

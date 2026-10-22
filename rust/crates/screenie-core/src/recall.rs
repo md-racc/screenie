@@ -6,8 +6,9 @@
 //! gone, the global rect is used (and the selection clamps it).
 //!
 //! This is only the data. The front end reads and writes the file
-//! (`$XDG_STATE_HOME/screenie/regions.json`), in the same format as the
-//! Python prototype, so the two could share it during the port.
+//! (`$XDG_STATE_HOME/screenie/regions.json`: a JSON list of
+//! `{rect, monitor?, offset?}`, newest first). Existing files depend on
+//! that shape, so keep it stable.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,20 @@ impl Entry {
     fn global(&self) -> LogicalRect {
         let [x, y, w, h] = self.rect;
         LogicalRect::new(x, y, w, h)
+    }
+
+    /// The box on today's layout: on its monitor if that's still there.
+    fn on(&self, monitors: &[Monitor]) -> LogicalRect {
+        let home = self
+            .monitor
+            .as_ref()
+            .and_then(|name| monitors.iter().find(|m| &m.name == name));
+        match (home, self.offset) {
+            (Some(m), Some([ox, oy])) => {
+                LogicalRect::new(m.rect.x + ox, m.rect.y + oy, self.rect[2], self.rect[3])
+            }
+            _ => self.global(),
+        }
     }
 }
 
@@ -66,7 +81,8 @@ impl Ring {
         self.entries.is_empty()
     }
 
-    /// Put an accepted box at the front, dropping an older copy of it.
+    /// Put an accepted box at the front, dropping an older entry that is
+    /// the same box on today's layout.
     pub fn remember(&mut self, monitors: &[Monitor], rect: LogicalRect) {
         let home = monitors
             .iter()
@@ -76,28 +92,15 @@ impl Ring {
             monitor: home.map(|m| m.name.clone()),
             offset: home.map(|m| [rect.x - m.rect.x, rect.y - m.rect.y]),
         };
-        self.entries.retain(|e| e.rect != entry.rect);
+        self.entries
+            .retain(|e| e.rect != entry.rect && e.on(monitors) != rect);
         self.entries.insert(0, entry);
         self.entries.truncate(SIZE);
     }
 
     /// The ring, newest first, as boxes on today's layout.
     pub fn resolve(&self, monitors: &[Monitor]) -> Vec<LogicalRect> {
-        self.entries
-            .iter()
-            .map(|e| {
-                let home = e
-                    .monitor
-                    .as_ref()
-                    .and_then(|name| monitors.iter().find(|m| &m.name == name));
-                match (home, e.offset) {
-                    (Some(m), Some([ox, oy])) => {
-                        LogicalRect::new(m.rect.x + ox, m.rect.y + oy, e.rect[2], e.rect[3])
-                    }
-                    _ => e.global(),
-                }
-            })
-            .collect()
+        self.entries.iter().map(|e| e.on(monitors)).collect()
     }
 }
 
@@ -153,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn a_box_recalled_after_a_rearrangement_is_not_kept_twice() {
+        let mut ring = Ring::default();
+        ring.remember(&both(), r(2000.0, 100.0, 300.0, 200.0));
+        let swapped = [mon("DP-2", 0.0), mon("DP-1", 1920.0)];
+        ring.remember(&swapped, ring.resolve(&swapped)[0]);
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.resolve(&swapped), [r(80.0, 100.0, 300.0, 200.0)]);
+    }
+
+    #[test]
     fn with_its_monitor_gone_the_global_rect_is_used() {
         let mut ring = Ring::default();
         ring.remember(&both(), r(2000.0, 100.0, 300.0, 200.0));
@@ -171,9 +184,9 @@ mod tests {
     }
 
     #[test]
-    fn reads_and_writes_the_prototypes_format() {
-        let py = r#"[{"rect": [2000.0, 100.0, 300.0, 200.0], "monitor": "DP-2", "offset": [80.0, 100.0]}, {"rect": [5.0, 5.0, 10.0, 10.0]}]"#;
-        let ring = Ring::parse(py);
+    fn the_file_format_is_stable() {
+        let json = r#"[{"rect": [2000.0, 100.0, 300.0, 200.0], "monitor": "DP-2", "offset": [80.0, 100.0]}, {"rect": [5.0, 5.0, 10.0, 10.0]}]"#;
+        let ring = Ring::parse(json);
         assert_eq!(ring.len(), 2);
         assert_eq!(Ring::parse(&ring.to_json()), ring);
         assert_eq!(

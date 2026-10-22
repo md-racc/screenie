@@ -47,9 +47,9 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
    - Keep a character-to-box map, so a match in the middle of a word (the
      token part of a URL) censors only that part. Split word boxes
      proportionally by character count.
-2. **Detectors** run on each line, and also on the joined text, so matches
-   that wrap across a line break are caught. Each detector returns char
-   spans, a category and a confidence.
+2. **Detectors** run on each OCR line. Each detector returns char spans in
+   that line, a category and a confidence. Private-key blocks are the
+   exception: they're matched from BEGIN to END across lines.
 3. **Codes.** zbar reports each code's outline. A QR or barcode is proposed
    whole, whatever it contains (a code can hold a URL with a token or
    WiFi credentials). The decoded text is also run through the detectors,
@@ -73,21 +73,21 @@ box pixels ──► OCR with word boxes ──► lines of text, each char mapp
 | `token` | known key prefixes: `sk-`, `ghp_`/`gho_`/`github_pat_`, `glpat-`, `AKIA…`, `xox[bap]-`, JWTs (`eyJ…`) | prefix regexes |
 | `entropy` | long random-looking strings (≥20 chars, high Shannon entropy) | entropy per char, with an OCR-noise allowance |
 | `url-secret` | secret-looking query params in URLs (`token=`, `key=`, `sig=`, `code=`) | URL parse, param names |
-| `card` | card numbers | digits plus a Luhn check |
+| `card` | card numbers | digits plus a Luhn check; digits next to a card on its line (a list number, an expiry, a CVC) are left off until it passes |
 | `security-code` | a card's CVV/CVC/CID | 3-4 isolated digits after a keyword (`CVV`, `CVC`, `CID`, `CSC`, "security code"), or within 4 line heights of a found card |
-| `card-expiry` | a card's expiry date | `MM/YY` or `MM/YYYY` (a real month) after a keyword (`exp`, `expiry`, `expires`, `valid thru`, `good thru`), or within 4 line heights of a found card; never a lone date elsewhere |
-| `iban` | IBANs | the mod-97 check |
+| `card-expiry` | a card's expiry date | `MM/YY` or `MM/YYYY` (a real month) after a keyword, a whole word (`exp`, `expiry`, `expires`, `valid thru`, `good thru`; not `export`), or within 4 line heights of a found card; never a lone date elsewhere |
+| `iban` | IBANs | the mod-97 check; words after one on its line (a BIC, a currency) are left off until it passes |
 | `phone` | phone numbers | 8-15 digits in groups, not a date; off by default (too many false positives); ticked only with `+` or brackets |
 | `uuid` | UUIDs | regex, off by default |
-| `home-path` | `/home/<user>/…`, `~user` | `$USER` / `$HOME` |
+| `home-path` | `$HOME/…`, `/home/<user>/…`, `~user` | `$USER` / `$HOME` |
 | `host` | this machine's hostname, and domains you list (with subdomains) | match through OCR's confusions (below) |
 | `private-key` | `-----BEGIN … PRIVATE KEY-----` blocks | propose the whole block |
 | `literal` | strings from config (your name, your employer) | match through OCR's confusions (below) |
 | `custom` | regexes from config | `[[redact.custom]] name = "…"`, `regex = "…"` |
 
-Names (`host`, `domains`, `literal`) are matched with both sides folded
-through OCR's usual confusions: any case, `rn` for `m`, `0` for `o`, `1`
-and `|` for `l`. A custom detector's chip and `--json` `what` are its
+Names (`host`, `domains`, `literal`) are matched as whole words (a domain
+also with its subdomains), with both sides folded through OCR's usual
+confusions: any case, `rn` for `m`, `0` for `o`, `1` and `|` for `l`. A custom detector's chip and `--json` `what` are its
 `name`.
 
 Checksums (Luhn, mod-97) keep the number detectors precise. The entropy and
@@ -151,6 +151,9 @@ OCR-tolerant detectors are for recall.
   rotated text, and text in images. `--redact auto` must say so in its
   help, and `--json` lists what it redacted (`"redacted": [...]`) so a
   script can check.
+- Detectors read one line at a time, so a secret that wraps across a line
+  break (a long token at a terminal's edge) is caught only if a piece is
+  long and random enough for `entropy` on its own. Censor it by hand.
 - It works only on text it can read, plus codes. Faces, avatars and
   handwriting are out of scope; a face detector could be an optional
   detector later.

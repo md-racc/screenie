@@ -101,7 +101,12 @@ const DIR_KEYS: [(char, Key, Dir); 4] = [
 ];
 
 fn mods(shift: bool, ctrl: bool, alt: bool) -> Mods {
-    Mods { shift, ctrl, alt }
+    Mods {
+        shift,
+        ctrl,
+        alt,
+        logo: false,
+    }
 }
 
 /// The modifier grammar on `hjkl` and the arrows, shared by every box.
@@ -118,8 +123,8 @@ pub fn direction_grammar() -> Keymap {
             (true, false, true, Intent::Scale(d, Scale::Double)),
         ] {
             let md = mods(shift, ctrl, alt);
-            m.bind(Chord::with(Key::Char(c), md), intent);
-            m.alias(Chord::with(arrow, md), intent);
+            m.bind(Chord::new(Key::Char(c), md), intent);
+            m.alias(Chord::new(arrow, md), intent);
         }
     }
     m
@@ -131,24 +136,38 @@ pub fn box_grammar() -> Keymap {
     m.bind(Chord::ch('o'), Intent::SwapOpposite)
         .bind(Chord::plain(Key::Space), Intent::SwapOpposite)
         .bind(Chord::ch('O'), Intent::SwapSideways)
-        .bind(Chord::with(Key::Space, Mods::SHIFT), Intent::SwapSideways)
-        .bind(Chord::ch('w'), Intent::EdgeJump(Dir::Right))
-        .bind(Chord::ch('b'), Intent::EdgeJump(Dir::Left))
-        .bind(Chord::ch('}'), Intent::EdgeJump(Dir::Down))
-        .bind(Chord::ch('{'), Intent::EdgeJump(Dir::Up))
-        .bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
-        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
-        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
-        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
+        .bind(Chord::new(Key::Space, Mods::SHIFT), Intent::SwapSideways)
+        .extend(&edge_keys())
+        .extend(&far_keys())
         .bind(Chord::ch('c'), Intent::ToggleCentre)
         .bind(Chord::ch('u'), Intent::Undo)
         .extend(&lens_keys());
     // Ctrl jumps; with Alt, to what's in the picture rather than the layout.
     let ctrl_alt = mods(false, true, true);
     for (c, arrow, d) in DIR_KEYS {
-        m.bind(Chord::with(Key::Char(c), ctrl_alt), Intent::PictureEdge(d))
-            .alias(Chord::with(arrow, ctrl_alt), Intent::PictureEdge(d));
+        m.bind(Chord::new(Key::Char(c), ctrl_alt), Intent::PictureEdge(d))
+            .alias(Chord::new(arrow, ctrl_alt), Intent::PictureEdge(d));
     }
+    m
+}
+
+/// `w b } {`: the cursor to the next window or monitor edge that way.
+fn edge_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('w'), Intent::EdgeJump(Dir::Right))
+        .bind(Chord::ch('b'), Intent::EdgeJump(Dir::Left))
+        .bind(Chord::ch('}'), Intent::EdgeJump(Dir::Down))
+        .bind(Chord::ch('{'), Intent::EdgeJump(Dir::Up));
+    m
+}
+
+/// `0 $ g G`: the cursor to the far left, right, top or bottom.
+fn far_keys() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
+        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
+        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
+        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down));
     m
 }
 
@@ -197,9 +216,7 @@ pub static SELECT: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('P'), Intent::Pin)
         .bind(Chord::ch('i'), Intent::Insert)
         .bind(Chord::ch('m'), Intent::Measure(crate::measure::Prim::Line))
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
+        .extend(&build_tool_openers())
         .bind(Chord::plain(Key::Escape), Intent::Back);
     m.extend(&digits());
     m
@@ -235,15 +252,22 @@ fn build_tool_keys() -> Keymap {
     m
 }
 
+/// `x`, `a`, `f`: open (or switch to) a build tool, from every mode that can.
+fn build_tool_openers() -> Keymap {
+    let mut m = Keymap::default();
+    m.bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
+        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
+        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+    m
+}
+
 pub static CENSOR: LazyLock<Keymap> = LazyLock::new(|| {
     let mut m = box_grammar();
     m.extend(&adjust_keys())
         .extend(&build_tool_keys())
         .bind(Chord::ch('t'), Intent::CycleKind)
         .bind(Chord::ch('r'), Intent::Redact)
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+        .extend(&build_tool_openers());
     m
 });
 
@@ -257,9 +281,9 @@ fn ink_keys() -> Keymap {
     m
 }
 
-/// The pen: no box, so hjkl mean nothing here.
+/// The pen: no box. hjkl and the arrows move the pen point (Shift: a
+/// larger step); with Ctrl or Alt they mean nothing.
 pub static ANNOTATE: LazyLock<Keymap> = LazyLock::new(|| {
-    // The keyboard pen: hjkl and Shift+hjkl move the pen point.
     let mut m = direction_grammar();
     m.bindings
         .retain(|b| matches!(b.intent, Intent::Steer(_) | Intent::Translate(_)));
@@ -270,16 +294,14 @@ pub static ANNOTATE: LazyLock<Keymap> = LazyLock::new(|| {
         .bind(Chord::ch('c'), Intent::Shape(ShapeTool::Circle))
         .bind(Chord::ch('v'), Intent::Shape(ShapeTool::Arrow))
         .bind(Chord::ch('m'), Intent::ToggleHighlighter)
-        .bind(Chord::with(Key::Char('+'), Mods::CTRL), Intent::Bulge(1))
-        .alias(Chord::with(Key::Char('='), Mods::CTRL), Intent::Bulge(1))
-        .bind(Chord::with(Key::Char('-'), Mods::CTRL), Intent::Bulge(-1))
+        .bind(Chord::new(Key::Char('+'), Mods::CTRL), Intent::Bulge(1))
+        .alias(Chord::new(Key::Char('='), Mods::CTRL), Intent::Bulge(1))
+        .bind(Chord::new(Key::Char('-'), Mods::CTRL), Intent::Bulge(-1))
         .bind(Chord::plain(Key::Space), Intent::PenToggle)
         .bind(Chord::ch('i'), Intent::Insert)
         .bind(Chord::ch('n'), Intent::Callout)
         .bind(Chord::ch('N'), Intent::CalloutNumber)
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter))
+        .extend(&build_tool_openers())
         .bind(Chord::ch('u'), Intent::Undo)
         .extend(&lens_keys());
     m
@@ -293,9 +315,7 @@ pub static SHAPE: LazyLock<Keymap> = LazyLock::new(|| {
         .extend(&build_tool_keys())
         .bind(Chord::ch('t'), Intent::CycleKind)
         .bind(Chord::ch('V'), Intent::ToggleHeads)
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+        .extend(&build_tool_openers());
     m
 });
 
@@ -320,22 +340,12 @@ pub static FILTER: LazyLock<Keymap> = LazyLock::new(|| {
         .extend(&adjust_keys())
         .extend(&build_tool_keys())
         .extend(&list_keys())
-        .bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
+        .extend(&build_tool_openers());
     for (i, (key, ..)) in crate::filter::KINDS.iter().enumerate() {
         m.bind(Chord::ch(*key), Intent::Choose(i as u8 + 1));
     }
     m
 });
-
-fn build_tool_openers() -> Keymap {
-    let mut m = Keymap::default();
-    m.bind(Chord::ch('x'), Intent::Tool(Tool::Censor))
-        .bind(Chord::ch('a'), Intent::Tool(Tool::Annotate))
-        .bind(Chord::ch('f'), Intent::Tool(Tool::Filter));
-    m
-}
 
 /// Insert: a pixel cursor. hjkl step (Shift: four steps; Alt: halfway to
 /// the box edge); Ctrl and Alt+Shift mean nothing here.
@@ -350,14 +360,8 @@ pub static INSERT: LazyLock<Keymap> = LazyLock::new(|| {
     m.extend(&adjust_keys())
         .extend(&lens_keys())
         .extend(&build_tool_openers())
-        .bind(Chord::ch('w'), Intent::EdgeJump(Dir::Right))
-        .bind(Chord::ch('b'), Intent::EdgeJump(Dir::Left))
-        .bind(Chord::ch('}'), Intent::EdgeJump(Dir::Down))
-        .bind(Chord::ch('{'), Intent::EdgeJump(Dir::Up))
-        .bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
-        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
-        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
-        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
+        .extend(&edge_keys())
+        .extend(&far_keys())
         .bind(Chord::ch('m'), Intent::Middle)
         .bind(Chord::ch('u'), Intent::Undo)
         .bind(Chord::ch('p'), Intent::CopyColour)
@@ -374,14 +378,12 @@ pub static LOUPE: LazyLock<Keymap> = LazyLock::new(|| {
     m.extend(&adjust_keys())
         .extend(&view_keys())
         .extend(&build_tool_openers())
-        .bind(Chord::ch('z'), Intent::Loupe)
-        .alias(Chord::ch('Z'), Intent::Loupe)
-        .bind(Chord::ch('e'), Intent::Enhance)
+        .extend(&lens_keys())
         .bind(Chord::ch('p'), Intent::CopyColour)
         // Over Measure: a point at the loupe's pixel (Shift: a path's).
         .bind(Chord::plain(Key::Space), Intent::DropPoint)
-        .bind(Chord::with(Key::Space, Mods::ALT), Intent::DropPoint)
-        .bind(Chord::with(Key::Space, Mods::SHIFT), Intent::AddPoint)
+        .bind(Chord::new(Key::Space, Mods::ALT), Intent::DropPoint)
+        .bind(Chord::new(Key::Space, Mods::SHIFT), Intent::AddPoint)
         .bind(Chord::plain(Key::Return), Intent::Confirm)
         .bind(Chord::plain(Key::Escape), Intent::Back);
     m
@@ -404,27 +406,28 @@ pub static ENHANCE: LazyLock<Keymap> = LazyLock::new(|| {
 });
 
 /// Text input: plain keys are typed (the session routes them before this
-/// table); these are the rest. Ctrl+hjkl nudge, Ctrl+Shift+hjkl nudge
+/// table); these are the rest. Ctrl+hjkl (or arrows) nudge, Ctrl+Shift
 /// further, Ctrl+`+`/`-` size, Ctrl+1-5 ink, Ctrl+b chip.
 pub static TEXT: LazyLock<Keymap> = LazyLock::new(|| {
     let mut m = Keymap::default();
     m.bind(Chord::plain(Key::Return), Intent::Confirm)
         .bind(Chord::plain(Key::Escape), Intent::Back)
-        .bind(Chord::with(Key::Char('b'), Mods::CTRL), Intent::ToggleChip)
-        .bind(Chord::with(Key::Char('+'), Mods::CTRL), Intent::Adjust(1))
-        .alias(Chord::with(Key::Char('='), Mods::CTRL), Intent::Adjust(1))
-        .bind(Chord::with(Key::Char('-'), Mods::CTRL), Intent::Adjust(-1));
+        .bind(Chord::new(Key::Char('b'), Mods::CTRL), Intent::ToggleChip)
+        .bind(Chord::new(Key::Char('+'), Mods::CTRL), Intent::Adjust(1))
+        .alias(Chord::new(Key::Char('='), Mods::CTRL), Intent::Adjust(1))
+        .bind(Chord::new(Key::Char('-'), Mods::CTRL), Intent::Adjust(-1));
     for (c, arrow, d) in DIR_KEYS {
-        m.bind(Chord::with(Key::Char(c), Mods::CTRL), Intent::Jump(d))
-            .alias(Chord::with(arrow, Mods::CTRL), Intent::Jump(d))
+        m.bind(Chord::new(Key::Char(c), Mods::CTRL), Intent::Jump(d))
+            .alias(Chord::new(arrow, Mods::CTRL), Intent::Jump(d))
             .bind(
-                Chord::with(Key::Char(c), Mods::CTRL.with_shift()),
+                Chord::new(Key::Char(c), Mods::CTRL.with_shift()),
                 Intent::Slide(d),
-            );
+            )
+            .alias(Chord::new(arrow, Mods::CTRL.with_shift()), Intent::Slide(d));
     }
     for n in 1..=5u8 {
         m.bind(
-            Chord::with(Key::Char(char::from(b'0' + n)), Mods::CTRL),
+            Chord::new(Key::Char(char::from(b'0' + n)), Mods::CTRL),
             Intent::Choose(n),
         );
     }
@@ -453,18 +456,15 @@ pub static MEASURE: LazyLock<Keymap> = LazyLock::new(|| {
         .retain(|b| !matches!(b.intent, Intent::Slide(_) | Intent::Scale(_, Scale::Double)));
     m.extend(&adjust_keys())
         .extend(&lens_keys())
-        .bind(Chord::ch('0'), Intent::FarEdge(Dir::Left))
-        .bind(Chord::ch('$'), Intent::FarEdge(Dir::Right))
-        .bind(Chord::ch('g'), Intent::FarEdge(Dir::Up))
-        .bind(Chord::ch('G'), Intent::FarEdge(Dir::Down))
+        .extend(&far_keys())
         .bind(Chord::ch('s'), Intent::Measure(Prim::Line))
         .bind(Chord::ch('c'), Intent::Measure(Prim::Circle))
         .bind(Chord::ch('A'), Intent::Measure(Prim::Area))
         .bind(Chord::ch('r'), Intent::Measure(Prim::Rect))
         .bind(Chord::ch('^'), Intent::Measure(Prim::Angle))
         .bind(Chord::plain(Key::Space), Intent::DropPoint)
-        .bind(Chord::with(Key::Space, Mods::ALT), Intent::DropPoint)
-        .bind(Chord::with(Key::Space, Mods::SHIFT), Intent::AddPoint)
+        .bind(Chord::new(Key::Space, Mods::ALT), Intent::DropPoint)
+        .bind(Chord::new(Key::Space, Mods::SHIFT), Intent::AddPoint)
         .bind(Chord::ch('u'), Intent::Undo)
         .bind(Chord::ch('C'), Intent::Calibrate)
         .bind(Chord::ch('o'), Intent::SwapOpposite)
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn the_modifier_grammar() {
-        let l = |m: Mods| SELECT.lookup(Chord::with(Key::Char('l'), m));
+        let l = |m: Mods| SELECT.lookup(Chord::new(Key::Char('l'), m));
         assert_eq!(l(Mods::NONE), Some(Intent::Steer(Dir::Right)));
         assert_eq!(l(Mods::SHIFT), Some(Intent::Translate(Dir::Right)));
         assert_eq!(l(Mods::CTRL), Some(Intent::Jump(Dir::Right)));
@@ -527,7 +527,7 @@ mod tests {
             Some(Intent::Scale(Dir::Right, Scale::Double))
         );
         assert_eq!(
-            SELECT.lookup(Chord::with(Key::Right, Mods::SHIFT)),
+            SELECT.lookup(Chord::new(Key::Right, Mods::SHIFT)),
             Some(Intent::Translate(Dir::Right))
         );
     }
@@ -538,24 +538,41 @@ mod tests {
             ctrl: true,
             alt: true,
             shift: true,
+            logo: false,
         };
-        assert_eq!(SELECT.lookup(Chord::with(Key::Char('l'), all)), None);
+        assert_eq!(SELECT.lookup(Chord::new(Key::Char('l'), all)), None);
         // Ctrl+Alt means something only in the box modes: picture edges.
         let ctrl_alt = Mods {
             shift: false,
             ..all
         };
         assert_eq!(
-            SELECT.lookup(Chord::with(Key::Char('l'), ctrl_alt)),
+            SELECT.lookup(Chord::new(Key::Char('l'), ctrl_alt)),
             Some(Intent::PictureEdge(Dir::Right))
         );
-        assert_eq!(INSERT.lookup(Chord::with(Key::Char('l'), ctrl_alt)), None);
-        assert_eq!(SELECT.lookup(Chord::with(Key::Char('o'), Mods::CTRL)), None);
-        assert_eq!(SELECT.lookup(Chord::with(Key::Return, Mods::ALT)), None);
-        assert_eq!(
-            SESSION.lookup(Chord::with(Key::Char('q'), Mods::CTRL)),
-            None
-        );
+        assert_eq!(INSERT.lookup(Chord::new(Key::Char('l'), ctrl_alt)), None);
+        assert_eq!(SELECT.lookup(Chord::new(Key::Char('o'), Mods::CTRL)), None);
+        let logo = Mods {
+            logo: true,
+            ..Mods::NONE
+        };
+        assert_eq!(SELECT.lookup(Chord::new(Key::Char('l'), logo)), None);
+        assert_eq!(SESSION.lookup(Chord::new(Key::Return, logo)), None);
+        assert_eq!(SELECT.lookup(Chord::new(Key::Return, Mods::ALT)), None);
+        assert_eq!(SESSION.lookup(Chord::new(Key::Char('q'), Mods::CTRL)), None);
+    }
+
+    #[test]
+    fn text_nudges_with_arrows_as_with_hjkl() {
+        for (c, arrow, d) in DIR_KEYS {
+            for mods in [Mods::CTRL, Mods::CTRL.with_shift()] {
+                assert_eq!(
+                    TEXT.lookup(Chord::new(arrow, mods)),
+                    TEXT.lookup(Chord::new(Key::Char(c), mods)),
+                    "{d:?} {mods:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -341,12 +341,90 @@ fn shift_from_a_separate_modifiers_event_moves_the_held_box() {
 }
 
 #[test]
+fn a_digit_typed_with_shift_is_the_digit() {
+    // AZERTY's digit row needs Shift.
+    let mut s = session();
+    s.press(50, "Shift_L", Mods::SHIFT, 0.0);
+    s.press(2, "1", Mods::SHIFT, 0.0);
+    assert_eq!(s.note(), Some("no layers yet"));
+    s.press(11, "0", Mods::SHIFT, 0.0); // far left
+    assert_eq!(s.rect().x, 0.0);
+}
+
+const SUPER: Mods = Mods {
+    logo: true,
+    ..Mods::NONE
+};
+
+#[test]
+fn a_key_with_super_held_does_nothing() {
+    let mut s = session();
+    s.press(60, "Super_L", SUPER, 0.0);
+    s.press(1, "l", SUPER, 0.0);
+    assert!(!s.tick(1.0), "nor does it repeat");
+    s.press(2, "Return", SUPER, 1.0);
+    s.press(3, "q", SUPER, 1.0);
+    assert_eq!((s.rect(), s.outcome()), (START, None));
+}
+
+#[test]
+fn super_types_nothing_in_text() {
+    use screenie_core::model::OpData;
+    let mut s = session();
+    s.keys("a i");
+    s.press(60, "Super_L", SUPER, 0.0);
+    s.press(1, "z", SUPER, 0.0);
+    s.release(60, "Super_L", Mods::NONE, 0.0);
+    s.keys("x Return");
+    let ops = &s.open_layer().unwrap().ops;
+    assert!(matches!(&ops[0].data, OpData::Text(t) if t.text == "x"));
+}
+
+#[test]
 fn ctrl_and_alt_never_repeat() {
     let mut s = session_at(r(1000.0, 500.0, 100.0, 100.0), vec![]);
     s.press(50, "Alt_L", Mods::ALT, 0.0);
     s.press(1, "h", Mods::ALT, 0.0); // halve once
     assert!(!s.tick(1.0));
     assert_eq!(s.rect(), r(1000.0, 500.0, 50.0, 100.0));
+}
+
+/// Ticks at 60 fps from `from` to `to`; returns `to`.
+fn tick_to(s: &mut Session, from: f64, to: f64) -> f64 {
+    let mut t = from;
+    while t < to {
+        t = (t + 1.0 / 60.0).min(to);
+        s.tick(t);
+    }
+    to
+}
+
+#[test]
+fn a_modifier_tapped_mid_hold_resumes_without_a_burst() {
+    let mut s = session_at(r(1000.0, 500.0, 100.0, 100.0), vec![]);
+    s.press(1, "l", Mods::NONE, 0.0);
+    let t = tick_to(&mut s, 0.0, 1.0);
+    let w = s.rect().w;
+    s.press(50, "Control_L", Mods::CTRL, t);
+    s.tick(t + 1.0 / 60.0);
+    s.release(50, "Control_L", Mods::NONE, t + 1.0 / 60.0);
+    s.tick(t + 2.0 / 60.0);
+    let grew = s.rect().w - w;
+    assert!(grew <= 30.0, "grew {grew}");
+}
+
+#[test]
+fn releasing_ctrl_first_after_a_held_jump_resumes_without_a_burst() {
+    let mut s = session_at(r(1000.0, 500.0, 100.0, 100.0), vec![]);
+    s.press(50, "Control_L", Mods::CTRL, 0.0);
+    s.press(1, "l", Mods::CTRL, 0.0);
+    let jumped = s.rect();
+    let t = tick_to(&mut s, 0.0, 1.0);
+    assert_eq!(s.rect(), jumped, "a jump doesn't repeat");
+    s.release(50, "Control_L", Mods::NONE, t);
+    s.tick(t + 1.0 / 60.0);
+    let grew = s.rect().w - jumped.w;
+    assert!(grew <= 30.0, "grew {grew}");
 }
 
 #[test]
@@ -576,6 +654,25 @@ fn ctrl_alt_hjkl_takes_the_cursor_corner_to_the_next_picture_edge() {
 }
 
 #[test]
+fn in_centre_mode_picture_edges_move_the_cursor_edge_mirrored() {
+    // The cursor's edges are the left and top, as for h and w: l shrinks,
+    // h grows, both about the centre.
+    let (mut s, asked) = with_edges();
+    s.keys("c <C-A-l>");
+    assert_eq!(asked.borrow()[0].0, PixelPoint::new(100, 100));
+    assert_eq!(s.rect(), r(150.0, 100.0, 300.0, 300.0));
+    assert!(s.selection().is_centred());
+    s.keys("<C-A-h>");
+    assert_eq!(asked.borrow()[1].0, PixelPoint::new(149, 100));
+    assert_eq!(s.rect(), r(100.0, 100.0, 400.0, 300.0));
+    s.keys("<C-A-j>");
+    assert_eq!(s.rect(), r(100.0, 150.0, 400.0, 200.0));
+    // The cursor is still on the left: l shrinks about the centre.
+    s.keys("l");
+    assert_eq!(s.rect(), r(105.0, 150.0, 390.0, 200.0));
+}
+
+#[test]
 fn with_no_edge_that_way_the_box_stays_and_says_so() {
     let (mut s, _) = with_edges();
     s.keys("<C-A-k>");
@@ -592,8 +689,8 @@ fn the_low_corner_lands_on_the_edge_too() {
 }
 
 #[test]
-fn censor_and_filter_boxes_jump_to_picture_edges_too() {
-    for tool in ["x", "f"] {
+fn censor_filter_and_shape_boxes_jump_to_picture_edges_too() {
+    for tool in ["x", "f", "a r"] {
         let (mut s, asked) = with_edges();
         s.keys(&format!("{tool} <C-A-h>"));
         assert_eq!(asked.borrow().len(), 1, "{tool}");

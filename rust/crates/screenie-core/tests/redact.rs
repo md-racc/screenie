@@ -109,6 +109,29 @@ fn accepting_makes_black_bars_in_one_undo_step() {
 }
 
 #[test]
+fn accepting_with_kind_pixelate_makes_pixelate_censors() {
+    let mut s = session();
+    s.set_analyzer(Box::new(Sync(secrets())));
+    s.set_redact_rules(screenie_core::redact::Rules {
+        kind: CensorKind::Pixelate,
+        ..Default::default()
+    });
+    s.keys("x r Return");
+    let ops: Vec<(CensorKind, f64)> = s
+        .open_layer()
+        .unwrap()
+        .ops
+        .iter()
+        .map(|o| match &o.data {
+            OpData::Censor(c) => (c.kind, c.amount),
+            other => panic!("not a censor: {other:?}"),
+        })
+        .collect();
+    let block = screenie_core::censor::PIXELATE_BLOCK;
+    assert_eq!(ops, [(CensorKind::Pixelate, block)]);
+}
+
+#[test]
 fn only_the_ticked_are_accepted_and_esc_drops_them_all() {
     let mut s = session();
     s.set_analyzer(Box::new(Sync(secrets())));

@@ -1,10 +1,13 @@
-//! Annotate (`a`) and its Shape child: visible markup in the open layer.
+//! Annotate (`a`) and its Shape child: visible markup in the open layer
+//! (README, Annotate; docs/annotate.md; the keys are in keymap.rs).
 //!
-//! The pen is the default: a drag draws a freehand line, locked in when
-//! the button comes up. `1`-`5` pick an ink, `p` picks up the colour under
-//! the pointer, `+`/`-` set the width (held, they repeat). `r` and `c` open
-//! a rectangle or circle as a box of its own (Shape), edited with the box
-//! grammar; `a` there locks it and returns to the pen, Esc drops it.
+//! The pen is the default: a drag, or Space and hjkl, draws a freehand
+//! line. Shift holds the piece being drawn straight, Ctrl bends it into an
+//! arc. Annotate also places text and numbered callouts, and `m` swaps the
+//! pen for the highlighter. `r`, `c` and `v` open a rectangle, circle or
+//! arrow (`t` cycles them, and a plain line) as a box of its own (Shape),
+//! edited with the box grammar; `a` there locks it and returns to the pen,
+//! Esc drops it.
 //!
 //! The ink (colour and width) belongs to the session, so the pen and
 //! shapes share it, and it lasts across layers.
@@ -14,6 +17,7 @@ use crate::boxes::{self, BoxOutcome, Drag};
 use crate::geometry::{LogicalPoint, LogicalRect};
 use crate::intent::{Intent, Tool};
 use crate::model::{Heads, LineOp, OpData, Rgb, ShapeKind, ShapeOp, StrokeOp};
+use crate::session::{Mode, Session, Transition};
 
 /// What a Shape box draws: an outline (rect, circle), or the anchor to
 /// cursor as a line or arrow.
@@ -45,7 +49,6 @@ impl ShapeTool {
         }
     }
 }
-use crate::session::{Mode, Session, Transition};
 
 /// The ink palette, by key: one declaration for keys, palette and colour.
 pub const INKS: [(char, &str, Rgb); 5] = [
@@ -167,6 +170,8 @@ pub struct AnnotateMode {
     /// The pen point was moved by the keyboard (so it's drawn), and the
     /// line in progress is the keyboard's.
     pub keyboard: bool,
+    /// The line in progress is a drag: the button is down.
+    pressed: bool,
 }
 
 impl AnnotateMode {
@@ -209,6 +214,7 @@ impl AnnotateMode {
             highlighter: false,
             next_callout: None,
             keyboard: false,
+            pressed: false,
         }
     }
 }
@@ -219,7 +225,7 @@ pub struct ShapeMode {
     pub kind: ShapeTool,
     /// An arrow's heads: at the cursor, or (`V`) both ends.
     pub both_heads: bool,
-    drag: Option<Drag>,
+    pub(crate) drag: Option<Drag>,
 }
 
 impl ShapeMode {
@@ -388,7 +394,9 @@ impl Session {
                 }
             }
             Intent::Press(p) => {
+                self.lock_trace(a); // a keyboard line still down is kept
                 a.keyboard = false;
+                a.pressed = true;
                 a.trace = Some(vec![p]);
                 a.segment = None;
             }
@@ -436,6 +444,7 @@ impl Session {
                 }
             }
             Intent::Release(p) => {
+                a.pressed = false;
                 if let Some(seg) = &mut a.segment {
                     seg.end = p;
                 }
@@ -459,7 +468,7 @@ impl Session {
                 let n = a
                     .next_callout
                     .take()
-                    .unwrap_or_else(|| self.last_callout() + 1);
+                    .unwrap_or_else(|| self.last_callout().saturating_add(1));
                 let size = 16.0 + 2.0 * self.ink_width;
                 self.lock(Some(OpData::Callout(crate::model::CalloutOp {
                     centre: a.pointer,
@@ -536,9 +545,18 @@ impl Session {
     }
 
     fn lock_trace(&mut self, a: &mut AnnotateMode) {
+        a.pressed = false;
         a.settle(self.pen_bulge);
         if let Some(t) = a.trace.take() {
             self.lock(self.pen_op(a, &t));
+        }
+    }
+
+    /// The pen loses input mid-drag: the line is locked, as letting go
+    /// would. A keyboard line stays down.
+    pub(crate) fn pen_left(&mut self, a: &mut AnnotateMode) {
+        if a.pressed {
+            self.lock_trace(a);
         }
     }
 
@@ -577,6 +595,10 @@ impl Session {
         // The cursor corner follows the mouse; a drag still draws anew.
         if let (Intent::Motion(p), None) = (intent, &s.drag) {
             s.sel.place_cursor(p);
+            return Transition::Stay;
+        }
+        if let Intent::PictureEdge(d) = intent {
+            self.picture_edge(&mut s.sel, d);
             return Transition::Stay;
         }
         // No handles: the cursor corner is always under the pointer here,

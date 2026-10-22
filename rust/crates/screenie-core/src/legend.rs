@@ -71,7 +71,6 @@ pub const SELECT: &[&[Item]] = &[
     ],
 ];
 
-/// Censor's legend.
 /// Select's palette: the modes it opens and what it finishes with, so a
 /// session can go by mouse alone (docs/mouse.md).
 pub const SELECT_PALETTE: &[&[Item]] = &[
@@ -94,11 +93,13 @@ pub const SELECT_PALETTE: &[&[Item]] = &[
     ],
 ];
 
+/// Censor's palette: the kind of censor, and finding secrets, always shown.
 pub const CENSOR_PALETTE: &[&[Item]] = &[&[
     ("pixelate/bar", &[Intent::CycleKind]),
     ("find secrets", &[Intent::Redact]),
 ]];
 
+/// Censor's legend.
 pub const CENSOR: &[&[Item]] = &[
     &[
         ("pixelate/bar", &[Intent::CycleKind]),
@@ -378,7 +379,36 @@ pub const MEASURE: &[&[Item]] = &[
         ),
     ],
     &[
-        ("edge", &[Intent::Jump(crate::geometry::Dir::Right)]),
+        (
+            "move",
+            &[
+                Intent::Steer(Dir::Left),
+                Intent::Steer(Dir::Down),
+                Intent::Steer(Dir::Up),
+                Intent::Steer(Dir::Right),
+            ],
+        ),
+        ("Shift ×4  Alt half to edge", &[]),
+        (
+            "picture edges",
+            &[
+                Intent::Jump(Dir::Right),
+                Intent::Jump(Dir::Left),
+                Intent::Jump(Dir::Down),
+                Intent::Jump(Dir::Up),
+            ],
+        ),
+        (
+            "far",
+            &[
+                Intent::FarEdge(Dir::Left),
+                Intent::FarEdge(Dir::Right),
+                Intent::FarEdge(Dir::Up),
+                Intent::FarEdge(Dir::Down),
+            ],
+        ),
+    ],
+    &[
         (
             "step, or bend a line",
             &[Intent::Adjust(1), Intent::Adjust(-1)],
@@ -492,6 +522,14 @@ mod tests {
                 "i insert  m measure  z loupe  e enhance",
                 "Enter capture  y text  p colour  Q code  P pin  Esc cancel  q quit",
             ]
+        );
+    }
+
+    #[test]
+    fn measure_legend() {
+        assert_eq!(
+            render(&keymap::MEASURE, MEASURE)[1],
+            "h j k l move  Shift ×4  Alt half to edge  C-l C-h C-j C-k picture edges  0 $ g G far"
         );
     }
 

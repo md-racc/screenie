@@ -2,11 +2,9 @@
 
 use crate::anchor_cursor::AnchorCursor;
 use crate::boxes::{self, BoxOutcome, Drag};
-use crate::geometry::{Axis, Dir, End, LogicalRect, PixelPoint, PixelRect};
+use crate::geometry::{Axis, Dir, End, LogicalPoint, LogicalRect, PixelPoint};
 use crate::intent::Intent;
 use crate::session::{FinishedAction, Outcome, Session, Transition};
-
-pub use crate::boxes::RATES;
 
 /// What Enter produces in Select (`--result`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,54 +85,47 @@ impl Session {
     /// search starts at the pixel just ahead of it, and the edge stops just
     /// before the first pixel that differs, so every stop is a boundary
     /// (going right: up to a thing, then past it; and the same stops back).
-    /// It stays on the corner's monitor and in `sel`'s bounds.
+    /// It stays on the corner's monitor and in `sel`'s bounds. In centre
+    /// mode the cursor's edges are the left and top, mirrored about the
+    /// centre, as for `h` and `w`.
     pub(crate) fn picture_edge(&mut self, sel: &mut AnchorCursor, d: Dir) {
-        let corner = crate::session::corner_pixel(&self.pixels, sel);
+        // The cursor's corner pixel, even in centre mode.
+        let corner = self.pixels.edge_pixel(
+            LogicalPoint::new(sel.cursor_edge(Axis::X), sel.cursor_edge(Axis::Y)),
+            sel.cursor_end(Axis::X) == End::High,
+            sel.cursor_end(Axis::Y) == End::High,
+        );
         let at = self.pixels.to_logical(corner);
         let monitor = self
             .layout
-            .monitors
-            .iter()
-            .find(|m| m.rect.contains(at))
+            .monitor_at(at)
             .map_or(self.layout.bounds, |m| m.rect);
-        let (a, b) = (
-            self.pixels.to_pixels(monitor),
-            self.pixels.to_pixels(sel.bounds()),
-        );
-        let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
-        let (x1, y1) = ((a.x + a.w).min(b.x + b.w), (a.y + a.h).min(b.y + b.h));
-        let bounds = PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0));
+        let bounds = self
+            .pixels
+            .to_pixels(monitor)
+            .intersect(&self.pixels.to_pixels(sel.bounds()));
         let axis = d.axis();
         let forward = matches!(d, Dir::Right | Dir::Down);
         // The edge's line, in pixel coordinates along the axis.
-        let (c, high) = match axis {
-            Axis::X => (corner.x, sel.cursor_end(Axis::X) == End::High),
-            Axis::Y => (corner.y, sel.cursor_end(Axis::Y) == End::High),
+        let c = corner.get(axis);
+        let line = if sel.cursor_end(axis) == End::High {
+            c + 1
+        } else {
+            c
         };
-        let line = if high { c + 1 } else { c };
         let ahead = if forward { line } else { line - 1 };
         let from = match axis {
             Axis::X => PixelPoint::new(ahead, corner.y),
             Axis::Y => PixelPoint::new(corner.x, ahead),
         };
-        let found = self.find_edge(from, d, bounds);
-        let Some(e) = found else {
+        let Some(e) = self.find_edge(from, d, bounds) else {
             self.note = Some("no edge in the picture that way".into());
             return;
         };
-        let e = match axis {
-            Axis::X => e.x,
-            Axis::Y => e.y,
-        };
+        let e = e.get(axis);
         let to = if forward { e } else { e + 1 };
         let p = self.pixels.from_device(f64::from(to), f64::from(to));
-        sel.cursor_to(
-            axis,
-            match axis {
-                Axis::X => p.x,
-                Axis::Y => p.y,
-            },
-        );
+        sel.cursor_to(axis, p.get(axis));
     }
 
     /// Whether the box covers at least one output pixel each way.

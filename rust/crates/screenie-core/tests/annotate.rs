@@ -393,6 +393,8 @@ fn callouts_count_up_undo_reuses_the_number_and_capital_n_sets_it() {
     assert_eq!(n(&s), [1, 2, 3, 7, 8]);
     s.keys("N x Return");
     assert_eq!(s.note(), Some("not a number: \"x\""));
+    s.keys("N 4 2 9 4 9 6 7 2 9 5 Return n n"); // the largest there is, then stuck
+    assert_eq!(n(&s)[5..], [u32::MAX, u32::MAX]);
 }
 
 #[test]
@@ -424,6 +426,58 @@ fn the_keyboard_pen_moves_with_hjkl_and_space_draws() {
     assert_eq!(
         s.pen_point(),
         Some(screenie_core::geometry::PixelPoint::new(400, 170))
+    );
+}
+
+#[test]
+fn a_click_keeps_the_keyboard_line_still_down() {
+    let mut s = session();
+    s.keys("a h h space l l L");
+    s.button(Button::Left, p(200.0, 240.0), true);
+    s.button(Button::Left, p(200.0, 240.0), false);
+    assert_eq!(kinds(&s), ["stroke", "stroke"]);
+    let ops = &s.open_layer().unwrap().ops;
+    let OpData::Stroke(st) = &ops[0].data else {
+        panic!()
+    };
+    assert_eq!(
+        st.points,
+        [
+            p(370.0, 215.0),
+            p(375.0, 215.0),
+            p(380.0, 215.0),
+            p(400.0, 215.0)
+        ]
+    );
+    let OpData::Stroke(dot) = &ops[1].data else {
+        panic!()
+    };
+    assert_eq!(dot.points, [p(200.0, 240.0)]);
+}
+
+#[test]
+fn a_lens_mid_drag_locks_the_line_but_the_keyboard_pen_stays_down() {
+    let drawing = |s: &Session| match s.modes().last() {
+        Some(Mode::Annotate(a)) => a.drawing(),
+        _ => panic!("not in annotate: {}", s.mode_name()),
+    };
+    let mut s = session();
+    s.keys("a");
+    s.button(Button::Left, p(200.0, 200.0), true);
+    s.motion(p(220.0, 200.0));
+    s.keys("z"); // locked here, as letting go would
+    assert_eq!(kinds(&s), ["stroke"]);
+    s.button(Button::Left, p(220.0, 200.0), false); // the release goes to the loupe
+    s.keys("z");
+    assert!(!drawing(&s));
+    s.motion(p(300.0, 240.0)); // no button held: no ink
+    assert_eq!(last_points(&s), [p(200.0, 200.0), p(220.0, 200.0)]);
+
+    s.keys("space l z z l space"); // a keyboard line goes on through the lens
+    assert_eq!(kinds(&s), ["stroke", "stroke"]);
+    assert_eq!(
+        last_points(&s),
+        [p(300.0, 240.0), p(305.0, 240.0), p(310.0, 240.0)]
     );
 }
 

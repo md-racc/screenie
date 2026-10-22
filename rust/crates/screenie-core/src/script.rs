@@ -228,7 +228,7 @@ mod tests {
                     mods: Mods {
                         alt: true,
                         shift: true,
-                        ctrl: false
+                        ..Mods::NONE
                     }
                 },
                 Step::Key {

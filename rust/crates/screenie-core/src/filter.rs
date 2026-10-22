@@ -55,7 +55,8 @@ enum Edit {
 
 #[derive(Clone, Debug)]
 pub struct FilterMode {
-    /// The selected filter's box (the whole main box with none selected).
+    /// The selected filter's box; with none selected, the box the next
+    /// filter takes (the main box at first, then the last one selected).
     pub sel: AnchorCursor,
     pub selected: Option<OpId>,
     /// An ongoing run of one edit to one filter: (filter, edit, the layer

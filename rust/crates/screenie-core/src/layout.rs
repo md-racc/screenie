@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{Axis, LogicalPoint, LogicalRect};
+use crate::geometry::{LogicalPoint, LogicalRect};
 
 /// Stable for one run: the platform's own identity for a monitor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -110,123 +110,9 @@ pub fn bounding(rects: impl IntoIterator<Item = LogicalRect>) -> LogicalRect {
     LogicalRect::from_edges(x0, y0, x1, y1)
 }
 
-/// Snap target coordinates per axis, sorted and without repeats.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Targets {
-    pub x: Vec<f64>,
-    pub y: Vec<f64>,
-}
-
-fn sorted_unique(mut v: Vec<f64>) -> Vec<f64> {
-    v.sort_by(f64::total_cmp);
-    v.dedup();
-    v
-}
-
-impl Targets {
-    /// Every left/right and top/bottom edge of some rectangles.
-    pub fn edges_of(rects: &[LogicalRect]) -> Self {
-        Self {
-            x: sorted_unique(rects.iter().flat_map(|r| [r.x, r.right()]).collect()),
-            y: sorted_unique(rects.iter().flat_map(|r| [r.y, r.bottom()]).collect()),
-        }
-    }
-
-    /// Each monitor's edges and its quarter, half and three-quarter lines.
-    pub fn grid(monitors: &[LogicalRect]) -> Self {
-        let lines = |o: f64, s: f64| (0..5).map(move |i| o + s * f64::from(i) / 4.0);
-        Self {
-            x: sorted_unique(monitors.iter().flat_map(|m| lines(m.x, m.w)).collect()),
-            y: sorted_unique(monitors.iter().flat_map(|m| lines(m.y, m.h)).collect()),
-        }
-    }
-
-    pub fn union(&self, other: &Targets) -> Self {
-        Self {
-            x: sorted_unique(self.x.iter().chain(&other.x).copied().collect()),
-            y: sorted_unique(self.y.iter().chain(&other.y).copied().collect()),
-        }
-    }
-
-    pub fn on(&self, axis: Axis) -> &[f64] {
-        match axis {
-            Axis::X => &self.x,
-            Axis::Y => &self.y,
-        }
-    }
-
-    /// The nearest target more than `gap` past `value` in direction `sign`
-    /// (+1 or -1). Targets within the gap are the far side of the window
-    /// gap an edge is sitting in, so they're skipped.
-    pub fn next(&self, axis: Axis, value: f64, sign: f64, gap: f64) -> Option<f64> {
-        let past = self
-            .on(axis)
-            .iter()
-            .copied()
-            .filter(|t| (t - value) * sign > gap);
-        if sign > 0.0 {
-            past.reduce(f64::min)
-        } else {
-            past.reduce(f64::max)
-        }
-    }
-}
-
-/// The first rectangle containing the point (they're topmost first), else
-/// the one nearest it. `None` only for an empty list.
-pub fn nearest(rects: &[LogicalRect], p: LogicalPoint) -> Option<LogicalRect> {
-    if let Some(hit) = rects.iter().find(|r| r.contains(p)) {
-        return Some(*hit);
-    }
-    let mut best: Option<(f64, LogicalRect)> = None;
-    for r in rects {
-        let d = r.dist2(p);
-        if best.is_none_or(|(bd, _)| d < bd) {
-            best = Some((d, *r));
-        }
-    }
-    best.map(|(_, r)| r)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn edges_are_sorted_and_unique() {
-        let t = Targets::edges_of(&[
-            LogicalRect::new(10.0, 0.0, 10.0, 5.0),
-            LogicalRect::new(0.0, 0.0, 10.0, 5.0),
-        ]);
-        assert_eq!(t.x, vec![0.0, 10.0, 20.0]);
-        assert_eq!(t.y, vec![0.0, 5.0]);
-    }
-
-    #[test]
-    fn the_grid_covers_every_monitor() {
-        let g = Targets::grid(&[
-            LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
-            LogicalRect::new(1920.0, 0.0, 1920.0, 1080.0),
-        ]);
-        assert_eq!(
-            g.x,
-            vec![
-                0.0, 480.0, 960.0, 1440.0, 1920.0, 2400.0, 2880.0, 3360.0, 3840.0
-            ]
-        );
-        assert_eq!(g.y, vec![0.0, 270.0, 540.0, 810.0, 1080.0]);
-    }
-
-    #[test]
-    fn next_skips_targets_inside_the_gap() {
-        let t = Targets {
-            x: vec![0.0, 958.0, 1920.0, 1923.0],
-            y: vec![],
-        };
-        assert_eq!(t.next(Axis::X, 1918.0, 1.0, 12.0), None);
-        assert_eq!(t.next(Axis::X, 1918.0, -1.0, 12.0), Some(958.0));
-        assert_eq!(t.next(Axis::X, 900.0, 1.0, 12.0), Some(958.0));
-    }
 
     #[test]
     fn start_is_the_active_window_else_the_middle_of_the_focused_monitor() {

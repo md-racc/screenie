@@ -1,11 +1,13 @@
 //! Keys, modifiers and chords.
 //!
-//! Platforms report keys by keysym name (xkb's names, which X11 shares).
+//! The platform maps xkb keysyms to `Key` itself; `Key::from_name` reads
+//! keysym names (`h`, `dollar`, `Return`) for `--keys` scripts and tests.
 //! A `Chord` is a key plus the modifiers that matter, normalised so the
 //! keymap can match it exactly:
 //! - an upper-case letter is its lower-case letter with Shift (`O` is
 //!   `Shift+o`, `H` is `Shift+h`);
-//! - a symbol has its Shift consumed (`$`, `{`, `?` and `+` already say it);
+//! - a symbol or digit has its Shift consumed (`$`, `{`, `?` and `+`
+//!   already say it, and layouts like AZERTY need Shift for digits);
 //! - named keys keep Shift (`Shift+Space` is not `Space`).
 //!
 //! A chord with a modifier the mode gives no meaning simply isn't bound,
@@ -32,6 +34,8 @@ pub enum Key {
     Shift,
     Control,
     Alt,
+    /// Super, and the other modifiers screenie ignores (AltGr, Level5,
+    /// Caps Lock, Num Lock). Never bound and never typed.
     Super,
     /// Anything else: never bound.
     Other,
@@ -130,6 +134,8 @@ pub struct Mods {
     pub shift: bool,
     pub ctrl: bool,
     pub alt: bool,
+    /// Super. No table binds it, so a key with Super held does nothing.
+    pub logo: bool,
 }
 
 impl Mods {
@@ -137,6 +143,7 @@ impl Mods {
         shift: false,
         ctrl: false,
         alt: false,
+        logo: false,
     };
     pub const SHIFT: Mods = Mods {
         shift: true,
@@ -174,7 +181,7 @@ impl Chord {
                 key: Key::Char(c.to_ascii_lowercase()),
                 mods: mods.with_shift(),
             },
-            Key::Char(c) if !c.is_ascii_alphanumeric() => Chord {
+            Key::Char(c) if !c.is_ascii_alphabetic() => Chord {
                 key,
                 mods: Mods {
                     shift: false,
@@ -193,16 +200,14 @@ impl Chord {
     pub fn ch(c: char) -> Chord {
         Chord::plain(if c == ' ' { Key::Space } else { Key::Char(c) })
     }
-
-    pub fn with(key: Key, mods: Mods) -> Chord {
-        Chord::new(key, mods)
-    }
 }
 
 /// How the legend writes a chord: `O`, `$`, `Enter`, `S-Space`, `C-h`.
 impl fmt::Display for Chord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Mods { shift, ctrl, alt } = self.mods;
+        let Mods {
+            shift, ctrl, alt, ..
+        } = self.mods;
         if ctrl {
             f.write_str("C-")?;
         }
@@ -250,9 +255,9 @@ mod tests {
     fn upper_case_letters_are_shifted_lower_case() {
         assert_eq!(
             Chord::new(Key::from_name("O"), Mods::SHIFT),
-            Chord::with(Key::Char('o'), Mods::SHIFT)
+            Chord::new(Key::Char('o'), Mods::SHIFT)
         );
-        assert_eq!(Chord::ch('G'), Chord::with(Key::Char('g'), Mods::SHIFT));
+        assert_eq!(Chord::ch('G'), Chord::new(Key::Char('g'), Mods::SHIFT));
         assert_eq!(Chord::ch('H').key.direction(), Some(Dir::Left));
     }
 
@@ -275,6 +280,17 @@ mod tests {
     }
 
     #[test]
+    fn digits_typed_with_shift_are_digits() {
+        // AZERTY: the digit row needs Shift.
+        assert_eq!(Chord::new(Key::Char('1'), Mods::SHIFT), Chord::ch('1'));
+        assert_eq!(Chord::new(Key::Char('0'), Mods::SHIFT), Chord::ch('0'));
+        assert_eq!(
+            Chord::new(Key::Char('3'), Mods::CTRL.with_shift()),
+            Chord::new(Key::Char('3'), Mods::CTRL)
+        );
+    }
+
+    #[test]
     fn keysym_names() {
         assert_eq!(Key::from_name("plus"), Key::Char('+'));
         assert_eq!(Key::from_name("KP_Add"), Key::Char('+'));
@@ -288,15 +304,15 @@ mod tests {
     #[test]
     fn chords_display_as_in_the_legend() {
         assert_eq!(Chord::ch('O').to_string(), "O");
-        assert_eq!(Chord::with(Key::Space, Mods::SHIFT).to_string(), "S-Space");
+        assert_eq!(Chord::new(Key::Space, Mods::SHIFT).to_string(), "S-Space");
         assert_eq!(Chord::plain(Key::Return).to_string(), "Enter");
         assert_eq!(
-            Chord::with(
+            Chord::new(
                 Key::Char('h'),
                 Mods {
                     ctrl: true,
                     shift: true,
-                    alt: false
+                    ..Mods::NONE
                 }
             )
             .to_string(),

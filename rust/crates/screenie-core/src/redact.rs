@@ -103,26 +103,13 @@ pub struct Proposal {
     pub ticked: bool,
 }
 
-/// What some detectors need to know about this machine.
+/// What some detectors need to know about this machine (the host fills
+/// it in).
 #[derive(Clone, Debug, Default)]
 pub struct Env {
     pub user: String,
     pub home: String,
     pub hostname: String,
-}
-
-impl Env {
-    pub fn from_system() -> Env {
-        let var = |k| std::env::var(k).unwrap_or_default();
-        let hostname = std::fs::read_to_string("/etc/hostname")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| var("HOSTNAME"));
-        Env {
-            user: var("USER"),
-            home: var("HOME"),
-            hostname,
-        }
-    }
 }
 
 /// A `[[redact.custom]]` detector.
@@ -165,9 +152,6 @@ pub struct Rules {
     /// Scan every monitor when the picker opens (the host does it).
     pub prescan: bool,
 }
-
-/// A pixelate suggestion's block size, logical px (Censor's default).
-pub const PIXELATE: f64 = 10.0;
 
 impl Default for Rules {
     fn default() -> Rules {
@@ -259,7 +243,9 @@ static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
 static PHONE: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?:\+\d{1,3}[ .-]?)?(?:\(\d{1,4}\)[ .-]?)?\d{2,4}(?:[ .-]?\d{2,4}){1,4}")
 });
-static ISO_DATE: LazyLock<Regex> = LazyLock::new(|| re(r"^\d{4}-\d{2}-\d{2}$"));
+/// A date a phone number's groups could be (`2026-10-05`, `05.10.2026`).
+static DATE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"^(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})$"));
 static UUID: LazyLock<Regex> = LazyLock::new(|| {
     re(r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b")
 });
@@ -339,10 +325,12 @@ fn near_card(r: PixelRect, cards: &[(PixelRect, i32)]) -> bool {
 static EXPIRY: LazyLock<Regex> = LazyLock::new(|| {
     re(r"(?:^|[^0-9/])((?:0?[1-9]|1[0-2]) ?/ ?(?:[0-9]{4}|[0-9]{2}))(?:$|[^0-9/])")
 });
-/// What an expiry date is labelled. OCR runs labels into dates
-/// (`Thru:12/30`, `EXP12/27`).
+/// What an expiry date is labelled, as group 1: a whole word (`exp`, not
+/// `export`), or one OCR ran into the date (`Thru:12/30`, `EXP12/27`).
 static EXPIRY_WORD: LazyLock<Regex> = LazyLock::new(|| {
-    re(r"(?i)\b(?:exp(?:iry|ires|iration|\.)?|valid\s*(?:thru|through|until)|good\s*thru)")
+    re(
+        r"(?i)\b(exp(?:iry|ires|iration|\.)?|valid\s*(?:thru|through|until)|good\s*thru)(?:\b|[0-9])",
+    )
 });
 
 /// Card expiry dates, which only mean something next to a card or a label
@@ -353,7 +341,8 @@ fn card_expiries(lines: &[Line], found: &[Found]) -> Vec<Found> {
     let mut out = Vec::new();
     for (i, l) in lines.iter().enumerate() {
         let words: Vec<usize> = EXPIRY_WORD
-            .find_iter(&l.text)
+            .captures_iter(&l.text)
+            .filter_map(|c| c.get(1))
             .map(|m| chars(&l.text, m.end()))
             .collect();
         for m in EXPIRY.captures_iter(&l.text).filter_map(|c| c.get(1)) {
@@ -433,6 +422,29 @@ fn luhn(digits: &[u32]) -> bool {
     sum % 10 == 0
 }
 
+/// The card in a run of digit groups, as byte offsets in it: the longest
+/// run of whole groups (then the leftmost) with 13-19 digits that passes
+/// Luhn, so digits next to a card on its line (a list number, an expiry, a
+/// CVC) don't hide it. A group is never cut.
+fn card_span(s: &str) -> Option<(usize, usize)> {
+    let groups: Vec<(usize, usize)> = DIGITS.find_iter(s).map(|m| (m.start(), m.end())).collect();
+    let mut windows: Vec<(usize, usize, Vec<u32>)> = Vec::new();
+    for a in 0..groups.len() {
+        for b in a..groups.len() {
+            let span = &s[groups[a].0..groups[b].1];
+            let d: Vec<u32> = span.chars().filter_map(|c| c.to_digit(10)).collect();
+            if (13..=19).contains(&d.len()) {
+                windows.push((groups[a].0, groups[b].1, d));
+            }
+        }
+    }
+    windows.sort_by_key(|w| (std::cmp::Reverse(w.2.len()), w.0));
+    windows
+        .into_iter()
+        .find(|w| luhn(&w.2))
+        .map(|(start, end, _)| (start, end))
+}
+
 fn iban_ok(s: &str) -> bool {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     if s.len() < 15 {
@@ -477,9 +489,13 @@ fn chars(text: &str, byte: usize) -> usize {
 
 /// Text folded for matching names through OCR's confusions (case, `rn`
 /// for `m`, `0` for `o`, `1` and `|` for `l`), with each folded char's
-/// span in the original, in chars.
+/// span in the original, in chars. Each char lowercases to one (`İ` to
+/// `i`), so the spans index `text`.
 fn fold(text: &str) -> (Vec<char>, Vec<(usize, usize)>) {
-    let cs: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let cs: Vec<char> = text
+        .chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect();
     let (mut out, mut spans) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < cs.len() {
@@ -497,9 +513,12 @@ fn fold(text: &str) -> (Vec<char>, Vec<(usize, usize)>) {
 }
 
 /// Where `needle` occurs in `text` through OCR's confusions, as char
-/// spans of `text`. (Lowercasing keeps char counts for the scripts OCR
-/// reads here.)
-fn fuzzy_find(text: &str, needle: &str) -> Vec<(usize, usize)> {
+/// spans of `text`, those `keep` accepts.
+fn fuzzy_find(
+    text: &str,
+    needle: &str,
+    keep: impl Fn(usize, usize) -> bool,
+) -> Vec<(usize, usize)> {
     let (hay, spans) = fold(text);
     let (needle, _) = fold(needle);
     if needle.is_empty() || needle.len() > hay.len() {
@@ -508,14 +527,27 @@ fn fuzzy_find(text: &str, needle: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut k = 0;
     while k + needle.len() <= hay.len() {
-        if hay[k..k + needle.len()] == needle[..] {
-            out.push((spans[k].0, spans[k + needle.len() - 1].1));
+        let (start, end) = (spans[k].0, spans[k + needle.len() - 1].1);
+        if hay[k..k + needle.len()] == needle[..] && keep(start, end) {
+            out.push((start, end));
             k += needle.len();
         } else {
             k += 1;
         }
     }
     out
+}
+
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether chars `start..end` of `cs` are whole words: no word char runs
+/// on at either edge (an edge that isn't a word char needs no boundary).
+fn whole(cs: &[char], start: usize, end: usize) -> bool {
+    let left = start == 0 || !word_char(cs[start - 1]) || !word_char(cs[start]);
+    let right = end == cs.len() || !word_char(cs[end]) || !word_char(cs[end - 1]);
+    left && right
 }
 
 fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
@@ -556,8 +588,7 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
         let after = text[m.end()..].chars().next();
         let joined =
             |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || ".:/".contains(c));
-        if (8..=15).contains(&digits) && !joined(before) && !joined(after) && !ISO_DATE.is_match(s)
-        {
+        if (8..=15).contains(&digits) && !joined(before) && !joined(after) && !DATE.is_match(s) {
             // An international or bracketed number looks like one; a run of
             // digit groups may be anything.
             push(
@@ -576,9 +607,11 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
     }
     for m in IPV6.find_iter(text).filter(|_| on(Category::Ip)) {
         let s = m.as_str();
-        if s.matches(':').count() >= 2
+        // Two groups and a digit, so a path in code (`std::fs`, `DB::Add`)
+        // isn't one: `::` alone parses.
+        if s.split(':').filter(|g| !g.is_empty()).count() >= 2
+            && s.bytes().any(|b| b.is_ascii_digit())
             && s.parse::<std::net::Ipv6Addr>().is_ok()
-            && !MAC.is_match(s)
         {
             push(m.start(), m.end(), Category::Ip, true);
         }
@@ -597,14 +630,17 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
         push(v.start(), v.end(), Category::UrlSecret, true);
     }
     for m in CARD.find_iter(text).filter(|_| on(Category::Card)) {
-        let d: Vec<u32> = m.as_str().chars().filter_map(|c| c.to_digit(10)).collect();
-        if (13..=19).contains(&d.len()) && luhn(&d) {
-            push(m.start(), m.end(), Category::Card, true);
+        if let Some((start, end)) = card_span(m.as_str()) {
+            push(m.start() + start, m.start() + end, Category::Card, true);
         }
     }
     for m in IBAN.find_iter(text).filter(|_| on(Category::Iban)) {
-        if iban_ok(m.as_str()) {
-            push(m.start(), m.end(), Category::Iban, true);
+        // The regex takes what follows on the line (a BIC, a currency, an
+        // amount): cut back a word at a time until the check passes.
+        let s = m.as_str();
+        let ends = std::iter::once(s.len()).chain(s.match_indices(' ').map(|(i, _)| i).rev());
+        if let Some(end) = ends.into_iter().find(|&e| iban_ok(&s[..e])) {
+            push(m.start(), m.start() + end, Category::Iban, true);
         }
     }
     for m in LONG.find_iter(text).filter(|_| on(Category::Entropy)) {
@@ -616,11 +652,25 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
             push(m.start(), m.end(), Category::Entropy, h >= 4.0);
         }
     }
-    if !env.user.is_empty() && on(Category::HomePath) {
-        for prefix in [format!("/home/{}", env.user), format!("~{}", env.user)] {
+    if on(Category::HomePath) {
+        let mut prefixes = Vec::new();
+        if !env.user.is_empty() {
+            prefixes.extend([format!("/home/{}", env.user), format!("~{}", env.user)]);
+        }
+        let home = env.home.trim_end_matches('/');
+        if !home.is_empty() && !prefixes.iter().any(|p| p == home) {
+            prefixes.push(home.to_string());
+        }
+        for prefix in prefixes {
             let mut from = 0;
             while let Some(at) = text[from..].find(&prefix) {
                 let start = from + at;
+                // Not another user's (`/home/adina` for `adi`).
+                let next = text[start + prefix.len()..].chars().next();
+                if next.is_some_and(|c| c.is_alphanumeric() || "_-".contains(c)) {
+                    from = start + 1;
+                    continue;
+                }
                 let end = text[start..]
                     .find(char::is_whitespace)
                     .map_or(text.len(), |e| start + e);
@@ -634,14 +684,22 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
             push(m.start(), m.end(), Category::Custom(c.name), true);
         }
     }
+    let cs: Vec<char> = text.chars().collect();
+    let is_whole = |start, end| whole(&cs, start, end);
     if env.hostname.len() >= 3 && on(Category::Host) {
-        for (start, end) in fuzzy_find(text, &env.hostname) {
+        for (start, end) in fuzzy_find(text, &env.hostname, is_whole) {
             push_chars(start, end, Category::Host, true);
         }
     }
-    let cs: Vec<char> = text.chars().collect();
+    // A domain's name is a run of word chars and hyphens; a dot before
+    // one is a subdomain's.
+    let name = |c: char| word_char(c) || c == '-';
+    let domain = |start: usize, end: usize| {
+        (start == 0 || cs[start - 1] == '.' || !name(cs[start - 1]))
+            && (end == cs.len() || !name(cs[end]))
+    };
     for d in rules.domains.iter().filter(|d| !d.is_empty()) {
-        for (mut start, end) in fuzzy_find(text, d) {
+        for (mut start, end) in fuzzy_find(text, d, domain) {
             // With its subdomains.
             while start > 0 && (cs[start - 1].is_alphanumeric() || "-.".contains(cs[start - 1])) {
                 start -= 1;
@@ -650,7 +708,7 @@ fn detect_line(i: usize, text: &str, rules: &Rules) -> Vec<Found> {
         }
     }
     for l in rules.literal.iter().filter(|l| !l.trim().is_empty()) {
-        for (start, end) in fuzzy_find(text, l.trim()) {
+        for (start, end) in fuzzy_find(text, l.trim(), is_whole) {
             push_chars(start, end, Category::Literal, true);
         }
     }
@@ -882,6 +940,7 @@ mod tests {
         assert_eq!(cats(&[&["host", "10.0.0.12:8080"]]), [("ip", true)]);
         assert_eq!(cats(&[&["999.1.1.1"]]), []); // not an address
         assert_eq!(cats(&[&["fe80::1ff:fe23:4567:890a"]]), [("ip", true)]);
+        assert_eq!(cats(&[&["2001:db8::1"]]), [("ip", true)]);
         assert_eq!(cats(&[&["aa:bb:cc:dd:ee:ff"]]), [("mac", true)]);
         assert_eq!(
             cats(&[&["ghp_0123456789abcdefghijABCDEFGHIJ"]]),
@@ -906,6 +965,45 @@ mod tests {
         // "https://x.io/a?id=7&token=" is 26 characters: the value starts there.
         assert_eq!(p[0].rect.x, 260);
         assert_eq!(p[0].label, "abc1…");
+    }
+
+    #[test]
+    fn paths_in_code_are_not_addresses() {
+        for code in [
+            "use std::fs;",
+            "let v = Vec::new();",
+            "std::cout << x;",
+            "DB::Add",
+            "A::B",
+        ] {
+            let words: Vec<&str> = code.split(' ').collect();
+            assert_eq!(cats(&[&words]), [], "{code}");
+        }
+    }
+
+    #[test]
+    fn a_home_path_is_this_users_by_user_or_home() {
+        assert_eq!(
+            cats(&[&["adi@myhost:/home/adi$"]]),
+            [("home-path", true), ("host", true)]
+        );
+        assert_eq!(cats(&[&["~adi/x"]]), [("home-path", true)]);
+        // Another user's.
+        assert_eq!(cats(&[&["/home/adina/x"]]), []);
+        assert_eq!(cats(&[&["~adidas"]]), []);
+        // $HOME outside /home, with or without $USER.
+        for user in ["root", ""] {
+            let r = Rules {
+                env: Env {
+                    user: user.into(),
+                    home: "/root/".into(),
+                    hostname: String::new(),
+                },
+                ..rules(0.0)
+            };
+            assert_eq!(cats_with(&[&["/root/.ssh/id"]], &r), [("home-path", true)]);
+            assert_eq!(cats_with(&[&["/rootfs/x"]], &r), []);
+        }
     }
 
     #[test]
@@ -962,8 +1060,64 @@ mod tests {
     }
 
     #[test]
+    fn a_card_with_other_digits_on_its_line_is_still_found() {
+        let all = [
+            ("card", true),
+            ("card-expiry", true),
+            ("security-code", true),
+        ];
+        assert_eq!(
+            cats(&[&["4242", "4242", "4242", "4242", "12/34", "123"]]),
+            all
+        );
+        let spaced = ["4242", "4242", "4242", "4242", "12", "/", "34", "123"];
+        assert_eq!(cats(&[&spaced]), all);
+        assert_eq!(
+            cats(&[&["Visa", "4111", "1111", "1111", "1111", "100"]]),
+            [("card", true), ("security-code", true)]
+        );
+        assert_eq!(
+            cats(&[&["4111", "1111", "1111", "1111", "12/27"]]),
+            [("card", true), ("card-expiry", true)]
+        );
+        // A list number before it: the card starts at its first group.
+        let p = propose(&ocr(&[&["1", "4111", "1111", "1111", "1111"]]), &rules(0.0));
+        assert_eq!(
+            (p.len(), p[0].category, p[0].rect.x),
+            (1, Category::Card, 20)
+        );
+        // No run of whole groups passes, and an unbroken run isn't cut.
+        assert_eq!(cats(&[&["4111", "1111", "1111", "1112", "12"]]), []);
+        assert_eq!(cats(&[&["41111111111111111123"]]), []);
+    }
+
+    #[test]
+    fn an_iban_with_more_words_on_its_line_is_still_found() {
+        let iban = ["DE89", "3704", "0044", "0532", "0130", "00"];
+        for after in [&["BIC", "COBADEFFXXX"][..], &["EUR"], &["250"]] {
+            let line: Vec<&str> = iban.iter().chain(after).copied().collect();
+            assert_eq!(cats(&[&line]), [("iban", true)], "{line:?}");
+        }
+        assert_eq!(
+            cats(&[&["GB82", "WEST", "1234", "5698", "7654", "32", "EUR"]]),
+            [("iban", true)]
+        );
+        // The box ends at the IBAN's last group.
+        let p = propose(
+            &ocr(&[&["IBAN:", "DE89", "3704", "0044", "0532", "0130", "00", "BIC"]]),
+            &rules(0.0),
+        );
+        assert_eq!((p.len(), p[0].rect.x + p[0].rect.w), (1, 330));
+        // An invalid one stays invalid, whatever follows it.
+        assert_eq!(
+            cats(&[&["DE88", "3704", "0044", "0532", "0130", "00", "EUR"]]),
+            []
+        );
+    }
+
+    #[test]
     fn a_security_code_ocr_ran_into_its_label_is_still_found() {
-        // What tesseract made of "CVV: 123" on a card.
+        // How tesseract reads "CVV: 123" on a card: label and code run together.
         let card = ["4111", "1111", "1111", "1111"];
         let got = cats(&[&card, &["cvv:123", "Valid", "Thru:", "12/30"]]);
         assert_eq!(
@@ -1043,6 +1197,7 @@ mod tests {
             [("phone", false)]
         );
         assert_eq!(cats_with(&[&["on", "2026-10-05"]], &on), []);
+        assert_eq!(cats_with(&[&["on", "05.10.2026"]], &on), []);
     }
 
     #[test]
@@ -1069,6 +1224,54 @@ mod tests {
         assert_eq!(p[0].category, Category::Host);
         assert_eq!(p[0].rect.x, 40); // the subdomain included
         assert_eq!(p[0].rect.w, 22 * 10);
+    }
+
+    #[test]
+    fn a_dotted_capital_i_neither_panics_nor_shifts_a_match() {
+        // `İ` lowercases to two chars; spans must still index the line.
+        assert_eq!(fuzzy_find("İİİİİ myhost", "myhost", |_, _| true), [(6, 12)]);
+        assert_eq!(cats(&[&["İİİİİİİİİİİİ", "myhost"]]), [("host", true)]);
+        let p = propose(&ocr(&[&["İİ", "myhost"]]), &rules(0.0));
+        assert_eq!((p.len(), p[0].rect.x, p[0].rect.w), (1, 30, 60));
+        assert_eq!(p[0].label, "myh…");
+        let r = Rules {
+            domains: vec!["example.com".into()],
+            literal: vec!["secret".into()],
+            ..rules(0.0)
+        };
+        let got = cats_with(&[&["İİİİİİİİİİİİ", "example.com", "secret"]], &r);
+        assert_eq!(got, [("host", true), ("literal", true)]);
+    }
+
+    #[test]
+    fn a_name_matches_only_as_a_whole_word() {
+        let r = Rules {
+            env: Env {
+                hostname: "arch".into(),
+                ..env()
+            },
+            literal: vec!["Acme".into()],
+            domains: vec!["corp.io".into()],
+            ..rules(0.0)
+        };
+        assert_eq!(cats_with(&[&["search", "the", "archive"]], &r), []);
+        assert_eq!(cats_with(&[&["ssh", "arch:~$"]], &r), [("host", true)]);
+        assert_eq!(
+            cats_with(&[&["research", "adi@arch:~$"]], &r),
+            [("host", true)]
+        );
+        assert_eq!(cats_with(&[&["Acmeville"]], &r), []);
+        assert_eq!(
+            cats_with(&[&["Acmeville", "Acme's"]], &r),
+            [("literal", true)]
+        );
+        assert_eq!(cats_with(&[&["corp.iota.com"]], &r), []);
+        assert_eq!(cats_with(&[&["mycorp.io", "my-corp.io"]], &r), []);
+        let p = propose(&ocr(&[&["see", "wiki.corp.io"]]), &r);
+        assert_eq!(
+            (p.len(), p[0].category, p[0].rect.x),
+            (1, Category::Host, 40)
+        );
     }
 
     #[test]
@@ -1126,6 +1329,8 @@ mod tests {
         // A label, with or without a card; OCR running it in.
         assert_eq!(cats(&[&["Expires", "09/2029"]]), [("card-expiry", true)]);
         assert_eq!(cats(&[&["EXP12/27"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Exp.", "12/27"]]), [("card-expiry", true)]);
+        assert_eq!(cats(&[&["Exp.12/27"]]), [("card-expiry", true)]);
         assert_eq!(cats(&[&["Good", "thru", "1/26"]]), [("card-expiry", true)]);
         // Near a card, no label.
         assert_eq!(
@@ -1141,6 +1346,9 @@ mod tests {
     fn other_dates_are_left_alone() {
         // No card and no label: dates are everywhere.
         assert_eq!(cats(&[&["due", "12/27"]]), []);
+        // A word that only starts like a label.
+        assert_eq!(cats(&[&["Exported:", "10/12"]]), []);
+        assert_eq!(cats(&[&["Expected", "3/24"]]), []);
         // Not a month, nor part of a longer date, even by a card.
         let card: &[&str] = &["4111", "1111", "1111", "1111"];
         assert_eq!(cats(&[card, &["13/27"]]), [("card", true)]);

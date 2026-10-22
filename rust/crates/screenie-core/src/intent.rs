@@ -119,16 +119,18 @@ pub enum Intent {
     Tool(Tool),
     /// `t`: the next kind (censor type, shape).
     CycleKind,
-    /// `1`-`9` in a palette: pick that option (an ink colour).
+    /// `1`-`9`: pick that option (an ink, a filter kind, a layer, a text
+    /// style).
     Choose(u8),
     /// `p` in Annotate and Shape: the colour under the pointer becomes the
     /// ink.
     Eyedropper,
-    /// `r` / `c` in Annotate: a shape, as a box of its own.
+    /// `r` / `c` / `v` in Annotate: a shape (rectangle, circle, arrow), as
+    /// a box of its own.
     Shape(crate::annotate::ShapeTool),
     /// `V` in an arrow: a head at both ends, or just the cursor's.
     ToggleHeads,
-    /// `H` in Annotate: the pen draws ink, or highlights.
+    /// `m` in Annotate: the pen draws ink, or highlights.
     ToggleHighlighter,
     /// `Space` in Annotate: the keyboard pen down (drawing) or up (the line
     /// is locked).
@@ -175,7 +177,8 @@ pub enum Intent {
     Loupe,
     /// `e`: enhance.
     Enhance,
-    /// `i`: Insert, a point cursor in the box.
+    /// `i`: Insert, a point cursor in the box (in Annotate: text at the
+    /// pen).
     Insert,
     /// `m` in Insert: the box's centre.
     Middle,

@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use screenie_core::filter::describe;
 use screenie_core::model::{FilterKind, FilterOp, OpData};
-use screenie_core::session::{Mode, Pending, Session};
+use screenie_core::session::{Button, Mode, Pending, Session};
 
 fn stack(s: &Session) -> Vec<FilterOp> {
     s.filter_stack()
@@ -210,7 +210,7 @@ fn tools_share_one_layer_filters_included() {
         .iter()
         .map(|o| o.data.noun())
         .collect();
-    assert_eq!(ops, ["line", "filter", "filter"]);
+    assert_eq!(ops, ["pen", "filter", "filter"]);
     s.keys("u"); // drops the last op, whichever tool made it
     assert_eq!(s.open_layer().unwrap().ops.len(), 2);
     s.keys("Return"); // locks the censor, commits the one layer
@@ -226,4 +226,22 @@ fn esc_warns_when_filters_are_in_the_layer() {
     assert_eq!(s.pending(), Some(Pending::Discard));
     s.keys("Escape");
     assert_eq!((s.mode_name(), s.layers().len()), ("select", 0));
+}
+
+#[test]
+fn no_stale_drag_under_a_lens() {
+    let rect = |s: &Session| match s.modes().last() {
+        Some(Mode::Filter(f)) => f.sel.rect(),
+        _ => panic!("not in filter: {}", s.mode_name()),
+    };
+    let mut s = session();
+    s.keys("f");
+    s.button(Button::Left, p(200.0, 200.0), true);
+    s.motion(p(250.0, 230.0));
+    let drawn = rect(&s);
+    s.keys("e"); // the drag ends here
+    s.button(Button::Left, p(250.0, 230.0), false); // the release goes to Enhance
+    s.keys("Escape");
+    s.motion(p(500.0, 250.0)); // no button held
+    assert_eq!(rect(&s), drawn);
 }

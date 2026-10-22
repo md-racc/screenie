@@ -111,7 +111,8 @@ impl Session {
     }
 
     /// Accept the ticked suggestions as censors of the configured kind
-    /// (black bars by default): one undo step.
+    /// (black bars by default; pixelate at Censor's default block): one
+    /// undo step.
     fn accept(&mut self, m: &mut RedactMode) {
         let mut ids = Vec::new();
         for s in m.suggestions.iter().filter(|s| s.ticked) {
@@ -121,7 +122,7 @@ impl Session {
                     kind: self.redact_rules.kind,
                     amount: match self.redact_rules.kind {
                         CensorKind::Bar => 0.0,
-                        CensorKind::Pixelate => crate::redact::PIXELATE,
+                        CensorKind::Pixelate => crate::censor::PIXELATE_BLOCK,
                     },
                 }),
                 None,

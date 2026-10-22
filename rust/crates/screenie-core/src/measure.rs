@@ -1,7 +1,7 @@
 //! Measure (`m` in Select): lengths, angles and areas over the frozen
 //! picture, in capture pixels or, once calibrated, in real units
-//! (docs/measure.md). It opens no layer: measurements are overlay only
-//! until baked (`a`) into an annotation layer.
+//! (docs/measure.md). It opens no layer: measurements are overlay only,
+//! never part of the image.
 //!
 //! Points sit on capture pixels and are placed with Insert's pixel cursor;
 //! Ctrl+hjkl jumps to the next edge in the picture, which the host finds
@@ -9,14 +9,14 @@
 
 use crate::geometry::{Dir, LogicalPoint, LogicalRect, PixelPoint, PixelRect, rnd};
 use crate::input::Rates;
-use crate::insert::{BIG, PointCursor, STEP, STEP_MAX, STEP_MIN};
-use crate::intent::{DirSet, Intent, Scale as Halve};
+use crate::insert::{PointCursor, STEP, STEP_MAX, STEP_MIN};
+use crate::intent::{DirSet, Intent};
 use crate::lens::{EnhanceMode, LoupeMode};
 use crate::session::{FinishedAction, Mode, Outcome, Session, Transition};
 use crate::text::TextMode;
 use crate::units::{self, Display, Length, Scale};
 
-/// Points this close (capture pixels) to an existing one snap to it.
+/// Points this close (logical px) to an existing one snap to it.
 pub const SNAP: f64 = 4.0;
 /// A Shift'd point, or `^`'s first, reaches this far (logical px) for an
 /// existing point to land on exactly.
@@ -54,14 +54,16 @@ pub trait EdgeFinder {
 /// What a measurement is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prim {
-    /// `s` (as Annotate's line): a line, or a path as points are added;
-    /// Enter finishes.
+    /// `s`: a line from two points, or a path while points are Shift'd,
+    /// which Enter or a plain point ends.
     Line,
-    /// `(`: start, a point on it, end.
+    /// A line bent with `+`/`-` while open (there's no arc key): start,
+    /// peak, end.
     Arc,
     /// `c`: three points on it.
     Circle,
-    /// `A`: a polygon; Enter finishes.
+    /// `A`: one point inside, flooded out to the picture's edges and the
+    /// drawn lines; stored as its outline.
     Area,
     /// `r`: two corners (Enter with none: the box).
     Rect,
@@ -70,6 +72,15 @@ pub enum Prim {
 }
 
 impl Prim {
+    const ALL: [Prim; 6] = [
+        Prim::Line,
+        Prim::Arc,
+        Prim::Circle,
+        Prim::Area,
+        Prim::Rect,
+        Prim::Angle,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             Prim::Line => "line",
@@ -240,8 +251,12 @@ impl Measurement {
             Prim::Angle => {
                 let (a, o, c) = (pts[0], pts[1], pts[2]);
                 let (u, w) = ((a.0 - o.0, a.1 - o.1), (c.0 - o.0, c.1 - o.1));
-                let cos = (u.0 * w.0 + u.1 * w.1) / (u.0.hypot(u.1) * w.0.hypot(w.1));
-                v.degrees = Some(cos.clamp(-1.0, 1.0).acos().to_degrees());
+                let (lu, lw) = (u.0.hypot(u.1), w.0.hypot(w.1));
+                // An arm edited onto the vertex has no direction: no angle.
+                if lu > 0.0 && lw > 0.0 {
+                    let cos = (u.0 * w.0 + u.1 * w.1) / (lu * lw);
+                    v.degrees = Some(cos.clamp(-1.0, 1.0).acos().to_degrees());
+                }
             }
         }
         v
@@ -398,7 +413,7 @@ pub struct MeasureMode {
     /// Where the pointer was last seen: its first report (the overlay
     /// appearing under it) doesn't move the cursor, only moving it does.
     pointer: Option<LogicalPoint>,
-    counts: [u32; 6],
+    counts: [u32; Prim::ALL.len()],
     /// What `u` takes back, latest last (points in progress come first).
     log: Vec<MeasureUndo>,
     /// A point of a placed measurement being moved (`o`, or an Alt+drag).
@@ -423,7 +438,7 @@ impl MeasureMode {
             warned: false,
             note: None,
             pointer: None,
-            counts: [0; 6],
+            counts: [0; Prim::ALL.len()],
             log: Vec::new(),
             edit: None,
         }
@@ -431,11 +446,7 @@ impl MeasureMode {
 
     /// Held-key rates, as Insert's over the cursor's bounds.
     pub fn rates(&self, held: DirSet, shift: bool) -> Rates {
-        crate::insert::InsertMode {
-            cursor: self.cursor.clone(),
-            step: self.step,
-        }
-        .rates(held, shift)
+        self.cursor.rates(self.step, held, shift)
     }
 
     fn label(&self, m: &Measurement) -> String {
@@ -452,7 +463,10 @@ impl MeasureMode {
             Prim::Area | Prim::Rect => {
                 units::area(v.area.unwrap_or(0.0), v.perimeter.unwrap_or(0.0), s, d)
             }
-            Prim::Angle => units::degrees(v.degrees.unwrap_or(0.0)),
+            Prim::Angle => match v.degrees {
+                Some(d) => units::degrees(d),
+                None => "no angle".into(),
+            },
         };
         if self.reference.as_deref() == Some(m.name.as_str()) {
             format!("ref {text}")
@@ -468,10 +482,10 @@ impl MeasureMode {
         let mut out = Vec::new();
         if let Some(sc) = s {
             out.push(format!(
-                "ref   {} {}  ({} px)",
+                "ref   {} {}  ({:.1} px)",
                 units::sig3(sc.real),
                 sc.unit.name(),
-                format_args!("{:.1}", sc.px)
+                sc.px
             ));
         }
         for m in &self.items {
@@ -480,14 +494,14 @@ impl MeasureMode {
             }
             let v = m.values();
             let n = m.points.len();
-            let len = |px: f64, _k: usize| units::length_bare(px, s, d);
+            let len = |px: f64| units::length_bare(px, s, d);
             let detail = match m.kind {
                 Prim::Line if n > 2 => format!("{} segments", n - 1),
                 Prim::Line => format!("at {}", units::degrees(v.degrees.unwrap_or(0.0))),
                 Prim::Arc => match v.radius {
                     Some(r) => format!(
                         "radius {}, {}",
-                        len(r, 3),
+                        len(r),
                         units::degrees(v.degrees.unwrap_or(0.0))
                     ),
                     None => "straight".into(),
@@ -495,17 +509,17 @@ impl MeasureMode {
                 Prim::Circle => match v.radius {
                     Some(r) => format!(
                         "circumference {}, area {}",
-                        len(std::f64::consts::TAU * r, 3),
+                        len(std::f64::consts::TAU * r),
                         units::area(v.area.unwrap_or(0.0), v.perimeter.unwrap_or(0.0), s, d)
                     ),
                     None => String::new(),
                 },
-                Prim::Area => format!("perimeter {}", len(v.perimeter.unwrap_or(0.0), n)),
+                Prim::Area => format!("perimeter {}", len(v.perimeter.unwrap_or(0.0))),
                 Prim::Rect => format!(
                     "{} × {}, diagonal {}",
-                    len(v.width.unwrap_or(0.0), 2),
-                    len(v.height.unwrap_or(0.0), 2),
-                    len(v.width.unwrap_or(0.0).hypot(v.height.unwrap_or(0.0)), 2)
+                    len(v.width.unwrap_or(0.0)),
+                    len(v.height.unwrap_or(0.0)),
+                    len(v.width.unwrap_or(0.0).hypot(v.height.unwrap_or(0.0)))
                 ),
                 Prim::Angle => String::new(),
             };
@@ -752,17 +766,6 @@ impl MeasureMode {
     }
 }
 
-impl Prim {
-    const ALL: [Prim; 6] = [
-        Prim::Line,
-        Prim::Arc,
-        Prim::Circle,
-        Prim::Area,
-        Prim::Rect,
-        Prim::Angle,
-    ];
-}
-
 /// A placed measurement's point being moved: it follows the cursor until
 /// kept (Space, Enter, letting go of the drag) or put back (Esc, `u`).
 #[derive(Clone, Debug)]
@@ -863,24 +866,18 @@ impl Session {
     /// ends at its second point, unless `keep` (Shift) makes it a path.
     /// A `click` reaches further for a vertex when Shift'd or `^`'s first:
     /// the mouse isn't as exact as the keys.
-    fn drop_point(
-        &mut self,
-        m: &mut MeasureMode,
-        snap: bool,
-        keep: bool,
-        click: bool,
-    ) -> Option<Transition> {
+    fn drop_point(&mut self, m: &mut MeasureMode, snap: bool, keep: bool, click: bool) {
         if m.tool == Prim::Area {
             // A point inside: the region round it.
             match self.find_region(m.cursor.at, m.cursor.bounds, &m.walls()) {
                 Ok(points) if points.len() >= 3 => {
                     m.points = points;
-                    return self.finish_measurement(m);
+                    self.finish_measurement(m);
                 }
                 Ok(_) => m.note = Some("too small to measure".into()),
                 Err(e) => m.note = Some(e),
             }
-            return None;
+            return;
         }
         let mut at = m.cursor.at;
         let picking_vertex = m.tool == Prim::Angle && m.points.is_empty();
@@ -923,7 +920,7 @@ impl Session {
         }
         if m.points.last() == Some(&at) {
             m.note = Some("that's the last point: move the cursor first".into());
-            return None;
+            return;
         }
         // `^` on a vertex of straight lines: every angle round it, now.
         if picking_vertex {
@@ -941,7 +938,7 @@ impl Session {
                 }
                 m.selected = Some(m.items.len() - 1);
                 m.warned = false;
-                return None;
+                return;
             }
         }
         m.points.push(at);
@@ -951,9 +948,8 @@ impl Session {
             tool => tool.complete_at() == Some(m.points.len()),
         };
         if done {
-            return self.finish_measurement(m);
+            self.finish_measurement(m);
         }
-        None
     }
 
     /// The measurement a two-point line becomes: an arc when bent.
@@ -967,9 +963,9 @@ impl Session {
         (Prim::Arc, vec![a, peak(a, b, m.bend), b])
     }
 
-    /// The measurement in progress becomes one; the first that has a
-    /// length asks for its real length.
-    fn finish_measurement(&mut self, m: &mut MeasureMode) -> Option<Transition> {
+    /// The measurement in progress becomes one (a bent line an arc), in
+    /// pixels until `C` sets a scale; too few points leave a note.
+    fn finish_measurement(&mut self, m: &mut MeasureMode) {
         let points = std::mem::take(&mut m.points);
         if points.len() < m.tool.min_points() {
             m.points = points;
@@ -978,7 +974,7 @@ impl Session {
                 m.tool.name(),
                 m.tool.min_points()
             ));
-            return None;
+            return;
         }
         let (kind, points) = Self::bent(m, points);
         m.bend = 0.0;
@@ -991,8 +987,6 @@ impl Session {
         });
         m.log.push(MeasureUndo::Added(1));
         m.selected = Some(m.items.len() - 1);
-        // Pixels until asked: C on a line or arc sets the scale.
-        None
     }
 
     fn ask_calibration(&mut self, m: &mut MeasureMode, index: usize) -> Transition {
@@ -1006,9 +1000,9 @@ impl Session {
         let pad = rnd(48.0 * k);
         let (x0, y0) = (a.x.min(b.x) - pad, a.y.min(b.y) - pad);
         let (x1, y1) = (a.x.max(b.x) + pad, a.y.max(b.y) + pad);
-        let r = crate::geometry::PixelRect::new(x0, y0, x1 - x0, y1 - y0);
+        let r = PixelRect::new(x0, y0, x1 - x0, y1 - y0);
         let c = m.cursor.bounds;
-        let rect = crate::geometry::PixelRect::new(
+        let rect = PixelRect::new(
             r.x.max(c.x),
             r.y.max(c.y),
             (r.x + r.w).min(c.x + c.w) - r.x.max(c.x),
@@ -1054,6 +1048,9 @@ impl Session {
     /// `u`: the last point of the one in progress, else the last action.
     fn measure_undo(&mut self, m: &mut MeasureMode) {
         if m.points.pop().is_some() {
+            if m.points.is_empty() {
+                m.bend = 0.0; // the line it bent is gone
+            }
             return;
         }
         let index = |m: &MeasureMode, name: &str| m.items.iter().position(|i| i.name == name);
@@ -1115,7 +1112,8 @@ impl Session {
         }
     }
 
-    pub(crate) fn measure_view(&self) -> Option<MeasureView> {
+    /// What Measure draws, while it's open.
+    pub fn measurements(&self) -> Option<MeasureView> {
         let Some(Mode::Measure(m)) = self
             .modes()
             .iter()
@@ -1252,12 +1250,11 @@ impl Session {
             let item = &m.items[i];
             if let (Some(s), Some(px)) = (m.scale, item.values().length) {
                 if px > 0.0 {
-                    let n = item.points.len() as f64;
-                    let s = Scale {
-                        px,
-                        error: n.sqrt() * units::POINT_ERROR / px,
-                        ..s
+                    let real = Length {
+                        value: s.real,
+                        unit: s.unit,
                     };
+                    let s = Scale::new(px, real, item.points.len());
                     m.scale = Some(s);
                     self.measure_scale = Some(s);
                 }
@@ -1394,45 +1391,17 @@ impl Session {
         if !matches!(intent, Intent::Motion(_) | Intent::Release(_)) {
             m.note = None;
         }
-        let step = m.step;
+        // The cursor moves as Insert's.
+        if m.cursor.apply_move(intent, m.step, shift) {
+            return Transition::Stay;
+        }
         match intent {
-            Intent::Steer(d) => {
-                let (dx, dy) = d.vec();
-                m.cursor.shift(dx as i32 * step, dy as i32 * step, true);
-            }
-            Intent::Translate(d) => {
-                let (dx, dy) = d.vec();
-                m.cursor
-                    .shift(dx as i32 * step * BIG, dy as i32 * step * BIG, true);
-            }
-            Intent::HeldSteer(dirs, n) | Intent::HeldTranslate(dirs, n) => {
-                let k = step * n as i32 * if shift { BIG } else { 1 };
-                let (dx, dy) = dirs.vector();
-                m.cursor.shift(dx as i32 * k, dy as i32 * k, false);
-            }
-            Intent::Scale(d, Halve::Half) => {
-                let e = m.cursor.box_edge(d);
-                let c = m.cursor.at;
-                let half = |v: i32| rnd(f64::from(v + e) / 2.0);
-                match d.axis() {
-                    crate::geometry::Axis::X => m.cursor.put(half(c.x), c.y, true),
-                    crate::geometry::Axis::Y => m.cursor.put(c.x, half(c.y), true),
-                }
-            }
             Intent::Jump(d) => {
                 let bounds = m.cursor.bounds;
                 let found = self.find_edge(m.cursor.at, d, bounds);
                 match found {
                     Some(q) => m.cursor.put(q.x, q.y, true),
                     None => m.note = Some(format!("no edge {d:?}").to_lowercase()),
-                }
-            }
-            Intent::FarEdge(d) => {
-                let e = m.cursor.box_edge(d);
-                let c = m.cursor.at;
-                match d.axis() {
-                    crate::geometry::Axis::X => m.cursor.put(e, c.y, true),
-                    crate::geometry::Axis::Y => m.cursor.put(c.x, e, true),
                 }
             }
             // On an open line, +/- and the wheel bend it; else the step.
@@ -1446,9 +1415,7 @@ impl Session {
                 m.tool = kind;
             }
             Intent::DropPoint | Intent::AddPoint => {
-                if let Some(t) = self.drop_point(m, !alt, intent == Intent::AddPoint, false) {
-                    return t;
-                }
+                self.drop_point(m, !alt, intent == Intent::AddPoint, false);
             }
             Intent::Motion(at) => {
                 if m.pointer.is_some_and(|was| was != at) {
@@ -1470,24 +1437,18 @@ impl Session {
                 }
                 m.cursor.put(q.x, q.y, true);
                 // Shift on a click keeps a line going, as a path.
-                if let Some(t) = self.drop_point(m, true, shift, true) {
-                    return t;
-                }
+                self.drop_point(m, true, shift, true);
             }
             Intent::Confirm => {
                 if let Some(&last) = m.points.last() {
                     // Enter ends at the cursor, if it moved on.
                     if last != m.cursor.at {
-                        if let Some(t) = self.drop_point(m, !alt, false, false) {
-                            return t;
-                        }
+                        self.drop_point(m, !alt, false, false);
                     }
                     if m.points.is_empty() {
                         return Transition::Stay; // that point finished it
                     }
-                    if let Some(t) = self.finish_measurement(m) {
-                        return t;
-                    }
+                    self.finish_measurement(m);
                 } else if m.tool == Prim::Rect {
                     // Enter with no corners: the box.
                     let r = self.pixels.to_pixels(self.sel.rect());
@@ -1495,9 +1456,7 @@ impl Session {
                         PixelPoint::new(r.x, r.y),
                         PixelPoint::new(r.x + r.w, r.y + r.h),
                     ];
-                    if let Some(t) = self.finish_measurement(m) {
-                        return t;
-                    }
+                    self.finish_measurement(m);
                 } else if !m.items.is_empty() {
                     return self.deliver_measurements(m);
                 }
@@ -1512,6 +1471,7 @@ impl Session {
             Intent::Back => {
                 if !m.points.is_empty() {
                     m.points.clear();
+                    m.bend = 0.0;
                 } else if !m.items.is_empty() && !m.warned {
                     m.warned = true;
                 } else {
@@ -1605,8 +1565,7 @@ impl Session {
     }
 
     /// Space (or Shift+Space) in a loupe over Measure: a point at the
-    /// loupe's pixel exactly (unsnapped), and the loupe stays up. Only the length prompt (the
-    /// first line done) takes it down, to ask.
+    /// loupe's pixel exactly (unsnapped), and the loupe stays up.
     pub(crate) fn drop_through_loupe(&mut self, intent: Intent) {
         let (Some(Mode::Loupe(mut l)), Some(Mode::Measure(mut m))) =
             (self.stack_mut().pop(), self.stack_mut().pop())
@@ -1616,16 +1575,11 @@ impl Session {
         m.cursor.put(l.cursor.at.x, l.cursor.at.y, false);
         // Exactly where the loupe is: no snapping, it's there for precision.
         m.note = None;
-        let t = self
-            .drop_point(&mut m, false, intent == Intent::AddPoint, false)
-            .unwrap_or(Transition::Stay);
+        self.drop_point(&mut m, false, intent == Intent::AddPoint, false);
         l.cursor.put(m.cursor.at.x, m.cursor.at.y, false);
         self.loupe_at = Some(l.cursor.at);
         self.stack_mut().push(Mode::Measure(m));
-        match t {
-            Transition::Stay => self.stack_mut().push(Mode::Loupe(l)),
-            other => self.apply(other),
-        }
+        self.stack_mut().push(Mode::Loupe(l));
     }
 
     fn deliver_measurements(&self, m: &MeasureMode) -> Transition {
@@ -1683,19 +1637,21 @@ pub fn scale_bar(ocr: &crate::ocr::OcrResult, a: PixelPoint, b: PixelPoint) -> O
             f64::from(r.y) + f64::from(r.h) / 2.0,
         )
     };
-    let mut numbers: Vec<(f64, P, Option<units::Unit>)> = Vec::new();
+    // Map bars are often labelled in capitals: `KM`, `Ft`.
+    let unit_of = |s: &str| units::Unit::standard(&s.to_ascii_lowercase());
+    // Each number's value, centre, glued unit and decimals.
+    let mut numbers: Vec<(f64, P, Option<units::Unit>, i32)> = Vec::new();
     let mut unit_words: Vec<(units::Unit, P)> = Vec::new();
     for w in &ocr.words {
         let t = w.text.trim_matches(|c: char| ",;:()".contains(c));
         if let Some(c) = word.captures(t) {
             let value: f64 = c[1].parse().ok()?;
-            let unit = c
-                .get(2)
-                .and_then(|u| units::Unit::standard_name(u.as_str()));
+            let decimals = c[1].split_once('.').map_or(0, |(_, f)| f.len() as i32);
+            let unit = c.get(2).and_then(|u| unit_of(u.as_str()));
             if c.get(2).is_none() || unit.is_some() {
-                numbers.push((value, centre(w.bbox), unit));
+                numbers.push((value, centre(w.bbox), unit, decimals));
             }
-        } else if let Some(u) = units::Unit::standard_name(t) {
+        } else if let Some(u) = unit_of(t) {
             unit_words.push((u, centre(w.bbox)));
         }
     }
@@ -1714,7 +1670,12 @@ pub fn scale_bar(ocr: &crate::ocr::OcrResult, a: PixelPoint, b: PixelPoint) -> O
     };
     let (start, end) = (nearest(p(a)), nearest(p(b)));
     let (value, i, j) = match (start, end) {
-        (Some(i), Some(j)) if i != j => ((numbers[j].0 - numbers[i].0).abs(), i, j),
+        (Some(i), Some(j)) if i != j => {
+            // To the ends' decimals: 0.3 - 0.1 is 0.2, not 0.19999999999999998.
+            let k = 10f64.powi(numbers[i].3.max(numbers[j].3));
+            let d = (numbers[j].0 - numbers[i].0).abs();
+            ((d * k).round() / k, i, j)
+        }
         (Some(i), _) | (None, Some(i)) => (numbers[i].0, i, i),
         (None, None) if numbers.len() == 1 => (numbers[0].0, 0, 0),
         (None, None) => return None,
@@ -1819,18 +1780,13 @@ mod tests {
         assert!(close(v.width, 10.0) && close(v.height, 20.0) && close(v.area, 200.0));
         let v = m(Prim::Angle, &[(10, 0), (0, 0), (0, -10)]).values();
         assert!(close(v.degrees, 90.0));
+        let v = m(Prim::Angle, &[(0, 0), (0, 0), (0, -10)]).values();
+        assert_eq!(v.degrees, None, "an arm on the vertex: no angle, not NaN");
     }
 
     #[test]
     fn too_few_points_give_nothing_rather_than_a_panic() {
-        for kind in [
-            Prim::Line,
-            Prim::Arc,
-            Prim::Circle,
-            Prim::Area,
-            Prim::Rect,
-            Prim::Angle,
-        ] {
+        for kind in Prim::ALL {
             let short = m(kind, &[(0, 0), (10, 5)][..kind.min_points() - 1]);
             assert_eq!(short.values(), Values::default(), "{kind:?}");
             let _ = (short.outline(), short.anchor());
@@ -1883,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shift_click_locks_to_45_degrees() {
+    fn lock45_snaps_to_the_nearest_45_degree_ray() {
         let o = PixelPoint::new(0, 0);
         assert_eq!(lock45(o, PixelPoint::new(100, 9)), PixelPoint::new(100, 0));
         assert_eq!(lock45(o, PixelPoint::new(50, 47)), PixelPoint::new(49, 49));
@@ -1947,6 +1903,31 @@ mod scale_bar_tests {
             ("ft", 530, 106),
         ];
         assert_eq!(read(&bar).as_deref(), Some("50 ft"));
+    }
+
+    #[test]
+    fn a_bar_between_decimal_ticks_reads_cleanly() {
+        let bar = [
+            ("0.1", 95, 106),
+            ("0.2", 190, 106),
+            ("0.3", 285, 106),
+            ("mi", 330, 106),
+        ];
+        assert_eq!(read(&bar).as_deref(), Some("0.2 mi"));
+        let bar = [("0.2", 95, 106), ("0.3", 285, 106), ("mi", 330, 106)];
+        assert_eq!(read(&bar).as_deref(), Some("0.1 mi"));
+    }
+
+    #[test]
+    fn a_bar_reads_upper_case_units() {
+        let bar = [("0", 95, 106), ("100", 285, 106), ("KM", 330, 106)];
+        assert_eq!(read(&bar).as_deref(), Some("100 km"));
+        let bar = [("10KM", 85, 106), ("20KM", 280, 106)];
+        assert_eq!(read(&bar).as_deref(), Some("10 km"));
+        assert_eq!(
+            read(&[("5", 180, 80), ("Ft", 200, 80)]).as_deref(),
+            Some("5 ft")
+        );
     }
 
     #[test]

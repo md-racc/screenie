@@ -80,7 +80,7 @@ pub const PAGE_RATES: Rates = Rates {
 #[derive(Clone, Debug)]
 pub struct LoupeMode {
     pub cursor: PointCursor,
-    dragging: bool,
+    pub(crate) dragging: bool,
 }
 
 impl LoupeMode {
@@ -110,7 +110,7 @@ pub const BIG: f64 = 4.0;
 pub struct EnhanceMode {
     pub lens: AnchorCursor,
     pub zoom: f64,
-    drag: Option<(LogicalPoint, bool)>,
+    pub(crate) drag: Option<(LogicalPoint, bool)>,
 }
 
 impl EnhanceMode {
@@ -216,9 +216,9 @@ impl Session {
                 let at = self.pixels.to_logical(c.at);
                 let mode = self.tool_mode_at(t, Place::Centre(at));
                 return if self.open.is_some() {
-                    // Switching tools locks the item the tool below was
-                    // editing, as it would from the tool itself.
-                    let editing = self.editing();
+                    // Switching tools locks the item the tool under the
+                    // lenses was editing, as it would from the tool itself.
+                    let editing = self.editing_under_lenses();
                     self.lock(editing);
                     Transition::SwitchTool(mode)
                 } else {

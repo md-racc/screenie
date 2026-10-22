@@ -299,6 +299,20 @@ fn no_stale_drag_after_a_mode_change() {
 }
 
 #[test]
+fn no_stale_drag_under_a_lens() {
+    let mut s = session();
+    s.keys("x");
+    s.button(Button::Left, p(200.0, 200.0), true);
+    s.motion(p(250.0, 230.0));
+    let drawn = censor(&s).sel.rect();
+    s.keys("z"); // the drag ends here
+    s.button(Button::Left, p(250.0, 230.0), false); // the release goes to the loupe
+    s.keys("z");
+    s.motion(p(500.0, 250.0)); // no button held
+    assert_eq!(censor(&s).sel.rect(), drawn);
+}
+
+#[test]
 fn every_build_tool_chord_is_unique() {
     for (name, map) in screenie_core::keymap::all() {
         assert_eq!(map.collisions(), [], "{name}");

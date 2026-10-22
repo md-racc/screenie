@@ -103,9 +103,11 @@ a move in the list, or an edit.
   background, and fills the prompt if it reads a bar before anything's
   typed: the numbers nearest the line's ends (`0 … 100 m` reads `100 m`;
   an unread 0, as OCR often drops a lone one, counts as 0), or a lone
-  label (`5 km`). Typing replaces the reading.
+  label (`5 km`). The bar's unit is read in any case (`KM`, `Ft`).
+  Typing replaces the reading.
 - **Units.** Standard ones (`mm cm m km in ft yd mi`, `12'6"`,
-  `12ft 6in`, and arithmetic like `2*2.5 m`) convert; any other name
+  `12ft 6in`, and arithmetic like `2*2.5 m`) convert, each number in a
+  sum with its unit (`12'6` is refused); any other name
   (`4.2 ly`, `3 bricks`) is a unit of its own, read as multiples; a
   number alone is `u`, and Enter alone makes the line 1 u.
 - **Showing values.** Each is shown in the unit of the reference's system

@@ -4,7 +4,7 @@
 //! Tools open from here at the cursor (a censor's top-left on it), and come
 //! back here; the loupe hands its position back when it closes.
 
-use crate::geometry::{Dir, LogicalPoint, PixelMap, PixelPoint, PixelRect, rnd};
+use crate::geometry::{Axis, Dir, LogicalPoint, PixelMap, PixelPoint, PixelRect, rnd};
 use crate::input::Rates;
 use crate::intent::{DirSet, Intent, Scale};
 use crate::lens::{EnhanceMode, LoupeMode};
@@ -75,6 +75,66 @@ impl PointCursor {
             self.at = p;
         }
     }
+
+    /// Held-key rates, in steps of `step` per second: the top speed
+    /// crosses the bounds in about a second along the axis being moved on.
+    pub fn rates(&self, step: i32, held: DirSet, shift: bool) -> Rates {
+        let b = self.bounds;
+        let across = |dirs: [Dir; 2], size: i32| {
+            if dirs.iter().any(|&d| held.contains(d)) {
+                f64::from(size)
+            } else {
+                0.0
+            }
+        };
+        let extent = across([Dir::Left, Dir::Right], b.w).max(across([Dir::Up, Dir::Down], b.h));
+        let top = (extent / CROSS).clamp(TOP_MIN, TOP_MAX);
+        let start = START_PX.min(top);
+        let step = f64::from(step * if shift { BIG } else { 1 });
+        Rates {
+            start: start / step,
+            top: top / step,
+        }
+    }
+
+    /// The moves Insert and Measure share, by `step`: a tap or Shift'd
+    /// tap, held keys, halfway to the bounds' edge, onto it. Whether
+    /// `intent` was one.
+    pub fn apply_move(&mut self, intent: Intent, step: i32, shift: bool) -> bool {
+        match intent {
+            Intent::Steer(d) => {
+                let (dx, dy) = vec(d);
+                self.shift(dx * step, dy * step, true);
+            }
+            Intent::Translate(d) => {
+                let (dx, dy) = vec(d);
+                self.shift(dx * step * BIG, dy * step * BIG, true);
+            }
+            Intent::Scale(d, Scale::Half) => {
+                // Halfway to the box edge that way.
+                let e = self.box_edge(d);
+                let half = |v: i32| rnd(f64::from(v + e) / 2.0);
+                match d.axis() {
+                    Axis::X => self.put(half(self.at.x), self.at.y, true),
+                    Axis::Y => self.put(self.at.x, half(self.at.y), true),
+                }
+            }
+            Intent::HeldSteer(dirs, n) | Intent::HeldTranslate(dirs, n) => {
+                let k = step * n as i32 * if shift { BIG } else { 1 };
+                let (dx, dy) = vector(dirs);
+                self.shift(dx * k, dy * k, false);
+            }
+            Intent::FarEdge(d) => {
+                let e = self.box_edge(d);
+                match d.axis() {
+                    Axis::X => self.put(e, self.at.y, true),
+                    Axis::Y => self.put(self.at.x, e, true),
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
 }
 
 fn vec(d: Dir) -> (i32, i32) {
@@ -104,22 +164,7 @@ impl InsertMode {
     /// Held-key rates, in steps per second: the top speed crosses the box
     /// in about a second along the axis being moved on.
     pub fn rates(&self, held: DirSet, shift: bool) -> Rates {
-        let b = self.cursor.bounds;
-        let across = |dirs: [Dir; 2], size: i32| {
-            if dirs.iter().any(|&d| held.contains(d)) {
-                f64::from(size)
-            } else {
-                0.0
-            }
-        };
-        let extent = across([Dir::Left, Dir::Right], b.w).max(across([Dir::Up, Dir::Down], b.h));
-        let top = (extent / CROSS).clamp(TOP_MIN, TOP_MAX);
-        let start = START_PX.min(top);
-        let step = f64::from(self.step * if shift { BIG } else { 1 });
-        Rates {
-            start: start / step,
-            top: top / step,
-        }
+        self.cursor.rates(self.step, held, shift)
     }
 }
 
@@ -162,39 +207,12 @@ impl Session {
 
     pub(crate) fn insert_intent(&mut self, m: &mut InsertMode, intent: Intent) -> Transition {
         let shift = self.input_mods().shift;
-        let step = m.step;
+        if m.cursor.apply_move(intent, m.step, shift) {
+            return Transition::Stay;
+        }
         let c = &mut m.cursor;
         match intent {
-            Intent::Steer(d) => {
-                let (dx, dy) = vec(d);
-                c.shift(dx * step, dy * step, true);
-            }
-            Intent::Translate(d) => {
-                let (dx, dy) = vec(d);
-                c.shift(dx * step * BIG, dy * step * BIG, true);
-            }
-            Intent::Scale(d, Scale::Half) => {
-                // Halfway to the box edge that way.
-                let e = c.box_edge(d);
-                let half = |v: i32| rnd(f64::from(v + e) / 2.0);
-                match d.axis() {
-                    crate::geometry::Axis::X => c.put(half(c.at.x), c.at.y, true),
-                    crate::geometry::Axis::Y => c.put(c.at.x, half(c.at.y), true),
-                }
-            }
-            Intent::HeldSteer(dirs, n) | Intent::HeldTranslate(dirs, n) => {
-                let k = step * n as i32 * if shift { BIG } else { 1 };
-                let (dx, dy) = vector(dirs);
-                c.shift(dx * k, dy * k, false);
-            }
             Intent::EdgeJump(d) => self.insert_jump(m, d),
-            Intent::FarEdge(d) => {
-                let e = c.box_edge(d);
-                match d.axis() {
-                    crate::geometry::Axis::X => c.put(e, c.at.y, true),
-                    crate::geometry::Axis::Y => c.put(c.at.x, e, true),
-                }
-            }
             Intent::Middle => {
                 let b = c.bounds;
                 c.put(b.x + b.w / 2, b.y + b.h / 2, true);

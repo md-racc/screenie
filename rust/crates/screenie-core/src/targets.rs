@@ -5,12 +5,90 @@
 //! knows how to move; this knows where to.
 
 use crate::anchor_cursor::AnchorCursor;
-use crate::geometry::{Dir, LogicalRect};
-use crate::layout::{Layout, Targets, nearest};
+use crate::geometry::{Axis, Dir, LogicalPoint, LogicalRect};
+use crate::layout::Layout;
 
 /// Snap targets closer than this to where an edge already is are skipped,
 /// so a jump never stops on the far side of a window gap.
 pub const GAP: f64 = 12.0;
+
+/// Snap target coordinates per axis, sorted and without repeats.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Targets {
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+}
+
+fn sorted_unique(mut v: Vec<f64>) -> Vec<f64> {
+    v.sort_by(f64::total_cmp);
+    v.dedup();
+    v
+}
+
+impl Targets {
+    /// Every left/right and top/bottom edge of some rectangles.
+    pub fn edges_of(rects: &[LogicalRect]) -> Self {
+        Self {
+            x: sorted_unique(rects.iter().flat_map(|r| [r.x, r.right()]).collect()),
+            y: sorted_unique(rects.iter().flat_map(|r| [r.y, r.bottom()]).collect()),
+        }
+    }
+
+    /// Each monitor's edges and its quarter, half and three-quarter lines.
+    pub fn grid(monitors: &[LogicalRect]) -> Self {
+        let lines = |o: f64, s: f64| (0..5).map(move |i| o + s * f64::from(i) / 4.0);
+        Self {
+            x: sorted_unique(monitors.iter().flat_map(|m| lines(m.x, m.w)).collect()),
+            y: sorted_unique(monitors.iter().flat_map(|m| lines(m.y, m.h)).collect()),
+        }
+    }
+
+    pub fn union(&self, other: &Targets) -> Self {
+        Self {
+            x: sorted_unique(self.x.iter().chain(&other.x).copied().collect()),
+            y: sorted_unique(self.y.iter().chain(&other.y).copied().collect()),
+        }
+    }
+
+    pub fn on(&self, axis: Axis) -> &[f64] {
+        match axis {
+            Axis::X => &self.x,
+            Axis::Y => &self.y,
+        }
+    }
+
+    /// The nearest target more than `gap` past `value` in direction `sign`
+    /// (+1 or -1). Targets within the gap are the far side of the window
+    /// gap an edge is sitting in, so they're skipped.
+    pub fn next(&self, axis: Axis, value: f64, sign: f64, gap: f64) -> Option<f64> {
+        let past = self
+            .on(axis)
+            .iter()
+            .copied()
+            .filter(|t| (t - value) * sign > gap);
+        if sign > 0.0 {
+            past.reduce(f64::min)
+        } else {
+            past.reduce(f64::max)
+        }
+    }
+}
+
+/// The first rectangle containing the point (they're topmost first), else
+/// the one nearest it. `None` only for an empty list.
+pub fn nearest(rects: &[LogicalRect], p: LogicalPoint) -> Option<LogicalRect> {
+    if let Some(hit) = rects.iter().find(|r| r.contains(p)) {
+        return Some(*hit);
+    }
+    let mut best: Option<(f64, LogicalRect)> = None;
+    for r in rects {
+        let d = r.dist2(p);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, *r));
+        }
+    }
+    best.map(|(_, r)| r)
+}
 
 /// The windows and monitors Select can snap to.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,8 +135,8 @@ impl SnapEnv {
         let axis = dir.axis();
         let mut best: Option<f64> = None;
         let low_first = match axis {
-            crate::geometry::Axis::X => [Dir::Left, Dir::Right],
-            crate::geometry::Axis::Y => [Dir::Up, Dir::Down],
+            Axis::X => [Dir::Left, Dir::Right],
+            Axis::Y => [Dir::Up, Dir::Down],
         };
         for edge in low_first {
             let e = sel.edge(edge);
@@ -148,14 +226,25 @@ impl SnapEnv {
         }
     }
 
-    /// `+` / `-`: the scope, from the nearest window to its monitor to
-    /// everything (the bounds); it stops at either end. A box of its own
-    /// widens to its window on `+`, and `-` leaves it alone.
+    /// `+` / `-`: the scope, from a window on the box's monitor (if there's
+    /// one) to that monitor to everything (the bounds); it stops at either
+    /// end. A box of its own widens to its window on `+`, and `-` leaves it
+    /// alone.
     pub fn scope(&self, sel: &mut AnchorCursor, step: i32) {
         let c = sel.rect().centre();
+        let monitor = nearest(&self.monitors, c);
+        // The box's own window, even under a floating one; else the topmost
+        // holding its centre, else the nearest on its monitor.
+        let own = self.windows.iter().find(|w| sel.rect().nearly(w)).copied();
+        let on_monitor: Vec<_> = self
+            .windows
+            .iter()
+            .filter(|w| monitor.is_some_and(|m| m.contains(w.centre())))
+            .copied()
+            .collect();
         let mut steps: Vec<LogicalRect> = Vec::new();
-        steps.extend(nearest(&self.windows, c));
-        steps.extend(nearest(&self.monitors, c));
+        steps.extend(own.or_else(|| nearest(&on_monitor, c)));
+        steps.extend(monitor);
         steps.push(sel.bounds());
         // A fullscreen window is its monitor; one monitor is everything.
         steps.dedup_by(|b, a| b.nearly(a));
@@ -171,7 +260,7 @@ impl SnapEnv {
 
     /// A click: the window under the pointer (topmost), else the nearest
     /// monitor.
-    pub fn click_target(&self, p: crate::geometry::LogicalPoint) -> Option<LogicalRect> {
+    pub fn click_target(&self, p: LogicalPoint) -> Option<LogicalRect> {
         self.windows
             .iter()
             .find(|r| r.contains(p))
@@ -183,7 +272,6 @@ impl SnapEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::LogicalPoint;
 
     const LAYOUT: LogicalRect = LogicalRect::new(0.0, 0.0, 3840.0, 1080.0);
     const MONITORS: [LogicalRect; 2] = [
@@ -206,6 +294,42 @@ mod tests {
 
     fn sel(rect: LogicalRect) -> AnchorCursor {
         AnchorCursor::new(rect, LAYOUT)
+    }
+
+    #[test]
+    fn edges_are_sorted_and_unique() {
+        let t = Targets::edges_of(&[
+            LogicalRect::new(10.0, 0.0, 10.0, 5.0),
+            LogicalRect::new(0.0, 0.0, 10.0, 5.0),
+        ]);
+        assert_eq!(t.x, vec![0.0, 10.0, 20.0]);
+        assert_eq!(t.y, vec![0.0, 5.0]);
+    }
+
+    #[test]
+    fn the_grid_covers_every_monitor() {
+        let g = Targets::grid(&[
+            LogicalRect::new(0.0, 0.0, 1920.0, 1080.0),
+            LogicalRect::new(1920.0, 0.0, 1920.0, 1080.0),
+        ]);
+        assert_eq!(
+            g.x,
+            vec![
+                0.0, 480.0, 960.0, 1440.0, 1920.0, 2400.0, 2880.0, 3360.0, 3840.0
+            ]
+        );
+        assert_eq!(g.y, vec![0.0, 270.0, 540.0, 810.0, 1080.0]);
+    }
+
+    #[test]
+    fn next_skips_targets_inside_the_gap() {
+        let t = Targets {
+            x: vec![0.0, 958.0, 1920.0, 1923.0],
+            y: vec![],
+        };
+        assert_eq!(t.next(Axis::X, 1918.0, 1.0, 12.0), None);
+        assert_eq!(t.next(Axis::X, 1918.0, -1.0, 12.0), Some(958.0));
+        assert_eq!(t.next(Axis::X, 900.0, 1.0, 12.0), Some(958.0));
     }
 
     #[test]
@@ -263,6 +387,28 @@ mod tests {
                 WINDOWS[0]
             ]
         );
+    }
+
+    #[test]
+    fn scope_on_an_empty_monitor_skips_the_window_step() {
+        let e = SnapEnv::new(vec![WINDOWS[2]], MONITORS.to_vec());
+        let mut s = sel(r(2000.0, 100.0, 200.0, 100.0));
+        e.scope(&mut s, 1);
+        assert_eq!(s.rect(), MONITORS[1]);
+        e.scope(&mut s, 1);
+        assert_eq!(s.rect(), LAYOUT);
+        e.scope(&mut s, -1);
+        e.scope(&mut s, -1);
+        assert_eq!(s.rect(), MONITORS[1]);
+    }
+
+    #[test]
+    fn plus_from_a_window_under_a_floating_one_widens_to_its_monitor() {
+        let floating = r(300.0, 300.0, 400.0, 300.0);
+        let e = SnapEnv::new(vec![floating, WINDOWS[2]], MONITORS.to_vec());
+        let mut s = sel(WINDOWS[2]);
+        e.scope(&mut s, 1);
+        assert_eq!(s.rect(), MONITORS[0]);
     }
 
     #[test]

@@ -121,18 +121,13 @@ impl Unit {
         }
     }
 
-    /// A standard unit by name, if it is one.
-    pub fn standard_name(name: &str) -> Option<Unit> {
-        Unit::standard(name)
-    }
-
     /// A unit by name: a standard one, else a name of its own.
     pub fn from_name(name: &str) -> Unit {
         Unit::standard(name).unwrap_or(Unit::Tag(Tag::new(name)))
     }
 
     /// A standard unit by its name or mark.
-    fn standard(s: &str) -> Option<Unit> {
+    pub fn standard(s: &str) -> Option<Unit> {
         match s {
             "'" => Some(Unit::Ft),
             "\"" => Some(Unit::In),
@@ -148,6 +143,18 @@ pub struct Length {
     pub unit: Unit,
 }
 
+/// Where a unit's name or mark can start.
+fn is_unit_char(c: char) -> bool {
+    c.is_alphabetic() || c == '\'' || c == '"'
+}
+
+fn unreadable(s: &str) -> String {
+    format!(
+        "can't read {:?}: a number, maybe with a unit, like 5 m",
+        s.trim()
+    )
+}
+
 fn positive(value: f64, s: &str) -> Result<f64, String> {
     if value > 0.0 && value.is_finite() {
         Ok(value)
@@ -161,12 +168,6 @@ fn positive(value: f64, s: &str) -> Result<f64, String> {
 /// unit. Any other name after the number is a unit of its own (`4.2 ly`,
 /// `3 light years`); a number alone is in `u`, and nothing at all is 1 u.
 pub fn parse_length(s: &str) -> Result<Length, String> {
-    let bad = || {
-        format!(
-            "can't read {:?}: a number, maybe with a unit, like 5 m",
-            s.trim()
-        )
-    };
     let t = s.trim();
     if t.is_empty() {
         return Ok(Length {
@@ -174,9 +175,8 @@ pub fn parse_length(s: &str) -> Result<Length, String> {
             unit: Unit::plain(),
         });
     }
-    let is_unit_char = |c: char| c.is_alphabetic() || c == '\'' || c == '"';
     let Some(first) = t.find(is_unit_char) else {
-        let value = positive(eval(t).ok_or_else(bad)?, s)?;
+        let value = positive(eval(t).ok_or_else(|| unreadable(s))?, s)?;
         return Ok(Length {
             value,
             unit: Unit::plain(),
@@ -186,7 +186,7 @@ pub fn parse_length(s: &str) -> Result<Length, String> {
         return Ok(l);
     }
     // A unit of its own: the number, then whatever name follows it.
-    let value = positive(eval(&t[..first]).ok_or_else(bad)?, s)?;
+    let value = positive(eval(&t[..first]).ok_or_else(|| unreadable(s))?, s)?;
     Ok(Length {
         value,
         unit: Unit::Tag(Tag::new(t[first..].trim())),
@@ -194,17 +194,25 @@ pub fn parse_length(s: &str) -> Result<Length, String> {
 }
 
 /// `t` in standard units only (`12ft 6in`), if that's what it is; a bad
-/// number is an error, a name that isn't a standard unit is `None`.
+/// number is an error, a first name that isn't a standard unit is `None`.
+/// Once a standard part is read, the rest must be standard parts too:
+/// `12' 6` or `1 m 50 bricks` is an error, not a unit named `' 6`.
 fn standard_length(t: &str) -> Result<Option<Length>, String> {
-    let bad = || format!("can't read {t:?}: a number, maybe with a unit, like 5 m");
+    let trailing = |rest: &str| {
+        format!(
+            "can't read {t:?}: {:?} needs a unit, like 12ft 6in",
+            rest.trim()
+        )
+    };
     let mut parts: Vec<(f64, Unit)> = Vec::new();
     let mut rest = t;
     while !rest.is_empty() {
         // The number: everything up to the first unit letter or mark.
-        let Some(end) = rest.find(|c: char| c.is_alphabetic() || c == '\'' || c == '"') else {
-            return Ok(None); // a number with no unit after a standard one
+        let Some(end) = rest.find(is_unit_char) else {
+            // Never on the first part: parse_length has found a unit there.
+            return Err(trailing(rest));
         };
-        let value = eval(&rest[..end]).ok_or_else(bad)?;
+        let value = eval(&rest[..end]).ok_or_else(|| unreadable(t))?;
         let tail = &rest[end..];
         let ulen = if tail.starts_with(['\'', '"']) {
             1
@@ -213,7 +221,10 @@ fn standard_length(t: &str) -> Result<Option<Length>, String> {
                 .unwrap_or(tail.len())
         };
         let Some(unit) = Unit::standard(&tail[..ulen]) else {
-            return Ok(None);
+            if parts.is_empty() {
+                return Ok(None);
+            }
+            return Err(trailing(rest));
         };
         parts.push((value, unit));
         rest = tail[ulen..].trim_start();
@@ -336,7 +347,7 @@ impl Scale {
             .trim()
             .parse()
             .map_err(|_| bad())?;
-        if px.is_nan() || px <= 0.0 {
+        if !(px.is_finite() && px > 0.0) {
             return Err(bad());
         }
         let real = parse_length(real)?;
@@ -377,7 +388,17 @@ pub fn sig3(v: f64) -> String {
     }
     let digits = v.abs().log10().floor() as i32;
     let decimals = (2 - digits).max(0) as usize;
-    format!("{v:.decimals$}")
+    let text = format!("{v:.decimals$}");
+    // Rounding up into the next power of ten (9.996 to 10.00) adds a figure.
+    let carried = text
+        .trim_start_matches('-')
+        .parse::<f64>()
+        .is_ok_and(|r| r >= 10f64.powi(digits + 1));
+    if carried && decimals > 0 {
+        let decimals = decimals - 1;
+        return format!("{v:.decimals$}");
+    }
+    text
 }
 
 fn fixed(v: f64, decimals: usize) -> String {
@@ -397,7 +418,8 @@ fn plus_minus(text: &str, err: f64) -> String {
 }
 
 /// The unit of `system`'s family (metric or imperial; plain stays plain)
-/// that suits a length of `metres`: the largest it's at least one of.
+/// that suits a length of `metres`: the largest it's at least one of, as
+/// shown (999.8 m shows as 1.00 km, not 1000 m).
 pub fn fit(system: Unit, metres: f64) -> Unit {
     const METRIC: [Unit; 4] = [Unit::Km, Unit::M, Unit::Cm, Unit::Mm];
     const IMPERIAL: [Unit; 3] = [Unit::Mi, Unit::Ft, Unit::In];
@@ -409,7 +431,10 @@ pub fn fit(system: Unit, metres: f64) -> Unit {
     family
         .iter()
         .copied()
-        .find(|u| metres.abs() >= u.metres())
+        .find(|u| {
+            let shown = sig3(metres.abs() / u.metres());
+            shown.parse::<f64>().is_ok_and(|v| v >= 1.0)
+        })
         .unwrap_or(family[family.len() - 1])
 }
 
@@ -497,6 +522,14 @@ mod tests {
         for bad in ["m", "0 m", "-2 m", "five m", "five", "0", "0 ly"] {
             assert!(parse_length(bad).is_err(), "{bad:?}");
         }
+        assert_eq!(
+            parse_length(" five m ").unwrap_err(),
+            "can't read \"five m\": a number, maybe with a unit, like 5 m"
+        );
+        // A standard length that trails off isn't a unit named for the rest.
+        for bad in ["12'6", "12' 6", "1 m 50", "1 m 50 bricks", "5 ft 3 ly"] {
+            assert!(parse_length(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -543,6 +576,10 @@ mod tests {
         assert_eq!(s.describe(), "1 m = 84.2 px");
         assert!(Scale::parse("84.2=1m").is_err());
         assert!(Scale::parse("0px=1m").is_err());
+        // Infinite would read every length as 0, and saves as null.
+        for bad in ["infpx=1m", "1e400px=1m", "NaNpx=1m"] {
+            assert!(Scale::parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -551,6 +588,12 @@ mod tests {
         assert_eq!(sig3(12.6), "12.6");
         assert_eq!(sig3(411.0), "411");
         assert_eq!(sig3(0.0123), "0.0123");
+        // Rounding into the next power of ten keeps three figures.
+        assert_eq!(sig3(9.996), "10.0");
+        assert_eq!(sig3(-9.996), "-10.0");
+        assert_eq!(sig3(99.96), "100");
+        assert_eq!(sig3(0.09996), "0.100");
+        assert_eq!(sig3(999.7), "1000"); // no shorter without an exponent
         let s = Scale::new(411.0, parse_length("5 m").unwrap(), 2);
         let m = Display::Real(Unit::M);
         assert_eq!(length(352.1, 2, Some(&s), m), "4.28 m ±0.02");
@@ -580,6 +623,11 @@ mod tests {
         assert_eq!(at("100px=1m", 30.0), "30.0 cm");
         assert_eq!(at("100px=1m", 0.5), "5.00 mm");
         assert_eq!(at("1px=1m", 2500.0), "2.50 km");
+        // Just under a unit, rounded up to one of it: that unit.
+        assert_eq!(fit(Unit::M, 999.8), Unit::Km);
+        assert_eq!(fit(Unit::M, 0.99996), Unit::M);
+        assert_eq!(at("1px=1m", 999.8), "1.00 km");
+        assert_eq!(at("100px=1m", 99.996), "1.00 m");
         // Imperial: mi, then ft, then in.
         assert_eq!(at("100px=1mi", 250.0), "2.50 mi");
         assert_eq!(at("100px=1mi", 1.0), "52.8 ft");

@@ -32,8 +32,6 @@ use crate::select::SelectState;
 use crate::targets::SnapEnv;
 use crate::text::TextMode;
 
-pub use crate::boxes::STEP;
-
 /// Physical input, as a platform reports it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RawEvent {
@@ -151,7 +149,7 @@ pub enum Mode {
     Measure(Box<MeasureMode>),
 }
 
-/// An analysis to run off the input path (OCR, later edge detection).
+/// An analysis to run off the input path.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobKind {
     /// OCR with word boxes over a rect of the committed picture, and with
@@ -402,7 +400,8 @@ impl Session {
         self.sampler = Some(sampler);
     }
 
-    /// Give the session a way to run analysis (auto-redact's OCR).
+    /// Give the session a way to run analysis (OCR, for auto-redact and
+    /// Measure's scale bar).
     pub fn set_analyzer(&mut self, analyzer: Box<dyn Analyzer>) {
         self.analyzer = Some(analyzer);
     }
@@ -417,9 +416,32 @@ impl Session {
         self.measure_scale = Some(s);
     }
 
-    /// What Measure draws, while it's open.
-    pub fn measurements(&self) -> Option<crate::measure::MeasureView> {
-        self.measure_view()
+    /// What auto-redact looks for and makes (`[redact]` config, and the
+    /// machine).
+    pub fn set_redact_rules(&mut self, rules: crate::redact::Rules) {
+        self.redact_rules = rules;
+    }
+
+    /// Give the session a way to read codes (`Q`).
+    pub fn set_code_reader(&mut self, reader: Box<dyn CodeReader>) {
+        self.code_reader = Some(reader);
+    }
+
+    // --- what the host reads -------------------------------------------------
+
+    /// What the lenses show the picture through.
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// The loupe window, frame pixels across.
+    pub fn loupe_px(&self) -> i32 {
+        self.loupe_px
+    }
+
+    /// The annotation ink and width.
+    pub fn ink(&self) -> (&Ink, f64) {
+        (&self.ink, self.ink_width)
     }
 
     /// What the pointer has, or would take, hold of in the top mode's box
@@ -430,18 +452,13 @@ impl Session {
             None => (&self.sel, &self.select.drag),
             Some(Mode::Censor(c)) => (&c.sel, &c.drag),
             Some(Mode::Filter(f)) => (&f.sel, &f.drag),
+            // Shape's box takes no handles: its cursor follows the pointer.
             _ => return Handle::None,
         };
         match drag {
             Some(d) => d.handle(),
             None => handle_at(sel, self.pointer, self.input.mods()),
         }
-    }
-
-    /// What auto-redact looks for and makes (`[redact]` config, and the
-    /// machine).
-    pub fn set_redact_rules(&mut self, rules: crate::redact::Rules) {
-        self.redact_rules = rules;
     }
 
     /// Suggestions accepted as censors and still shown: category and rect.
@@ -477,70 +494,6 @@ impl Session {
             _ => false,
         })
     }
-
-    pub(crate) fn stack_mut(&mut self) -> &mut Vec<Mode> {
-        &mut self.stack
-    }
-
-    /// Start a job: its id, and its result if the analyzer answered at once.
-    pub(crate) fn start_job(&mut self, job: JobKind) -> (u64, Option<JobResult>) {
-        let id = self.next_job;
-        self.next_job += 1;
-        let Some(mut a) = self.analyzer.take() else {
-            return (id, Some(JobResult::Ocr(Err("no OCR available".into()))));
-        };
-        let r = a.start(self, id, job);
-        self.analyzer = Some(a);
-        (id, r)
-    }
-
-    /// Give the session a way to read codes (`Q`).
-    pub fn set_code_reader(&mut self, reader: Box<dyn CodeReader>) {
-        self.code_reader = Some(reader);
-    }
-
-    /// Read a code in a rect: its text, or a note why not.
-    pub(crate) fn read_code(&mut self, rect: LogicalRect) -> Result<String, String> {
-        let mut r = self
-            .code_reader
-            .take()
-            .ok_or_else(|| "no code reader".to_string())?;
-        let found = r.read(self, rect);
-        self.code_reader = Some(r);
-        match found {
-            Ok(Some(text)) => Ok(text),
-            Ok(None) => Err("no QR / barcode found".into()),
-            Err(e) => Err(e),
-        }
-    }
-
-    pub(crate) fn sample(&mut self, at: PixelPoint) -> Option<[u8; 3]> {
-        let mut s = self.sampler.take()?;
-        let c = s.sample(self, at);
-        self.sampler = Some(s);
-        c
-    }
-
-    /// What the lenses show the picture through.
-    pub fn view(&self) -> View {
-        self.view
-    }
-
-    /// The loupe window, frame pixels across.
-    pub fn loupe_px(&self) -> i32 {
-        self.loupe_px
-    }
-
-    pub(crate) fn input_mods(&self) -> Mods {
-        self.input.mods()
-    }
-
-    /// The annotation ink and width.
-    pub fn ink(&self) -> (&Ink, f64) {
-        (&self.ink, self.ink_width)
-    }
-
-    // --- what the host reads ------------------------------------------------
 
     pub fn outcome(&self) -> Option<&Outcome> {
         self.outcome.as_ref()
@@ -587,11 +540,26 @@ impl Session {
 
     /// The item the top build tool is editing, not yet locked in.
     pub fn editing(&self) -> Option<OpData> {
-        match self.stack.last()? {
+        self.editing_in(self.stack.last()?)
+    }
+
+    /// The item a mode is editing, not yet locked in.
+    fn editing_in(&self, mode: &Mode) -> Option<OpData> {
+        match mode {
             Mode::Censor(c) => c.current(),
             Mode::Text(t) => self.text_preview(t),
             m => self.annotate_editing(m),
         }
+    }
+
+    /// The item the top mode under any lenses is editing.
+    pub(crate) fn editing_under_lenses(&self) -> Option<OpData> {
+        let m = self
+            .stack
+            .iter()
+            .rev()
+            .find(|m| !matches!(m, Mode::Loupe(_) | Mode::Enhance(_)))?;
+        self.editing_in(m)
     }
 
     /// The modes above Select, bottom first.
@@ -647,10 +615,6 @@ impl Session {
     /// The pointer's last position.
     pub fn pointer(&self) -> LogicalPoint {
         self.pointer
-    }
-
-    pub fn history_len(&self) -> usize {
-        self.history.len()
     }
 
     /// The pixel the active cursor is on, for the status line (none for a
@@ -833,7 +797,7 @@ impl Session {
         }
     }
 
-    // --- input ------------------------------------------------------------------
+    // --- input ---------------------------------------------------------------
 
     /// Feed one raw event in, at time `now` (seconds, monotonic).
     pub fn handle(&mut self, ev: RawEvent, now: f64) {
@@ -849,7 +813,7 @@ impl Session {
                 if let Some(Mode::Text(_)) = self.stack.last() {
                     // Text input: plain keys are literal, even q and ?.
                     let typed = match key {
-                        _ if mods.ctrl || mods.alt => None,
+                        _ if mods.ctrl || mods.alt || mods.logo => None,
                         Key::Char(c) => Some(Intent::Type(c)),
                         Key::Space => Some(Intent::Type(' ')),
                         Key::BackSpace => Some(Intent::Backspace),
@@ -961,8 +925,8 @@ impl Session {
             return true;
         }
         let mods = self.input.mods();
-        let rates = if mods.ctrl || mods.alt {
-            None // jumps and scaling are one-shot
+        let rates = if mods.ctrl || mods.alt || mods.logo {
+            None // jumps and scaling are one-shot; Super means nothing
         } else {
             match self.stack.last() {
                 Some(Mode::Layers(_)) => None,
@@ -1013,8 +977,10 @@ impl Session {
         }
     }
 
-    /// Send an intent to the top mode, and carry out its transition.
-    pub fn dispatch(&mut self, intent: Intent) {
+    /// Send an intent to the top mode, and carry out its transition. Hosts
+    /// go through `handle`, `tick` and `act`, which first take back the
+    /// note and any pending warning.
+    pub(crate) fn dispatch(&mut self, intent: Intent) {
         if self.is_finished() {
             return;
         }
@@ -1115,11 +1081,27 @@ impl Session {
         }
     }
 
-    /// The top mode is about to lose input: a drag in progress ends there.
+    /// The top mode is about to lose input: a drag in progress ends there
+    /// (its release will go to the mode above).
     fn leave_top(&mut self) {
-        if self.stack.is_empty() {
+        let Some(mut top) = self.stack.pop() else {
             self.select.drag = None;
+            return;
+        };
+        match &mut top {
+            Mode::Censor(c) => c.drag = None,
+            Mode::Shape(sh) => sh.drag = None,
+            Mode::Filter(f) => f.drag = None,
+            Mode::Annotate(a) => self.pen_left(a),
+            Mode::Loupe(m) => m.dragging = false,
+            Mode::Enhance(m) => m.drag = None,
+            Mode::Layers(_)
+            | Mode::Insert(_)
+            | Mode::Text(_)
+            | Mode::Redact(_)
+            | Mode::Measure(_) => {}
         }
+        self.stack.push(top);
     }
 
     /// The keyboard pen's point, when the pen is on top and was moved by
@@ -1150,7 +1132,51 @@ impl Session {
         self.outcome = Some(outcome);
     }
 
-    // --- the open layer -----------------------------------------------------------
+    // --- for the modes -------------------------------------------------------
+
+    pub(crate) fn stack_mut(&mut self) -> &mut Vec<Mode> {
+        &mut self.stack
+    }
+
+    /// Start a job: its id, and its result if the analyzer answered at once.
+    pub(crate) fn start_job(&mut self, job: JobKind) -> (u64, Option<JobResult>) {
+        let id = self.next_job;
+        self.next_job += 1;
+        let Some(mut a) = self.analyzer.take() else {
+            return (id, Some(JobResult::Ocr(Err("no OCR available".into()))));
+        };
+        let r = a.start(self, id, job);
+        self.analyzer = Some(a);
+        (id, r)
+    }
+
+    /// Read a code in a rect: its text, or a note why not.
+    pub(crate) fn read_code(&mut self, rect: LogicalRect) -> Result<String, String> {
+        let mut r = self
+            .code_reader
+            .take()
+            .ok_or_else(|| "no code reader".to_string())?;
+        let found = r.read(self, rect);
+        self.code_reader = Some(r);
+        match found {
+            Ok(Some(text)) => Ok(text),
+            Ok(None) => Err("no QR / barcode found".into()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub(crate) fn sample(&mut self, at: PixelPoint) -> Option<[u8; 3]> {
+        let mut s = self.sampler.take()?;
+        let c = s.sample(self, at);
+        self.sampler = Some(s);
+        c
+    }
+
+    pub(crate) fn input_mods(&self) -> Mods {
+        self.input.mods()
+    }
+
+    // --- the open layer ------------------------------------------------------
 
     /// Lock an item into the open layer, on top. New work also takes back
     /// a pending Esc or q warning.
@@ -1268,7 +1294,7 @@ impl Session {
         self.close_layer(false)
     }
 
-    // --- project history ----------------------------------------------------------
+    // --- project history -----------------------------------------------------
 
     /// Before a selection change: record where it was.
     pub(crate) fn remember(&mut self) {
@@ -1279,7 +1305,7 @@ impl Session {
     /// nothing are skipped, so every `u` visibly does something.
     pub(crate) fn undo(&mut self) {
         while let Some(entry) = self.history.pop() {
-            if self.undo_layer_entry(entry, true) {
+            if self.undo_project_entry(entry, true) {
                 return;
             }
         }

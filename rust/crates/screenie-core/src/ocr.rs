@@ -1,10 +1,10 @@
 //! OCR results as plain data (README, OCR): the full text, and each word
-//! with its box and confidence. Shared by OCR output and, later,
-//! auto-redact and scale-bar reading. The engine lives in the platform
-//! crate.
+//! with its box and confidence. Shared by OCR output, auto-redact and
+//! Measure's scale-bar reading. The engine lives in the platform crate.
 
 use crate::geometry::PixelRect;
 
+/// A recognised word.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OcrWord {
     pub text: String,
@@ -25,8 +25,11 @@ pub struct OcrCode {
     pub bbox: PixelRect,
 }
 
+/// One OCR pass: the plain text, its words, and any codes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OcrResult {
+    /// Words joined by spaces, lines by newlines, paragraphs by a blank
+    /// line.
     pub text: String,
     pub words: Vec<OcrWord>,
     /// Only when the job asked for them.

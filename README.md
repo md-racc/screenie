@@ -286,7 +286,7 @@ The cursor may cross the anchor naturally.
 | `o` / `Space`       | Move the cursor to the opposite corner               |
 | `O` / `Shift+Space` | Move the cursor to the sideways corner               |
 | `w b } {`           | Next nearby window or monitor edge                   |
-| `Ctrl+Alt+hjkl`     | Next edge in the picture: the cursor's edge moves to the next boundary that way (also in Censor and Filter) |
+| `Ctrl+Alt+hjkl`     | Next edge in the picture: the cursor's edge moves to the next boundary that way (also in Censor, Filter and Shape) |
 | `0 $ g G`           | Far left / right / top / bottom                      |
 | `c`                 | Centre mode: resize symmetrically around the centre  |
 | `+` / `-`           | Change selection scope                               |
@@ -812,7 +812,7 @@ contents look like, `code url-secret http…`). Off unless
 `[redact] detectors` names them: phone numbers and UUIDs. From the
 config: `literal` strings (your name, your employer), `domains` (with
 their subdomains), and `[[redact.custom]]` regexes, each its own category.
-Names and literals match through OCR's usual confusions (`rn` for `m`,
+Names and literals match as whole words, through OCR's usual confusions (`rn` for `m`,
 `0` for `o`, `1` for `l`, any case).
 Low-confidence matches, such as less random strings, an email OCR misread
 (`©` for `@`), or digit groups that may be a phone number, are proposed
@@ -889,7 +889,8 @@ one just drawn is selected; `[ ]` or Alt+click pick another) and press
 line's ends, `0 … 100 m`, fill in `100 m`, with an unread 0 taken as 0,
 and a lone label such as `5 km` reads as itself. Typing replaces the
 reading. The real length can be typed (`= 5 m`; units `mm cm m
-km in ft yd mi`, `12'6"`, `12ft 6in`, and arithmetic such as `2*2.5 m`).
+km in ft yd mi`, `12'6"`, `12ft 6in`, and arithmetic such as `2*2.5 m`;
+each number in a sum needs its unit, so `12'6` is refused).
 The unit is free: any other name after the number is a unit of its own
 (`= 4.2 ly`, `= 3 bricks`, `= 2 light years`), and values read as
 multiples of it. A number with no unit (`= 4`) is in `u`, and Enter alone

@@ -132,6 +132,38 @@ fn a_loupe_over_a_tool_switches_tools_in_the_same_layer() {
 }
 
 #[test]
+fn a_loupe_through_enhance_still_locks_the_tool_below() {
+    let names = |s: &Session| s.modes().iter().map(Mode::name).collect::<Vec<_>>();
+    let mut s = session();
+    s.keys("x t e z a"); // a bar being edited, under Enhance and the loupe
+    assert_eq!(names(&s), ["annotate"]);
+    assert_eq!(s.open_layer().unwrap().ops.len(), 1);
+
+    let mut s = session();
+    s.keys("a r l l j j e z x"); // a rect being drawn, likewise
+    assert_eq!(names(&s), ["censor"]);
+    let ops = &s.open_layer().unwrap().ops;
+    assert!(
+        matches!(ops[..], [ref o] if o.data.noun() == "shape"),
+        "{ops:?}"
+    );
+}
+
+#[test]
+fn a_lens_drag_ends_under_the_next_lens() {
+    let mut s = session();
+    s.keys("e");
+    s.button(Button::Left, p(300.0, 200.0), true);
+    s.motion(p(320.0, 210.0));
+    let dragged = lens(&s).lens.rect();
+    s.keys("z"); // the drag ends here
+    s.button(Button::Left, p(320.0, 210.0), false); // the release goes to the loupe
+    s.keys("z");
+    s.motion(p(500.0, 250.0)); // no button held
+    assert_eq!(lens(&s).lens.rect(), dragged);
+}
+
+#[test]
 fn the_loupe_follows_clicks_and_drags() {
     let mut s = session();
     s.keys("z");

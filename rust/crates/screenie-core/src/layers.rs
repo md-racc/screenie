@@ -41,7 +41,7 @@ impl Session {
     /// Reverse one project-history entry. Returns whether it changed
     /// anything. `in_order` is false when Layers reaches past later
     /// selection changes: then the box stays as it is.
-    pub(crate) fn undo_layer_entry(&mut self, entry: ProjectEntry, in_order: bool) -> bool {
+    pub(crate) fn undo_project_entry(&mut self, entry: ProjectEntry, in_order: bool) -> bool {
         let layers = &mut self.project.layers;
         match entry {
             ProjectEntry::Selection(r) => {
@@ -137,7 +137,7 @@ impl Session {
             Intent::Undo => {
                 // The last layer-management action, wherever it is.
                 if let Some(entry) = self.history.pop_layer() {
-                    self.undo_layer_entry(entry, false);
+                    self.undo_project_entry(entry, false);
                 }
                 let ids = self.layer_ids();
                 if ids.is_empty() {

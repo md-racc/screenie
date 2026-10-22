@@ -4,7 +4,8 @@
 //! The censor box starts as a text-height square at the centre of the main
 //! box and is edited with the box grammar. `t` swaps pixelate and bar;
 //! `+`/`-` adjust the current kind's amount (each kind keeps its own); `x`
-//! locks this censor and starts the next where it was.
+//! locks this censor and starts the next where it was; `r` scans the main
+//! box for secrets and opens Redact's review (review.rs).
 
 use crate::anchor_cursor::AnchorCursor;
 use crate::boxes::{self, BoxOutcome, Drag};

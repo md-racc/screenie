@@ -4,7 +4,7 @@
 //! ordered list of operations clipped to the box it was opened in. Layers
 //! and operations have stable IDs: reordering changes position, never
 //! identity. The source capture and layout travel with it in the project
-//! file (milestone 8); undo history and other runtime state never do.
+//! file ([`ProjectFile`]); undo history and other runtime state never do.
 
 use serde::{Deserialize, Serialize};
 
@@ -188,6 +188,24 @@ fn grown(r: LogicalRect, m: f64) -> LogicalRect {
     LogicalRect::new(r.x - m, r.y - m, r.w + 2.0 * m, r.h + 2.0 * m)
 }
 
+/// The box of a line through `points`, `width` wide.
+fn points_bbox(points: &[LogicalPoint], width: f64) -> LogicalRect {
+    if points.is_empty() {
+        return LogicalRect::default();
+    }
+    let xs = points.iter().map(|p| p.x);
+    let ys = points.iter().map(|p| p.y);
+    let (x0, x1) = (
+        xs.clone().fold(f64::INFINITY, f64::min),
+        xs.fold(f64::NEG_INFINITY, f64::max),
+    );
+    let (y0, y1) = (
+        ys.clone().fold(f64::INFINITY, f64::min),
+        ys.fold(f64::NEG_INFINITY, f64::max),
+    );
+    grown(LogicalRect::from_edges(x0, y0, x1, y1), width)
+}
+
 /// What an operation does.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
@@ -207,22 +225,7 @@ impl OpData {
     pub fn bbox(&self) -> LogicalRect {
         match self {
             OpData::Censor(c) => c.rect,
-            OpData::Stroke(s) => {
-                if s.points.is_empty() {
-                    return LogicalRect::default();
-                }
-                let xs = s.points.iter().map(|p| p.x);
-                let ys = s.points.iter().map(|p| p.y);
-                let (x0, x1) = (
-                    xs.clone().fold(f64::INFINITY, f64::min),
-                    xs.fold(f64::NEG_INFINITY, f64::max),
-                );
-                let (y0, y1) = (
-                    ys.clone().fold(f64::INFINITY, f64::min),
-                    ys.fold(f64::NEG_INFINITY, f64::max),
-                );
-                grown(LogicalRect::from_edges(x0, y0, x1, y1), s.width)
-            }
+            OpData::Stroke(s) => points_bbox(&s.points, s.width),
             OpData::Shape(s) => grown(s.rect, s.width),
             OpData::Text(t) => {
                 // Monospace, generously: no font is needed to bound it.
@@ -245,12 +248,7 @@ impl OpData {
                     c.size + 2.0,
                 )
             }
-            OpData::Highlight(h) => OpData::Stroke(StrokeOp {
-                points: h.points.clone(),
-                rgb: h.rgb,
-                width: h.width,
-            })
-            .bbox(),
+            OpData::Highlight(h) => points_bbox(&h.points, h.width),
             OpData::Line(l) => grown(
                 LogicalRect::from_edges(
                     l.a.x.min(l.b.x),
@@ -268,10 +266,9 @@ impl OpData {
     pub fn noun(&self) -> &'static str {
         match self {
             OpData::Censor(_) => "censor",
-            OpData::Stroke(_) => "line",
+            OpData::Stroke(_) => "pen",
             OpData::Shape(_) => "shape",
-            OpData::Line(l) if l.heads == Heads::None => "line",
-            OpData::Line(_) => "arrow",
+            OpData::Line(l) => l.heads_name(),
             OpData::Highlight(_) => "highlight",
             OpData::Text(_) => "text",
             OpData::Callout(_) => "callout",
@@ -335,18 +332,13 @@ impl Layer {
 
     /// The area its ops can touch, within the clip (`None` if nothing).
     pub fn bbox(&self) -> Option<LogicalRect> {
-        let mut it = self.ops.iter().map(|o| o.data.bbox());
-        let first = it.next()?;
-        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.right(), first.bottom());
-        for b in it {
-            x0 = x0.min(b.x);
-            y0 = y0.min(b.y);
-            x1 = x1.max(b.right());
-            y1 = y1.max(b.bottom());
+        if self.ops.is_empty() {
+            return None;
         }
+        let u = crate::layout::bounding(self.ops.iter().map(|o| o.data.bbox()));
         let c = self.clip;
-        let (x0, y0) = (x0.max(c.x), y0.max(c.y));
-        let (x1, y1) = (x1.min(c.right()), y1.min(c.bottom()));
+        let (x0, y0) = (u.x.max(c.x), u.y.max(c.y));
+        let (x1, y1) = (u.right().min(c.right()), u.bottom().min(c.bottom()));
         Some(LogicalRect::new(
             x0,
             y0,
@@ -548,6 +540,16 @@ mod tests {
             width: 3.0,
         });
         assert_eq!(stroke.bbox(), LogicalRect::new(7.0, 7.0, 26.0, 16.0));
+        let OpData::Stroke(st) = &stroke else {
+            unreachable!()
+        };
+        let highlight = OpData::Highlight(HighlightOp {
+            points: st.points.clone(),
+            rgb: st.rgb,
+            width: st.width,
+            alpha: 0.4,
+        });
+        assert_eq!(highlight.bbox(), stroke.bbox());
         let shape = OpData::Shape(ShapeOp {
             kind: ShapeKind::Circle,
             rect: LogicalRect::new(0.0, 0.0, 10.0, 10.0),
@@ -560,10 +562,235 @@ mod tests {
         }
     }
 
+    /// Saved projects exist in this format: if this fails, bump VERSION
+    /// and add a migration rather than editing the literal.
+    const V1: &str = r#"{
+        "format": "screenie-project",
+        "project": {
+            "version": 1,
+            "selection": {"x": 100.0, "y": 170.0, "w": 560.0, "h": 90.0},
+            "layers": [
+                {"id": 1, "clip": {"x": 100.0, "y": 170.0, "w": 560.0, "h": 90.0}, "hidden": false, "ops": [
+                    {"id": 2, "op": "censor", "rect": {"x": 110.0, "y": 180.0, "w": 20.0, "h": 20.0}, "kind": "pixelate", "amount": 10.0},
+                    {"id": 3, "op": "censor", "rect": {"x": 140.0, "y": 180.0, "w": 20.0, "h": 20.0}, "kind": "bar", "amount": 0.5},
+                    {"id": 4, "op": "stroke", "points": [{"x": 120.0, "y": 200.0}, {"x": 130.0, "y": 210.0}], "rgb": [0.9, 0.12, 0.12], "width": 3.0},
+                    {"id": 5, "op": "shape", "kind": "circle", "rect": {"x": 200.0, "y": 180.0, "w": 40.0, "h": 30.0}, "rgb": [1.0, 1.0, 1.0], "width": 2.0},
+                    {"id": 6, "op": "line", "a": {"x": 250.0, "y": 190.0}, "b": {"x": 300.0, "y": 220.0}, "rgb": [0.0, 0.0, 0.0], "width": 3.0, "heads": "end"},
+                    {"id": 7, "op": "line", "a": {"x": 250.0, "y": 230.0}, "b": {"x": 300.0, "y": 240.0}, "rgb": [0.0, 0.0, 0.0], "width": 3.0, "heads": "both"},
+                    {"id": 8, "op": "line", "a": {"x": 310.0, "y": 230.0}, "b": {"x": 350.0, "y": 240.0}, "rgb": [0.0, 0.0, 0.0], "width": 3.0, "heads": "none"},
+                    {"id": 9, "op": "highlight", "points": [{"x": 360.0, "y": 200.0}, {"x": 400.0, "y": 200.0}], "rgb": [0.1, 0.75, 0.25], "width": 15.0, "alpha": 0.4},
+                    {"id": 10, "op": "text", "origin": {"x": 410.0, "y": 180.0}, "text": "two\nlines", "rgb": [1.0, 1.0, 1.0], "size": 18.0, "chip": true},
+                    {"id": 11, "op": "callout", "centre": {"x": 500.0, "y": 200.0}, "n": 3, "rgb": [0.15, 0.45, 1.0], "size": 22.0}
+                ]},
+                {"id": 12, "clip": {"x": 100.0, "y": 170.0, "w": 560.0, "h": 90.0}, "hidden": true, "ops": [
+                    {"id": 13, "op": "filter", "rect": {"x": 100.0, "y": 170.0, "w": 560.0, "h": 90.0}, "kind": "blur", "amount": 4.0, "muted": false},
+                    {"id": 14, "op": "filter", "rect": {"x": 520.0, "y": 180.0, "w": 60.0, "h": 40.0}, "kind": "brightness", "amount": -2.0, "muted": true}
+                ]}
+            ],
+            "next_id": 15,
+            "measure_scale": {"px": 100.0, "real": 2.5, "unit": "cm", "error": 0.01}
+        },
+        "layout": {
+            "monitors": [{"id": 0, "name": "DP-1", "rect": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}, "scale": 1.0}],
+            "windows": [{"id": 7, "rect": {"x": 3.0, "y": 3.0, "w": 955.0, "h": 1074.0}, "monitor": 0, "class": "foot", "title": "~"}],
+            "active": 7,
+            "focused": 0,
+            "bounds": {"x": 0.0, "y": 0.0, "w": 1920.0, "h": 1080.0}
+        }
+    }"#;
+
+    fn v1() -> ProjectFile {
+        use crate::layout::{Layout, Monitor, MonitorId, Window, WindowId};
+        let r = LogicalRect::new;
+        let pt = LogicalPoint::new;
+        let sel = r(100.0, 170.0, 560.0, 90.0);
+        let black = [0.0, 0.0, 0.0];
+        let ops = |data: Vec<OpData>, first: u64| -> Vec<Op> {
+            (first..)
+                .zip(data)
+                .map(|(id, data)| Op { id: OpId(id), data })
+                .collect()
+        };
+        let line = |a, b, heads| {
+            OpData::Line(LineOp {
+                a,
+                b,
+                rgb: black,
+                width: 3.0,
+                heads,
+            })
+        };
+        let marks = ops(
+            vec![
+                OpData::Censor(CensorOp {
+                    rect: r(110.0, 180.0, 20.0, 20.0),
+                    kind: CensorKind::Pixelate,
+                    amount: 10.0,
+                }),
+                OpData::Censor(CensorOp {
+                    rect: r(140.0, 180.0, 20.0, 20.0),
+                    kind: CensorKind::Bar,
+                    amount: 0.5,
+                }),
+                OpData::Stroke(StrokeOp {
+                    points: vec![pt(120.0, 200.0), pt(130.0, 210.0)],
+                    rgb: [0.9, 0.12, 0.12],
+                    width: 3.0,
+                }),
+                OpData::Shape(ShapeOp {
+                    kind: ShapeKind::Circle,
+                    rect: r(200.0, 180.0, 40.0, 30.0),
+                    rgb: [1.0, 1.0, 1.0],
+                    width: 2.0,
+                }),
+                line(pt(250.0, 190.0), pt(300.0, 220.0), Heads::End),
+                line(pt(250.0, 230.0), pt(300.0, 240.0), Heads::Both),
+                line(pt(310.0, 230.0), pt(350.0, 240.0), Heads::None),
+                OpData::Highlight(HighlightOp {
+                    points: vec![pt(360.0, 200.0), pt(400.0, 200.0)],
+                    rgb: [0.1, 0.75, 0.25],
+                    width: 15.0,
+                    alpha: 0.4,
+                }),
+                OpData::Text(TextOp {
+                    origin: pt(410.0, 180.0),
+                    text: "two\nlines".into(),
+                    rgb: [1.0, 1.0, 1.0],
+                    size: 18.0,
+                    chip: true,
+                }),
+                OpData::Callout(CalloutOp {
+                    centre: pt(500.0, 200.0),
+                    n: 3,
+                    rgb: [0.15, 0.45, 1.0],
+                    size: 22.0,
+                }),
+            ],
+            2,
+        );
+        let filters = ops(
+            vec![
+                OpData::Filter(FilterOp {
+                    rect: sel,
+                    kind: FilterKind::Blur,
+                    amount: 4.0,
+                    muted: false,
+                }),
+                OpData::Filter(FilterOp {
+                    rect: r(520.0, 180.0, 60.0, 40.0),
+                    kind: FilterKind::Brightness,
+                    amount: -2.0,
+                    muted: true,
+                }),
+            ],
+            13,
+        );
+        let mut layout = Layout::new(
+            vec![Monitor {
+                id: MonitorId(0),
+                name: "DP-1".into(),
+                rect: r(0.0, 0.0, 1920.0, 1080.0),
+                scale: 1.0,
+            }],
+            vec![Window {
+                id: WindowId(7),
+                rect: r(3.0, 3.0, 955.0, 1074.0),
+                monitor: Some(MonitorId(0)),
+                class: "foot".into(),
+                title: "~".into(),
+            }],
+            MonitorId(0),
+        );
+        layout.active = Some(WindowId(7));
+        let project = Project {
+            version: 1,
+            selection: sel,
+            layers: vec![
+                Layer {
+                    ops: marks,
+                    ..Layer::new(LayerId(1), sel)
+                },
+                Layer {
+                    hidden: true,
+                    ops: filters,
+                    ..Layer::new(LayerId(12), sel)
+                },
+            ],
+            next_id: 15,
+            measure_scale: Some(MeasureScale {
+                px: 100.0,
+                real: 2.5,
+                unit: "cm".into(),
+                error: 0.01,
+            }),
+        };
+        ProjectFile::new(project, layout)
+    }
+
+    #[test]
+    fn a_v1_project_file_still_reads_and_writes_the_same() {
+        let json = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        assert_eq!(ProjectFile::from_json(V1).unwrap(), v1());
+        assert_eq!(json(&v1().to_json()), json(V1));
+    }
+
+    #[test]
+    fn an_older_v1_file_without_the_defaulted_fields_reads() {
+        let old = r#"{"version": 1, "selection": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0},
+            "layers": [{"id": 1, "clip": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}, "ops": [
+                {"id": 2, "op": "filter", "rect": {"x": 0.0, "y": 0.0, "w": 10.0, "h": 10.0}, "kind": "invert", "amount": 1.0}
+            ]}],
+            "next_id": 3}"#;
+        let p = Project::from_json(old).unwrap();
+        assert!(!p.layers[0].hidden);
+        assert!(matches!(p.layers[0].ops[0].data, OpData::Filter(f) if !f.muted));
+        assert_eq!(p.measure_scale, None);
+    }
+
+    #[test]
+    fn a_layer_bounds_its_ops_within_its_clip() {
+        let mut l = Layer::new(LayerId(1), LogicalRect::new(0.0, 0.0, 100.0, 100.0));
+        assert_eq!(l.bbox(), None);
+        for (id, x) in [(2, 10.0), (3, 90.0)] {
+            l.ops.push(Op {
+                id: OpId(id),
+                data: censor(x, CensorKind::Bar),
+            });
+        }
+        // 10..110 across, cut at the clip's right edge.
+        assert_eq!(l.bbox(), Some(LogicalRect::new(10.0, 10.0, 90.0, 20.0)));
+    }
+
     #[test]
     fn layers_describe_their_ops() {
         let p = sample();
         assert_eq!(p.layers[0].describe(), "censor ×2");
         assert_eq!(Layer::new(LayerId(9), p.selection).describe(), "empty");
+
+        let line = |heads| {
+            OpData::Line(LineOp {
+                a: LogicalPoint::new(0.0, 0.0),
+                b: LogicalPoint::new(10.0, 0.0),
+                rgb: [0.0, 0.0, 0.0],
+                width: 3.0,
+                heads,
+            })
+        };
+        let stroke = OpData::Stroke(StrokeOp {
+            points: vec![LogicalPoint::new(0.0, 0.0)],
+            rgb: [0.0, 0.0, 0.0],
+            width: 3.0,
+        });
+        let mut l = Layer::new(LayerId(1), p.selection);
+        for (id, data) in [stroke, line(Heads::None), line(Heads::End)]
+            .into_iter()
+            .enumerate()
+        {
+            l.ops.push(Op {
+                id: OpId(id as u64 + 2),
+                data,
+            });
+        }
+        assert_eq!(l.describe(), "pen, line, arrow");
     }
 }

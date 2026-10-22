@@ -1,7 +1,6 @@
-//! The box grammar, shared by every mode with a box (Select, Censor, and
-//! later Filter and Shape): the modifier grammar on hjkl, the box keys,
-//! drag to draw. What a click means, and what the box is for, belong to
-//! the mode.
+//! The box grammar, shared by every mode with a box (Select, Censor,
+//! Filter and Shape): the modifier grammar on hjkl, the box keys, drag to
+//! draw. What a click means, and what the box is for, belong to the mode.
 
 use crate::anchor_cursor::AnchorCursor;
 use crate::geometry::{Axis, End, LogicalPoint};

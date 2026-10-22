@@ -2316,9 +2316,11 @@ says what was chosen and why. Smaller judgement calls live in
 - **Edition 2024, resolver 3, `unsafe_code = "deny"`** across the
   workspace. Nothing in core needs unsafe; platform code that does will
   opt out per module, visibly.
-- **`screenie-core` depends only on `serde` and `serde_json`.** The
-  durable model and the recall ring need serialization. Nothing else is
-  needed for interaction logic.
+- **`screenie-core` depends only on `serde`, `serde_json` and `regex`.**
+  The durable model and the recall ring need serialization; auto-redact's
+  detectors and measure's scale-bar reading are regexes. Core does no
+  I/O: the host passes in what it needs of the machine (auto-redact's
+  user, home and hostname).
 
 ## Coordinates
 
@@ -2336,9 +2338,11 @@ says what was chosen and why. Smaller judgement calls live in
   on**, not two points. The two are equivalent, but this form makes the
   prototype's crossing rule exact, including its tie-break when the
   cursor lands on the anchor. The anchor and cursor points are derived.
-- **Chords match exactly.** A chord is a normalised key plus Shift, Ctrl
-  and Alt. An upper-case letter is Shift plus its lower-case letter; a
-  symbol (`$`, `{`, `?`, `+`) has its Shift consumed; a named key
+- **Chords match exactly.** A chord is a normalised key plus Shift, Ctrl,
+  Alt and Super. No table binds Super, so any key with Super held does
+  nothing. An upper-case letter is Shift plus its lower-case letter; a
+  symbol or digit (`$`, `{`, `?`, `+`, `1`) has its Shift consumed
+  (layouts like AZERTY need Shift to type digits); a named key
   (`Space`, `Return`, arrows) keeps it. Any chord not in the mode's table
   does nothing, so a meaningless modifier never falls through (README,
   Directions).

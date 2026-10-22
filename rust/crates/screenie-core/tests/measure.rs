@@ -1,5 +1,5 @@
 //! Measure (`m` in Select): primitives, points, calibration, the list and
-//! its totals, output and baking (docs/measure.md).
+//! its totals and output (docs/measure.md).
 
 mod common;
 
@@ -8,6 +8,7 @@ use screenie_core::geometry::{Dir, PixelPoint, PixelRect};
 use screenie_core::keys::Mods;
 use screenie_core::measure::{EdgeFinder, MeasureMode, Prim};
 use screenie_core::session::{Button, FinishedAction, Mode, Outcome, RawEvent, Session};
+use screenie_core::units::{Scale, parse_length};
 
 fn measure(s: &Session) -> &MeasureMode {
     match s.modes().last() {
@@ -19,6 +20,15 @@ fn measure(s: &Session) -> &MeasureMode {
 fn at(s: &Session) -> (i32, i32) {
     let c = measure(s).cursor.at;
     (c.x, c.y)
+}
+
+fn click(s: &mut Session, x: f64, y: f64) {
+    s.button(Button::Left, p(x, y), true);
+    s.button(Button::Left, p(x, y), false);
+}
+
+fn mods(s: &mut Session, mods: Mods) {
+    s.handle(RawEvent::Modifiers { mods }, 0.0);
 }
 
 fn labels(s: &Session) -> Vec<String> {
@@ -55,7 +65,7 @@ fn c_asks_the_selected_lines_length_and_sets_the_scale() {
     assert_eq!(s.mode_name(), "measure"); // pixels until asked
     assert_eq!(labels(&s), ["100.0 px"]);
     s.keys("C"); // the line just drawn is selected
-    assert_eq!(s.mode_name(), "text"); // = 5 m
+    assert_eq!(s.mode_name(), "text");
     assert!(s.status().contains("Enter sets the scale"));
     s.keys("2 space m Return");
     assert_eq!(s.mode_name(), "measure");
@@ -102,6 +112,20 @@ fn circles_and_angles_finish_at_three_points() {
 }
 
 #[test]
+fn an_angle_with_an_arm_moved_onto_its_vertex_reads_no_angle() {
+    let mut s = session();
+    s.keys("m ^ space h h space k k space"); // arm 659,259; vertex 649,259
+    s.keys("o h h Return"); // the first arm onto the vertex
+    assert_eq!(labels(&s), ["no angle"]);
+    s.keys("y");
+    let Some(Outcome::Done(FinishedAction::Measure { text, json })) = s.outcome() else {
+        panic!("{:?}", s.outcome());
+    };
+    assert_eq!(text, "∠1    no angle");
+    assert!(json["measurements"][0].get("degrees").is_none(), "{json}");
+}
+
+#[test]
 fn a_line_ends_at_its_second_point() {
     let mut s = session();
     s.keys("m space l l space");
@@ -140,6 +164,20 @@ fn plus_or_the_wheel_on_an_open_line_bends_it_into_an_arc() {
 }
 
 #[test]
+fn a_cancelled_bend_does_not_carry_to_the_next_line() {
+    let mut s = session();
+    s.keys("m space l l l l plus plus plus plus plus Escape");
+    assert_eq!(measure(&s).bend, 0.0);
+    s.keys("space l l l l l l space");
+    assert_eq!(measure(&s).items[0].kind, Prim::Line);
+    // Nor when u takes the line's only point back.
+    s.keys("space plus plus plus u");
+    assert_eq!(measure(&s).bend, 0.0);
+    s.keys("space l l l l space");
+    assert_eq!(measure(&s).items[1].kind, Prim::Line);
+}
+
+#[test]
 fn with_no_line_open_plus_is_the_step() {
     let mut s = session();
     s.keys("m plus");
@@ -159,20 +197,12 @@ fn shift_keeps_a_line_going_as_a_path() {
     s.keys("space l l <S-space> j j Return");
     assert_eq!(measure(&s).items[1].points.len(), 3);
     // A Shift+click adds a point the same way.
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
-    s.button(Button::Left, p(300.5, 200.5), true);
-    s.button(Button::Left, p(300.5, 200.5), false);
-    s.button(Button::Left, p(320.5, 200.5), true);
-    s.button(Button::Left, p(320.5, 200.5), false);
+    mods(&mut s, Mods::SHIFT);
+    click(&mut s, 300.5, 200.5);
+    click(&mut s, 320.5, 200.5);
     assert_eq!(measure(&s).points.len(), 2, "still open");
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
-    s.button(Button::Left, p(340.5, 210.5), true);
-    s.button(Button::Left, p(340.5, 210.5), false);
+    mods(&mut s, Mods::NONE);
+    click(&mut s, 340.5, 210.5);
     assert_eq!(measure(&s).items[2].points.len(), 3);
 }
 
@@ -180,11 +210,9 @@ fn shift_keeps_a_line_going_as_a_path() {
 fn ctrl_click_locks_to_45_degrees() {
     let mut s = session();
     s.keys("m");
-    s.button(Button::Left, p(300.5, 200.5), true);
-    s.button(Button::Left, p(300.5, 200.5), false);
-    s.handle(RawEvent::Modifiers { mods: Mods::CTRL }, 0.0);
-    s.button(Button::Left, p(400.5, 209.5), true); // nearly flat: flat
-    s.button(Button::Left, p(400.5, 209.5), false);
+    click(&mut s, 300.5, 200.5);
+    mods(&mut s, Mods::CTRL);
+    click(&mut s, 400.5, 209.5); // nearly flat: flat
     assert_eq!(measure(&s).items[0].points[1], PixelPoint::new(400, 200));
 }
 
@@ -425,25 +453,15 @@ fn the_pointer_moves_the_cursor_only_once_it_moves() {
     assert_eq!(at(&s), (1500, 901));
 }
 
-fn click(s: &mut Session, x: f64, y: f64) {
-    s.button(Button::Left, p(x, y), true);
-    s.button(Button::Left, p(x, y), false);
-}
-
 #[test]
 fn a_shift_click_near_a_vertex_lands_on_it_exactly() {
     let mut s = session();
     s.keys(&format!("m {LINE}")); // 659,259 to 759,259
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
+    mods(&mut s, Mods::SHIFT);
     click(&mut s, 768.5, 266.5); // 9px right, 7 down: within reach
     assert_eq!(measure(&s).points, [PixelPoint::new(759, 259)]);
     s.keys("Escape");
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
+    mods(&mut s, Mods::NONE);
     click(&mut s, 768.5, 266.5); // a plain click only snaps within 4px
     assert_eq!(measure(&s).points, [PixelPoint::new(768, 266)]);
 }
@@ -515,9 +533,8 @@ fn space_in_the_loupe_drops_a_point_without_leaving_it() {
         m.items[0].points,
         [PixelPoint::new(659, 259), PixelPoint::new(662, 259)]
     );
-    // With a scale set, the loupe stays up: point after point.
+    // A path through the loupe: point after point.
     let mut s = session();
-    s.set_measure_scale(screenie_core::units::Scale::parse("10px=1m").unwrap());
     s.keys("m z space l l <S-space> j j space");
     assert_eq!(s.mode_name(), "loupe");
     let m = s
@@ -540,7 +557,7 @@ fn holding_ctrl_locks_the_cursor_to_0_45_or_90_degrees_from_the_last_point() {
     s.keys("m");
     click(&mut s, 300.5, 200.5);
     s.motion(p(300.5, 200.5)); // the pointer's first report
-    s.handle(RawEvent::Modifiers { mods: Mods::CTRL }, 0.0);
+    mods(&mut s, Mods::CTRL);
     s.motion(p(400.5, 209.5)); // nearly flat: flat
     assert_eq!(at(&s), (400, 200));
     assert!(s.status().contains("45° lock"), "{}", s.status());
@@ -549,12 +566,7 @@ fn holding_ctrl_locks_the_cursor_to_0_45_or_90_degrees_from_the_last_point() {
     s.motion(p(380.5, 282.5)); // near the diagonal: on it
     let (x, y) = at(&s);
     assert_eq!(x - 300, y - 200, "({x},{y})");
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
+    mods(&mut s, Mods::NONE);
     s.motion(p(380.5, 270.5)); // let go: free again
     assert_eq!(at(&s), (380, 270));
     assert!(!s.status().contains("45° lock"));
@@ -592,29 +604,19 @@ fn c_with_no_line_or_arc_selected_says_how() {
 fn a_shift_click_near_a_line_lands_on_it_and_a_vertex_wins_near_its_ends() {
     let mut s = session();
     s.keys(&format!("m {LINE}")); // 659,259 to 759,259
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
+    mods(&mut s, Mods::SHIFT);
     click(&mut s, 709.5, 267.5); // 8px below its middle
     assert_eq!(measure(&s).points, [PixelPoint::new(709, 259)]);
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
+    mods(&mut s, Mods::NONE);
     s.keys("Escape");
     // Nearer the line than the end, but within reach of the end: the end.
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
+    mods(&mut s, Mods::SHIFT);
     click(&mut s, 752.5, 264.5);
     assert_eq!(measure(&s).points, [PixelPoint::new(759, 259)]);
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
+    mods(&mut s, Mods::NONE);
     s.keys("Escape");
     // Out of reach, nothing; and a path's segments count too.
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0);
+    mods(&mut s, Mods::SHIFT);
     click(&mut s, 709.5, 280.5);
     assert_eq!(measure(&s).points, [PixelPoint::new(709, 280)]);
 }
@@ -651,14 +653,9 @@ fn degrees_of(s: &Session) -> Vec<String> {
 }
 
 fn line(s: &mut Session, a: (f64, f64), b: (f64, f64)) {
-    s.handle(RawEvent::Modifiers { mods: Mods::SHIFT }, 0.0); // onto lines
+    mods(s, Mods::SHIFT); // onto lines
     click(s, a.0, a.1);
-    s.handle(
-        RawEvent::Modifiers {
-            mods: Mods::default(),
-        },
-        0.0,
-    );
+    mods(s, Mods::NONE);
     click(s, b.0, b.1);
 }
 
@@ -808,25 +805,20 @@ fn the_scale_travels_in_the_project_so_edit_last_keeps_it() {
     assert!(!plain.contains("measure_scale"), "{plain}");
 }
 
-fn alt(s: &mut Session, on: bool) {
-    let mods = if on { Mods::ALT } else { Mods::default() };
-    s.handle(RawEvent::Modifiers { mods }, 0.0);
-}
-
 #[test]
 fn alt_click_selects_a_measurement_and_places_nothing() {
     let mut s = session();
     s.keys(&format!("m {LINE}")); // L1: 659,259 to 759,259
     s.keys("space j j j j j j j j j j space"); // L2 down from its end
     assert_eq!(measure(&s).selected, Some(1));
-    alt(&mut s, true);
+    mods(&mut s, Mods::ALT);
     click(&mut s, 700.5, 265.5); // 6px off L1's middle
-    alt(&mut s, false);
+    mods(&mut s, Mods::NONE);
     assert_eq!(measure(&s).selected, Some(0));
     assert!(measure(&s).points.is_empty(), "no point placed");
-    alt(&mut s, true);
+    mods(&mut s, Mods::ALT);
     click(&mut s, 1200.5, 700.5); // nowhere near one
-    alt(&mut s, false);
+    mods(&mut s, Mods::NONE);
     assert_eq!(measure(&s).selected, Some(0), "kept");
 }
 
@@ -834,12 +826,12 @@ fn alt_click_selects_a_measurement_and_places_nothing() {
 fn alt_drag_moves_a_point_and_u_puts_it_back() {
     let mut s = session();
     s.keys(&format!("m {LINE}"));
-    alt(&mut s, true);
+    mods(&mut s, Mods::ALT);
     s.button(Button::Left, p(758.5, 260.5), true); // on L1's end
     s.motion(p(758.5, 260.5));
     s.motion(p(770.5, 280.5));
     s.button(Button::Left, p(770.5, 280.5), false);
-    alt(&mut s, false);
+    mods(&mut s, Mods::NONE);
     assert_eq!(
         measure(&s).items[0].points,
         [PixelPoint::new(659, 259), PixelPoint::new(770, 280)]
@@ -882,6 +874,9 @@ fn editing_the_reference_rescales_to_the_same_real_length() {
     s.keys(&format!("m {LINE} C 1 space m Return")); // 100px is 1 m
     s.keys("o o l l l l l l l l l l l l l l l l l l l l Return"); // its end, +100px
     assert!(s.status().contains("1 m = 200.0 px"), "{}", s.status());
+    // Its error as a new reference that long would have.
+    let fresh = Scale::new(200.0, parse_length("1 m").unwrap(), 2);
+    assert_eq!(measure(&s).scale.unwrap().error, fresh.error);
     s.keys("u");
     assert!(s.status().contains("1 m = 100.0 px"), "{}", s.status());
 }

@@ -68,13 +68,6 @@ impl LogicalRect {
         }
     }
 
-    pub fn size(&self, axis: Axis) -> f64 {
-        match axis {
-            Axis::X => self.w,
-            Axis::Y => self.h,
-        }
-    }
-
     /// Half-open containment: the right and bottom edges are outside.
     pub fn contains(&self, p: LogicalPoint) -> bool {
         self.x <= p.x && p.x < self.right() && self.y <= p.y && p.y < self.bottom()
@@ -114,10 +107,6 @@ pub enum Axis {
     Y,
 }
 
-impl Axis {
-    pub const BOTH: [Axis; 2] = [Axis::X, Axis::Y];
-}
-
 /// One of the four directions `h j k l` mean everywhere.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dir {
@@ -150,15 +139,6 @@ impl Dir {
         match self.axis() {
             Axis::X => (self.sign(), 0.0),
             Axis::Y => (0.0, self.sign()),
-        }
-    }
-
-    pub fn opposite(self) -> Dir {
-        match self {
-            Dir::Left => Dir::Right,
-            Dir::Right => Dir::Left,
-            Dir::Up => Dir::Down,
-            Dir::Down => Dir::Up,
         }
     }
 
@@ -199,6 +179,13 @@ impl PixelPoint {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
+
+    pub fn get(self, axis: Axis) -> i32 {
+        match axis {
+            Axis::X => self.x,
+            Axis::Y => self.y,
+        }
+    }
 }
 
 /// A rectangle of image pixels. `w` and `h` are never negative.
@@ -217,6 +204,14 @@ impl PixelRect {
 
     pub fn is_empty(&self) -> bool {
         self.w < 1 || self.h < 1
+    }
+
+    /// The overlap of two rectangles, empty if they don't meet.
+    pub fn intersect(&self, other: &PixelRect) -> PixelRect {
+        let (x0, y0) = (self.x.max(other.x), self.y.max(other.y));
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        PixelRect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
     }
 }
 
@@ -364,8 +359,8 @@ mod tests {
         );
     }
 
-    /// The prototype's audit b8: at 1.5x the corner pixels are the crop's
-    /// first and last columns, whichever way the edges round.
+    /// At 1.5x the corner pixels are the crop's first and last columns,
+    /// whichever way the edges round.
     #[test]
     fn the_cursor_pixel_is_inside_the_crop_at_1_5x() {
         let m = PixelMap::new(LogicalRect::new(0.0, 0.0, 1000.0, 600.0), 1500, 900);
@@ -385,6 +380,18 @@ mod tests {
             m.to_pixels(LogicalRect::new(100.5, 170.0, 0.6, 90.0))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pixel_rects_intersect() {
+        let a = PixelRect::new(0, 0, 100, 50);
+        assert_eq!(
+            a.intersect(&PixelRect::new(60, 20, 100, 100)),
+            PixelRect::new(60, 20, 40, 30)
+        );
+        let inner = PixelRect::new(10, 10, 5, 5);
+        assert_eq!(a.intersect(&inner), inner);
+        assert!(a.intersect(&PixelRect::new(200, 0, 10, 10)).is_empty());
     }
 
     #[test]

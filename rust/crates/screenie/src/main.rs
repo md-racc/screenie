@@ -992,8 +992,21 @@ static REDACT_RULES: std::sync::OnceLock<screenie_core::redact::Rules> = std::sy
 /// Auto-redact's rules (config), and what it knows of this machine.
 fn redact_rules() -> screenie_core::redact::Rules {
     screenie_core::redact::Rules {
-        env: screenie_core::redact::Env::from_system(),
+        env: redact_env(),
         ..REDACT_RULES.get().cloned().unwrap_or_default()
+    }
+}
+
+/// This user and machine, for the home-path and host detectors.
+fn redact_env() -> screenie_core::redact::Env {
+    let var = |k| std::env::var(k).unwrap_or_default();
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| var("HOSTNAME"));
+    screenie_core::redact::Env {
+        user: var("USER"),
+        home: var("HOME"),
+        hostname,
     }
 }
 

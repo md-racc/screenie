@@ -187,6 +187,7 @@ impl Overlay {
             shift: m.shift,
             ctrl: m.ctrl,
             alt: m.alt,
+            logo: m.logo,
         };
         let mods = self.mods;
         self.push(RawEvent::Modifiers { mods });
